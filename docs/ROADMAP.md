@@ -1,29 +1,41 @@
-# Compatibility and adoption
+# Current scope and planned work
 
-The initial package implements the contract in [SPEC.md](SPEC.md) independently.
-Its validation boundary is a plain Django host and installed distribution.
+The package is currently unreleased at `0.1.0.dev0`. The
+[specification](SPEC.md) describes implemented behavior; the [quick start](quickstart.md)
+and [configuration guide](configuration.md) use that API today.
 
-Adopting it in an existing consumer is a separate change:
+## Supported now
 
-1. Replace consumer compiler imports and configuration subclasses through the
-   public package contracts. Keep host configuration and product integrations in
-   their existing owners.
-2. Preserve historical Python import paths used by immutable migration files as
-   narrow aliases. Check existing migration origin metadata without rewriting it.
-3. Regenerate runtime artifacts through the new compiler and run the consumer's
-   full model, schema, migration, typing and serving checks.
-4. Delete the superseded consumer compiler and stale guidance once every caller
-   has moved. A remaining duplicate implementation means adoption is incomplete.
+- Compose native abstract Django source and extension classes into ordinary
+  concrete model classes, including lazy relations and multi-table inheritance.
+- Select a fixed ordered app list, or use the optional installed-distribution
+  [addon selection](addons.md) helper.
+- Build deterministic model/configuration modules through Django setup, with
+  explicit settings integration, source fingerprints and verified build output.
+- Add model declarations, generated files and retirement policy through the
+  [extension contracts](extensions.md).
+- Use native Django migrations with reusable transition binding, retained
+  disabled-app history, destructive-change guards and import/provider audits.
+- Check composed model types with the optional pinned django-stubs/mypy plugin.
 
-The package does not migrate a live stack, change operator jobs, acquire sources,
-replace marketplace policy or publish releases. Those remain explicit consumer
-and release operations. Supporting another Django series requires running the
-native lifecycle, migration and optional typing matrix for that series first.
+The current verification target is a plain Django project and a separately
+installed wheel. See [dependencies](dependencies.md) for the supported Python and
+Django constraints and [contributing](../CONTRIBUTING.md) for the checks.
 
-## Pending host integration
+## Planned, not part of the current API
 
-The broader host contract remains staged. Settings contribution through
-`configure()` and django-yamlconf, URL and ASGI composition, artifact phases,
-the shared startup lock/reloader protocol and a revised tombstone module
-location require their own implementation and verification. Existing receipt
-and lifecycle behavior remains the supported contract until those changes land.
+- A `configure()` convenience API and settings composition with django-yamlconf.
+- URL configuration and ASGI composition.
+- A managed development loop, shared startup reader/writer locking and reloader
+  coordination.
+- Revised artifact lifecycle phases and a new location for history-only app
+  configurations.
+
+These need separate design, implementation and verification. Use the existing
+[configuration](configuration.md), [extension](extensions.md) and
+[deployment](packaging.md) workflows until their replacements are delivered.
+Future Django-series support also needs a verified lifecycle, migration and
+typing matrix; it is not implied by the current release target.
+
+Changes to a public contract go through the contributor
+[proposal process](proposals/README.md).

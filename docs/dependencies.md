@@ -1,33 +1,60 @@
-# Dependency ownership
+# Dependencies and compatibility
 
-`pyproject.toml` owns supported constraints; `uv.lock` records verified versions.
-Update this table and the manifest together when changing dependencies.
+`pyproject.toml` declares supported constraints; `uv.lock` records the versions
+used by the repository checks. The package is currently unreleased. See
+[installation](packaging.md#install-locally) for local checkout and wheel options.
 
-| Dependency | Owns | Package seam |
+| Installation | Requirements | Purpose |
 | --- | --- | --- |
-| Python >=3.14 | Imports, dataclasses, graphlib, paths and typing | Native standard library types |
-| Django >=6.1.2,<6.2 | Apps, models, ORM, migrations, commands | Composition, emission and transition origin binding |
-| packaging >=26 | Native requirement parsing, marker evaluation and normalized distribution names | Optional `[addons]` installed-distribution app closure |
-| django-stubs + mypy | Django static analysis and type checker internals | Optional composition context and semantic projections |
-| Hatchling >=1.27 | Wheel and sdist formats | Library build backend |
-| pytest / Ruff / build / Twine | Tests, code quality and distribution tooling | Contributor and CI checks |
+| Base | Python `>=3.14`, Django `>=6.1.2,<6.2` | Model composition, generated packages and native migration support |
+| `addons` extra | `packaging>=26` | Select installed reusable apps through distribution metadata |
+| `typing` extra | Pinned django-stubs, django-stubs-ext and mypy forks | Advanced static analysis of composed models |
 
-Django is the only base dependency. Model imports, integration discovery and
-migration authoring stay outside the pre-setup snapshot and serving owners.
-The `addons` extra enables `django_compose.addons.enabled_apps(roots, group=...)`.
-It reads installed distribution entry points and active requirements, uses native
-Django app configs (including `requires_apps`), and returns frozen closure facts.
-The group is required; settings are never read. Installed optional extras do not
-activate apps. Plain apps without group membership have no package-based expansion.
-Typing dependencies are imported only by the explicitly selected mypy plugin.
+Python 3.14 and Django 6.1 are the verified development environment. Support for a
+different Django series needs its own lifecycle, migration and typing validation;
+the current Django constraint does not admit other series.
 
-The typing extra pins verified django-stubs revision
-`423ed850e5f2d7ea9e67f3e0f9e8bee4be215988` (including its `ext` subpackage) and mypy
-revision `ac3de6e4c34b04728e768e07d4842f4309ff6c45`. These preserve native manager,
-field and semantic-analysis hooks required by the plugin. Direct references need
-Git/network access or cached sources. Public index publication requires replacing
-these with verified published versions; local archives remain directly installable.
+## Base installation
 
-Primary extension contracts:
-[Django applications](https://docs.djangoproject.com/en/6.1/ref/applications/) and
-[Django migrations](https://docs.djangoproject.com/en/6.1/topics/migrations/).
+Django is the only base dependency. It continues to own app configuration, model
+construction, the ORM and migration execution. Python's standard library supplies
+source inspection, metadata, graph ordering and file handling. The package owns
+the missing composition and generated-output seams; it does not install source
+apps or their dependencies for a project.
+
+Selected source distributions remain runtime dependencies. Generated model and
+configuration modules import their source classes. Migration files can also
+retain fields, validators and helper imports after an app is disabled; use the
+[migration import audit](migrations.md#disable-delete-or-uninstall) before a
+proposed provider removal.
+
+## Optional addon selection
+
+For installed-distribution app selection, install the extra in the project
+environment:
+
+```sh
+python -m pip install '/path/to/django-compose[addons]'
+```
+
+This enables `django_compose.addons.enabled_apps(roots, group=...)`. The entry-point
+group is explicit, and installing a distribution or an extra does not by itself
+enable a Django app. See [addon selection](addons.md) for standard package metadata
+and native `AppConfig` examples. Projects using a fixed app list do not need this
+extra.
+
+## Advanced typing
+
+The `typing` extra is unnecessary for building or running a project. It is loaded
+only when the project's mypy configuration selects the composition plugin.
+Current verified pins are django-stubs and django-stubs-ext at
+`423ed850e5f2d7ea9e67f3e0f9e8bee4be215988`, and mypy at
+`ac3de6e4c34b04728e768e07d4842f4309ff6c45`. These forks provide native field,
+manager and semantic-analysis hooks used by the plugin.
+
+Installing this extra needs Git access to the direct references in
+`pyproject.toml`, or cached sources. Keep the compatible pins together when
+updating it; ordinary package-index releases require replacing the direct
+references with verified published versions. The [quick start](quickstart.md)
+uses only the base installation. Contributor tooling and checks are documented in
+[CONTRIBUTING.md](../CONTRIBUTING.md).

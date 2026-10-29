@@ -1,132 +1,187 @@
-# Native migration history
+# Migrations
 
-Generated models are replaceable. Native Django migration files are durable
-project history. The default is `<output>/<app>/migrations/`; explicit
-`MIGRATION_MODULES` mappings and `None` are preserved. Track migration modules
-while ignoring surrounding generated output. Removed apps' history also survives
-normal build and clean.
+Django owns migration files, graph ordering, database operations and applied
+history. django-compose builds the concrete models that Django compares with
+that history. Set up the project's settings and launcher with the
+[configuration guide](configuration.md), or try the [quick start](quickstart.md).
 
-Use the project's authored settings through its `manage.py` launcher. Settings
-select verified serving apps for native migration commands; no settings module
-is generated:
+## Daily development
+
+After changing a source model, extension class or selected app, run these from
+the directory containing `manage.py`, using the project's Python environment:
 
 ```sh
+python manage.py compose
 python manage.py makemigrations
+# Review the new migration files before applying them.
 python manage.py migrate
+python manage.py compose --check
 ```
 
-An ordinary compose emits models but never authors history or connects to a
-deployment database. Compose check is read-only. Management commands remain
-thin native subclasses; Django owns filenames, graphs, operations, state,
-execution, routing and the recorder.
+`compose` regenerates models and other declared build output. It does not author
+or apply migrations. `makemigrations` authors native Django history; review its
+operations and data migrations as you would in any Django project. `migrate`
+applies that history to the selected database.
 
-## Reusable authored transitions
+`compose --check` changes no output and checks generated files, model/history
+agreement and pending reusable transitions. It needs authored migrations before
+it can pass on a new project. It does not prove that every deployment database
+has applied its migrations. `check_migrations` runs just the native-history and
+pending-transition comparison.
 
-`COMPOSE_TRANSITION_SOURCE` supplies ordered `{declaring_app, name, app_label, module}`
-entries, either directly or through a dotted callable safe to import before setup.
-When that setting is absent, selected apps contribute default
-`compose_migrations/<label>/<name>.py` transitions. An explicit setting replaces
-that discovery. Snapshot normalizes the chosen declarations once into immutable
-`transition_records`;
-build and `TransitionBinding`'s settings fallback use that same collection.
-Explicit declarations passed to `TransitionBinding` remain supported. The
-module exports native `Migration` and a pure `applies(ProjectState)` guard.
-Native `dependencies`, `run_before`, `replaces` and operation semantics determine
-ordering. A consumer may contribute a transition targeting another installed
-app through that explicit declaration.
+Keep `DJANGO_COMPOSE_MODE` unset for migration commands. The
+[project launcher](configuration.md#managepy) selects composition mode in the
+separate `compose` process; migration commands refuse that mode before settings
+load.
 
-`TransitionBinding` binds each origin to the project's current migration leaves,
-validates the whole plan and writes a source snapshot with frozen edges and
-digest metadata during explicit authoring. Local data functions/custom operations
-remain executable after the declaration module is removed. Materialization is
-idempotent; changed origin content or a modified frozen body is rejected.
-An `applies` guard cannot prove a data operation has already run merely because
-schema state looks final. Complete original chains survive squash declarations
-so partially upgraded databases still execute pending data operations.
+## Generated output and durable history
 
-New history writes `compose_*` metadata. The reader accepts historical
-`angee_*` metadata for adoption without rewriting existing history. Historical
-Python imports remain the consumer's compatibility responsibility until its
-explicit migration. Read-only check and dry-run paths create no packages or
-migrations.
+With the guides' `runtime` output package, the relevant files are:
 
-## Destructive changes and explicit cutoff
+```text
+runtime/
+├── __init__.py                  # generated build record
+├── history.py                   # generated history-only app configurations
+└── catalog/
+    ├── __init__.py
+    ├── apps.py                  # generated app configuration
+    ├── models.py                # generated concrete models
+    └── migrations/              # durable, reviewed project source
+        ├── __init__.py
+        └── 0001_initial.py
+```
 
-`DropGuardAutodetector` extends native detection with data proofs before automatic
-field/model removal. It checks routed databases, preserves shared physical
-tables, accepts only capability-owned retired-row exemptions, and fails when a
-database cannot be inspected. It is used by both native migration commands.
+Regenerate models and configurations through `compose`; edit and track native
+migration files normally. Ordinary generation and cleanup preserve migration
+directories. The generated build record retains history labels between builds;
+it is part of the [deployment artifact](packaging.md), not a file to edit.
 
-`reset_migration_history` is an explicit maintenance command, separate from clean.
-Remove completed transition declarations at the coordinated cutoff before
-resetting their origin metadata; retaining a declaration that would rebind is
-refused and the history is restored.
-It requires a fully applied, model-clean graph and rejects unsafe cross-app or
-database scopes. Recorder changes are transactional; filesystem bytes are restored
-if authoring or recording fails. Consult its `--help` and the command's tests
-before use. It is never invoked by build, check, packaging or cleanup.
+For a repository-root `runtime/` directory, this `.gitignore` recipe ignores
+replaceable files while retaining every migration file, including nested helpers
+and SQL assets:
 
-## Disabled labels and retirement
+```gitignore
+*.py[cod]
+/runtime/**
+!/runtime/**/
+!/runtime/**/migrations/**
+__pycache__/
+```
 
-The receipt's `HISTORY_LABELS` retain disabled apps as history-only configs.
-`effective_states(loader, registry, purge=frozenset())` compares live models for
-active apps and preserves historical models for those tombstones. Membership is
-`HISTORY_LABELS` minus retired labels and the snapshot's selected app labels.
-An enabled app with no models module is still active: deleting its last model
-continues to produce native deletion operations. Ordinary
-`makemigrations`, `migrate`, checks and history maintenance therefore never turn
-an app disable into automatic `DeleteModel` operations.
+Git must be able to traverse the directories for the migration exceptions to
+work. Keep the cache-directory exclusion last. General bytecode file patterns go
+before the history exceptions: Django can load sourceless migration files outside
+cache directories, so those files remain trackable too. After composing and
+authoring history, add it with your source changes:
 
-`retire_history <label>` requires a history-only label, consistent fully applied
-history on every configured database selected by Django routers, and no retained
-migration in another label depending on its nodes. Squash or rebase dependents
-before this coordinated cutoff. Databases outside the command's configured
-aliases cannot be checked. `--purge` authors and applies a final native deletion
-migration on every routed alias first. Failed application retains that migration
-for retry and never records retirement. Retirement updates the receipt through
-the compiler's writer lock; the next compose removes the tombstone. The retired
-migration package can then leave version control.
+```sh
+git add .gitignore runtime/*/migrations/
+```
 
-`check_migrations` performs the native state and pending-transition check.
-Use the separate import audit before removing historical providers:
+Adapt the prefix if `COMPOSE_OUTPUT_DIR` lives elsewhere. Authored
+`MIGRATION_MODULES` mappings take precedence over generated defaults; track those
+packages at their actual locations too. `None` keeps Django's native meaning of
+disabling migrations for that app. A fresh checkout builds the surrounding
+Python package before migration commands or serving.
+
+## Disable, delete or uninstall
+
+These are separate changes:
+
+- **Delete a model from an enabled app:** Django detects the schema deletion,
+  even when the app now has no models module. Automatic destructive changes must
+  pass the data guards described below.
+- **Disable an app:** remove it from the project's selected apps and compose
+  again. Its retained migration history is represented by a history-only app
+  configuration, without loading its old models or lifecycle hooks. Disabling
+  alone does not create `DeleteModel` operations or remove database tables.
+- **Uninstall a distribution:** first disable its apps and check retained Python
+  imports while the distribution and its ownership metadata are still installed.
+  Generated models, app configurations and migration history can still need its
+  source code.
+
+Keep selected source distributions installed at runtime. To audit a proposed
+removal after updating the app selection and composing:
 
 ```sh
 python manage.py check_migrations --imports
 python manage.py check_migrations --imports --removing old-addon historical-fields
 ```
 
-The audit enumerates selected native migration packages, including authored
-`MIGRATION_MODULES`, without relying on loaded migration objects. It parses
-imports at every depth, follows project and transition helper bodies recursively,
-and recognizes literal `import_module`, `import_string` and `__import__` targets.
-Python's native symbol tables distinguish lexical imports, including global and
-nonlocal bindings; conditional imports retain every possible callable binding.
-Native module enumeration also finds sourceless bytecode and extension migrations;
-these sources cannot be audited with AST and block removal as unsupported.
-The command skips native loader diagnostics when the report has unsupported
-entries, so it does not execute opaque sources to audit them.
-Copied transitions retain their original relative import package. Historical
-`apps.get_model()` calls remain migration-state references rather than Python
-provider lookups. The report performs no migration execution or database queries;
-it also reports errors from an offline native loader without losing the source
-report when import or graph loading fails.
+The second command refuses a named distribution that provides an enabled app or
+a retained history dependency. Unsupported or unresolved imports and native
+loader failures also block the removal verdict. The command never uninstalls
+anything. Run the project's own dependency and application checks before changing
+its installation: this audit covers selected apps and retained migration imports,
+not every possible runtime dependency.
 
-Providers are classified as stdlib/built-in/frozen, exact installed-distribution
-file owners through RECORD or PEP 610 metadata, enabled-app sources, or project
-sources. It never guesses a distribution from the top-level package name.
-Namespace portions provide alternatives for namespace availability; removing an
-unrelated contributor does not make a retained child import depend on it. Removing
-all providers of a directly imported namespace is refused.
-Distribution imports are leaves except for transition helpers, whose bodies
-remain part of the audit. Unsupported non-literal dynamic imports and unresolved
-modules are visible and block removal. `--removing` also refuses a distribution
-that provides an enabled app or any retained import; loader failures block that
-proof too. Distribution names use the standard case/punctuation normalization.
-Keep historical field, validator and helper providers until their retained native
-history no longer needs them. The command reports a verdict and never uninstalls
-packages.
+The report reads every selected native migration module, including authored
+migration packages, before relying on loaded migration objects. It follows imports
+inside functions and project or transition helpers, recognizes literal
+`import_module`, `import_string` and `__import__` calls, and uses Python lexical
+bindings rather than merging unrelated aliases. Historical `apps.get_model()`
+calls refer to migration state, not Python distribution names. The audit does not
+apply migration operations or open a database connection for graph loading. It
+can import ordinary migration modules for offline loader diagnostics, so their
+top-level Python may run; the source report remains available if loading fails.
 
-Migration commands require serving mode and reject `DJANGO_COMPOSE_MODE` when
-set. The package launcher enforces this before settings load; command handlers
-also enforce it for native command dispatch. `compose --check` invokes the same
-native-history comparison after app population and remains read-only.
+Distribution providers come from exact RECORD or PEP 610 file ownership.
+Interpreter-owned imports do not block removal. Namespace contributors are
+alternatives for namespace availability; concrete child modules still require
+their exact providers. Distribution dependencies are leaves except for inspected
+transition helpers. This is a static audit: arbitrary reflection or dynamically
+constructed import machinery is not a general Python dependency proof. Recognized
+non-literal dynamic imports and sourceless bytecode or extension migrations are
+reported as unsupported. Loader diagnostics are skipped for unsupported reports
+so opaque migration sources are not executed to inspect them.
+
+## Advanced: reusable transitions
+
+An app can supply native migrations outside its ordinary migrations package for
+binding into a project's history. With no `COMPOSE_TRANSITION_SOURCE` setting,
+selected apps contribute `compose_migrations/<label>/<name>.py` files. An explicit
+setting replaces that discovery. See the [specification](SPEC.md) for declaration
+records and the `TransitionBinding` API.
+
+Each source exports native `Migration` and a pure `applies(ProjectState)` guard.
+The project's snapshot freezes declarations once for build and migration binding.
+During explicit migration authoring, binding copies the source into durable
+history, resolves graph edges and records immutable source/body digests. Copied
+local functions remain executable after the declaration is removed; imported
+helpers still need their providers. A guard that sees a final schema cannot prove
+that a data operation already ran. Native dependencies, replacements and complete
+squash chains retain that execution history.
+
+New bindings use `compose_*` metadata. Existing `angee_origin` and
+`angee_source_sha256` metadata remain readable for historical compatibility;
+there is no need to rewrite old migration files. Check and dry-run paths do not
+create migration packages or files.
+
+## Advanced: destructive changes and history cutoffs
+
+The shared `DropGuardAutodetector` requires relevant rows or columns to be empty
+before automatic field/model removal, on every routed configured database.
+Unavailable databases cannot prove emptiness. Shared physical tables and explicit
+integration-owned retirement exemptions are accounted for. Implement required
+data cutovers as reviewed migrations.
+
+`retire_history <label>` is an explicit cutoff for a history-only app. It requires
+consistent, fully applied history across the configured databases selected by
+Django routers, and no retained migrations in another app depending on the
+retired nodes. Rebase or squash incoming dependencies first. Databases absent
+from the command's settings are outside that proof.
+
+Its optional `--purge` authors and applies a final native deletion migration
+across the same database scope before retirement. A failed application retains
+that migration for retry and does not mark retirement complete. Successful
+retirement updates the build record under the normal writer lock; the next
+compose removes the history-only configuration. Removing the retired migration
+package from version control is a separate coordinated cutoff decision.
+
+`reset_migration_history` replaces an explicitly selected, fully applied,
+model-clean history with fresh initial migrations. It refuses unsafe cross-app
+or multi-database scope, uses transactional recorder updates, and restores files
+if authoring or recording fails. Remove completed transition declarations first;
+a declaration that would rebind is refused. Read the command's `--help` and
+review its scope before use. Neither operation is part of ordinary development,
+build cleanup or deployment.

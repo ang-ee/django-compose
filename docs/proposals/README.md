@@ -1,7 +1,14 @@
-# Proposals
+# Contributor proposals
 
-Use a short numbered proposal for changes to a public invariant or extension
-contract. Name the existing owner, concrete missing behavior, native APIs reused,
-caller migration and obsolete code removed. Resolve material alternatives before
-implementation. Fold accepted behavior into the specification and implementing
-docstrings; proposals explain decisions and are not a second API reference.
+Proposals are for changes to a public invariant or extension contract. Users
+looking for the current API should start with the [documentation index](../README.md)
+and [specification](../SPEC.md).
+
+Use a short numbered document that identifies the existing owner, the missing
+behavior, native APIs to reuse, and the user-facing change. Include caller
+migration, compatibility implications and obsolete code or guidance to remove.
+Resolve material design alternatives before implementation.
+
+Once a proposal is accepted and implemented, update the specification, relevant
+guides, examples and implementing docstrings. Keep the proposal as a decision
+record; it does not override the current API documentation.
