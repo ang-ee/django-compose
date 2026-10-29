@@ -23,12 +23,15 @@ class Closure:
     Entries place dependencies before their dependants. Roots preserve the
     project's authored order; required contains only dependency-selected apps.
     Addons contains only selected members of the requested entry-point group.
+    Dependencies maps selected native app names to their direct dependencies,
+    also native app names, independent of the selected config entry strings.
     """
 
     entries: tuple[str, ...]
     roots: tuple[str, ...]
     required: frozenset[str]
     addons: frozenset[str]
+    dependencies: Mapping[str, tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -183,5 +186,9 @@ def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
     entries = tuple(selected[name][0] for name in ordered)
     app_entries(entries)  # One shared normalizer owns native identity/label validation.
     return Closure(
-        entries, root_names, frozenset(ordered) - root_set, frozenset(ordered).intersection(by_app)
+        entries,
+        root_names,
+        frozenset(ordered) - root_set,
+        frozenset(ordered).intersection(by_app),
+        MappingProxyType(graph),
     )
