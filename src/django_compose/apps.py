@@ -99,4 +99,5 @@ class BuildComposeConfig(AppConfig):
             from django_compose.migrations import TransitionBinding
 
             binding = TransitionBinding(labels=self.plan.labels, declarations=self.plan.transitions)
+            assert self.apps is not None
             binding.check_native_history(self.apps)

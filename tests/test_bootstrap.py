@@ -99,10 +99,22 @@ def test_first_build_check_and_cold_serve(tmp_path: Path) -> None:
     root = host(tmp_path)
     successful(invoke(root, "compose"))
     first = files(root / "runtime")
-    # History checks are exercised by their owner; an empty native history is correctly drifted.
     result = invoke(root, "compose", "--check")
+    assert result.returncode != 0
+    assert "native migration history does not match" in result.stderr
     assert files(root / "runtime") == first
-    assert "Generated" not in result.stderr or "stale" not in result.stderr
+    successful(
+        invoke(
+            root,
+            script=(
+                "import django; django.setup(); from django.core.management import call_command; "
+                "call_command('makemigrations', 'custom_boot', verbosity=0)"
+            ),
+        )
+    )
+    first = files(root / "runtime")
+    successful(invoke(root, "compose", "--check"))
+    assert files(root / "runtime") == first
     successful(
         invoke(
             root,
@@ -227,3 +239,27 @@ def test_native_auth_ready_observes_concrete_model(tmp_path: Path) -> None:
     )
     successful(invoke(root, "compose"))
     successful(invoke(root, script="import django; django.setup()"))
+
+
+def test_rebuild_does_not_import_same_size_old_native_bytecode(tmp_path: Path) -> None:
+    import py_compile
+    import time
+
+    root = host(tmp_path)
+    successful(invoke(root, "compose"))
+    generated = root / "runtime/custom_boot/models.py"
+    current_second = int(time.time())
+    os.utime(generated, (current_second, current_second))
+    py_compile.compile(str(generated), doraise=True)
+    source = root / "bootapp/models.py"
+    source.write_text(source.read_text().replace("max_length=30", "max_length=40"))
+    successful(invoke(root, "compose"))
+    successful(
+        invoke(
+            root,
+            script=(
+                "import django; django.setup(); from django.apps import apps; "
+                "assert apps.get_model('custom_boot', 'Record')._meta.get_field('title').max_length == 40"
+            ),
+        )
+    )

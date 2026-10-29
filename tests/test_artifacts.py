@@ -53,3 +53,36 @@ def test_check_lock_does_not_create_missing_root(tmp_path):
     with receipt_lock(root, write=False):
         pass
     assert not root.exists()
+
+
+def test_atomic_python_replacement_invalidates_native_optimized_caches(tmp_path):
+    root = tmp_path / "runtime"
+    root.mkdir()
+    source = root / "models.py"
+    source.write_text("VALUE = 1\n")
+    cache = root / "__pycache__"
+    cache.mkdir()
+    for name in ("models.cpython-314.pyc", "models.cpython-314.opt-1.pyc"):
+        (cache / name).write_bytes(b"old bytecode")
+    atomic_write(source, b"VALUE = 2\n")
+    assert not list(cache.iterdir())
+
+
+def test_atomic_python_replacement_refuses_cache_directory_symlink(tmp_path):
+    root = tmp_path / "runtime"
+    root.mkdir()
+    (root / "__pycache__").symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(ValueError, match="bytecode directory"):
+        atomic_write(root / "models.py", b"source")
+    assert not (root / "models.py").exists()
+
+
+def test_atomic_history_write_preserves_native_history_cache(tmp_path):
+    root = tmp_path / "migrations"
+    root.mkdir()
+    cache = root / "__pycache__"
+    cache.mkdir()
+    bytecode = cache / "0001.cpython-314.pyc"
+    bytecode.write_bytes(b"native history")
+    atomic_write(root / "0001.py", b"native migration")
+    assert bytecode.read_bytes() == b"native history"
