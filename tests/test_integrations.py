@@ -220,7 +220,7 @@ def test_dynamic_ready_output_refuses_symlink_parent(tmp_path):
     assert not (outside / "dynamic.txt").exists()
 
 
-def test_artifact_roots_reserve_native_and_disabled_history_labels(tmp_path):
+def test_artifact_roots_allow_model_free_apps_and_reserve_disabled_history(tmp_path):
     root = host(tmp_path)
     native = root / "nativeapp"
     native.mkdir()
@@ -237,9 +237,25 @@ def test_artifact_roots_reserve_native_and_disabled_history_labels(tmp_path):
     migrations.mkdir(parents=True)
     (migrations / "__init__.py").write_text("")
     ready_hook(root, 'return {Path("nativeapp/dynamic.txt"): b"generated"}', external_root="nativeapp")
-    result = invoke(root, "compose")
-    assert result.returncode != 0
-    assert "Undeclared artifact root: 'nativeapp'" in result.stderr
+    successful(invoke(root, "compose"))
+    successful(
+        invoke(
+            root,
+            script="""
+import django
+django.setup()
+from django.apps import apps
+from django_compose.serving import artifact_path, verified_receipt
+config = apps.get_app_config("nativeapp")
+assert config.name == "nativeapp"
+assert not list(config.get_models())
+assert "nativeapp" not in verified_receipt().HISTORY_LABELS
+assert "nativeapp" not in verified_receipt().MODEL_LABELS
+assert artifact_path("nativeapp/dynamic.txt").read_bytes() == b"generated"
+""",
+        )
+    )
+    assert not (root / "runtime/nativeapp/models.py").exists()
     integration = root / "bootapp/integration.py"
     integration.write_text(integration.read_text().replace("nativeapp", "archived"))
     settings.write_text(
@@ -259,6 +275,7 @@ def test_artifact_roots_reserve_native_and_disabled_history_labels(tmp_path):
         ("__init__.py", "__init__.py/output.txt", "Unsafe generated path"),
         (".compose.lock", ".compose.lock/output.txt", "Unsafe generated path"),
         ("migrations", "migrations/output.txt", "Undeclared artifact root"),
+        ("custom_boot", "custom_boot/output.txt", "Undeclared artifact root"),
         ("__pycache__", "__pycache__/output.txt", "Undeclared artifact root"),
     ],
 )

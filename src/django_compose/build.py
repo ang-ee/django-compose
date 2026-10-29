@@ -189,10 +189,8 @@ class BuildPlan:
 
     def render_artifacts(self, models_view: ModelsView | Apps, hooks: Iterable[ArtifactHook]) -> None:
         external = set(getattr(settings, "COMPOSE_EXTERNAL_ARTIFACT_ROOTS", ()))
-        reserved = {entry.label for entry in self.snapshot.entries}
-        reserved.update(self._receipt(progress=True).HISTORY_LABELS)
-        if self.previous is not None:
-            reserved.update(self.previous.RETIRED_LABELS)
+        receipt = self._receipt(progress=True)
+        reserved = {*receipt.MODEL_LABELS, *receipt.HISTORY_LABELS, *receipt.RETIRED_LABELS}
         for hook in hooks:
             root = Path(hook.external_root)
             if (
