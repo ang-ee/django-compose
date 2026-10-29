@@ -44,7 +44,8 @@ from mypy_django_plugin.transformers.fields import (
     reparametrize_related_field_type,
 )
 from mypy_django_plugin.transformers.managers import create_new_manager_class_from_from_queryset_method
-from mypy_django_plugin.transformers.models import process_model_class
+from mypy_django_plugin.transformers.manytomany import M2MArguments, M2MThrough, M2MTo
+from mypy_django_plugin.transformers.models import ProcessManyToManyFields, process_model_class
 
 from django_compose.snapshot import Snapshot
 
@@ -325,7 +326,7 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
             for base_instance in bases:
                 ctx.api.add_plugin_dependency(make_trigger(base_instance.type.fullname), target=info.fullname)
             for field in self.django_context.get_model_fields(model):
-                if field.name in info.names:
+                if field.name in info.names or isinstance(field, models.ManyToManyField):
                     continue
                 field_symbol = self.lookup_fully_qualified(helpers.get_class_fullname(type(field)))
                 if field_symbol is None or not isinstance(field_symbol.node, TypeInfo):
@@ -353,7 +354,46 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
                     ctx.api.add_plugin_dependency(make_trigger(related.fullname), target=info.fullname)
                 helpers.add_new_sym_for_info(info, name=field.name, sym_type=field_type)
                 ctx.api.add_plugin_dependency(make_trigger(field_symbol.node.fullname), target=info.fullname)
-            process_model_class(ClassDefContext(info.defn, ctx.reason, ctx.api), self.django_context)
+            model_ctx = ClassDefContext(info.defn, ctx.reason, ctx.api)
+            process_model_class(model_ctx, self.django_context)
+            # Native discovery needs authored assignments; runtime fields instead
+            # supply their resolved facts to the same through/manager builders.
+            many_to_many = ProcessManyToManyFields(model_ctx, self.django_context)
+            for field in model._meta.many_to_many:
+                related_model = self.django_context.get_field_related_model_cls(field)
+                related = self.django_context.lookup_model_typeinfo(api, related_model)
+                if related is None:
+                    raise helpers.IncompleteDefnException(helpers.get_class_fullname(related_model))
+                related_type = Instance(related, [])
+                through_model = field.remote_field.through
+                assert through_model is not None and not isinstance(through_model, str)
+                through = None
+                if not through_model._meta.auto_created:
+                    through_info = self.django_context.lookup_model_typeinfo(api, through_model)
+                    if through_info is None:
+                        raise helpers.IncompleteDefnException(helpers.get_class_fullname(through_model))
+                    through = M2MThrough(arg=None, model=Instance(through_info, []))
+                through_info = many_to_many.create_through_table_class(
+                    field_name=field.name,
+                    model_name=through_model.__name__,
+                    model_fullname=helpers.get_class_fullname(through_model),
+                    m2m_args=M2MArguments(
+                        to=M2MTo(arg=info.defn, model=related_type, self=related == info),
+                        through=through,
+                    ),
+                )
+                assert through_info is not None
+                if through is None:
+                    many_to_many.add_through_table_managers(through_info)
+                helpers.add_new_sym_for_info(
+                    info,
+                    name=field.name,
+                    sym_type=Instance(many_to_many.m2m_field, [related_type, Instance(through_info, [])]),
+                )
+                many_to_many.create_many_related_manager(Instance(info, []))
+                many_to_many.create_many_related_manager(related_type)
+                for dependency in (related, through_info):
+                    ctx.api.add_plugin_dependency(make_trigger(dependency.fullname), target=info.fullname)
             return info
         except helpers.IncompleteDefnException as error:
             if ctx.api.final_iteration:

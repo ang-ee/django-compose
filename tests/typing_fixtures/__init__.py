@@ -229,9 +229,16 @@ class Rows(Generic[T]):
     def __get__(self, instance: models.Model, owner: type[models.Model]) -> models.Manager[T]: ...
     def __get__(self, instance: models.Model | None, owner: type[models.Model]) -> models.Manager[T]:
         raise NotImplementedError
+class AnchorManager(models.Manager[T]):
+    def anchored(self) -> str:
+        return "anchored"
 class Anchor(models.Model):
     name = models.CharField(max_length=40)
     rows: Rows[models.Model] = Rows()
+    objects = AnchorManager()
+class Membership(models.Model):
+    row = models.ForeignKey("modelapp.RuntimeRow", on_delete=models.CASCADE)
+    anchor = models.ForeignKey("modelapp.Anchor", on_delete=models.CASCADE)
 class RowBase(models.Model):
     number = models.IntegerField()
     class Meta:
@@ -252,6 +259,9 @@ def install():
         "label": models.CharField(max_length=50),
         "note": models.TextField(null=True),
         "anchor": models.ForeignKey(declarations.Anchor, on_delete=models.CASCADE, related_name="records"),
+        "anchors": models.ManyToManyField(declarations.Anchor, related_name="m2m_rows"),
+        "members": models.ManyToManyField(declarations.Anchor,
+            through=declarations.Membership, related_name="member_rows"),
         "objects": declarations.RowManager(),
     }))
 """
@@ -283,6 +293,7 @@ RUNTIME_CONSUMER = """
 from typing import assert_type
 from django.db.models import QuerySet
 from modelapp.models import Anchor, RuntimeRow
+from modelapp.models import Membership
 
 def consume(row: RuntimeRow, anchor: Anchor) -> None:
     assert_type(row.label, str)
@@ -294,8 +305,32 @@ def consume(row: RuntimeRow, anchor: Anchor) -> None:
     assert_type(RuntimeRow.objects.get(), RuntimeRow)
     assert_type(Anchor.rows.get(), RuntimeRow)
     assert_type(anchor.records.get(), RuntimeRow)
+    assert_type(row.anchors.get(), Anchor)
+    assert_type(row.anchors.anchored(), str)
+    assert_type(row.members.get(), Anchor)
+    assert_type(row.members.anchored(), str)
+    assert_type(anchor.m2m_rows.get(), RuntimeRow)
+    assert_type(anchor.m2m_rows.selected(), str)
+    assert_type(anchor.member_rows.get(), RuntimeRow)
+    assert_type(anchor.member_rows.selected(), str)
+    assert_type(RuntimeRow.anchors.through.objects.get().runtimerow, RuntimeRow)
+    assert_type(RuntimeRow.anchors.through.objects.get().anchor, Anchor)
+    assert_type(RuntimeRow.members.through.objects.get().row, RuntimeRow)
+    assert_type(RuntimeRow.members.through.objects.get(), Membership)
+    row.anchors.add(anchor)
+    row.members.add(anchor)
+    anchor.m2m_rows.add(row)
+    anchor.member_rows.add(row)
     assert_type(RuntimeRow.objects.all(), QuerySet[RuntimeRow, RuntimeRow])
     row.label = "text"
     row.note = None
     row.anchor = anchor
+"""
+
+RUNTIME_M2M_NEGATIVE = """
+def invalid_relations(row: RuntimeRow, anchor: Anchor) -> None:
+    row.anchors.add(row)
+    row.members.add(row)
+    anchor.m2m_rows.add(anchor)
+    anchor.member_rows.add(anchor)
 """

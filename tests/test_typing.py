@@ -219,7 +219,13 @@ for previous in (None, "check"):
 
 @pytest.mark.parametrize("composed", [False, True])
 def test_runtime_model_projection_with_independent_descriptor_plugin(tmp_path, composed):
-    from typing_fixtures import RUNTIME_ADAPTER, RUNTIME_CONSUMER, RUNTIME_FACTORY, RUNTIME_MODELS
+    from typing_fixtures import (
+        RUNTIME_ADAPTER,
+        RUNTIME_CONSUMER,
+        RUNTIME_FACTORY,
+        RUNTIME_M2M_NEGATIVE,
+        RUNTIME_MODELS,
+    )
 
     config, env = host(tmp_path)
     models_source = RUNTIME_MODELS
@@ -246,6 +252,7 @@ def test_runtime_model_projection_with_independent_descriptor_plugin(tmp_path, c
             )
             .replace('"__module__": declarations.__name__', '"__module__": anchor.__module__')
             .replace("models.ForeignKey(declarations.Anchor,", "models.ForeignKey(anchor,")
+            .replace("models.ManyToManyField(declarations.Anchor,", "models.ManyToManyField(anchor,")
         )
         consumer_source = consumer_source.replace(
             "from modelapp.models import Anchor, RuntimeRow",
@@ -273,6 +280,12 @@ def test_runtime_model_projection_with_independent_descriptor_plugin(tmp_path, c
     for _ in range(2):
         result = check(config, env, source)
         assert result.returncode == 0, result.stdout + result.stderr
+    source.write_text(consumer_source + RUNTIME_M2M_NEGATIVE)
+    invalid = check(config, env, source)
+    assert invalid.returncode == 1, invalid.stdout + invalid.stderr
+    assert invalid.stdout.count("[arg-type]") == 4, invalid.stdout + invalid.stderr
+    assert invalid.stdout.count(": error:") == 4, invalid.stdout + invalid.stderr
+    source.write_text(consumer_source)
     factory.write_text(
         factory_source.replace('"label": models.CharField(max_length=50)', '"label": models.IntegerField()')
     )
@@ -295,6 +308,14 @@ def test_runtime_model_projection_with_independent_descriptor_plugin(tmp_path, c
     source.write_text(consumer_source)
     restored = check(config, env, source)
     assert restored.returncode == 0, restored.stdout + restored.stderr
+    factory.write_text(
+        "\n".join(line for line in factory_source.splitlines() if '"anchors":' not in line) + "\n"
+    )
+    removed_relation = check(config, env, source)
+    assert removed_relation.returncode == 1, removed_relation.stdout + removed_relation.stderr
+    assert 'has no attribute "anchors"' in removed_relation.stdout, removed_relation.stdout
+    assert 'has no attribute "m2m_rows"' in removed_relation.stdout, removed_relation.stdout
+    factory.write_text(factory_source)
     config.write_text(config.read_text().replace(str(tmp_path / "cache"), "/dev/null"))
     result = check(config, env, source)
     assert result.returncode == 0, result.stdout + result.stderr
