@@ -18,6 +18,7 @@ from django.conf import global_settings
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.module_loading import import_string
 
+from django_compose.autoreload import report_inputs
 from django_compose.sources import SourceResolver
 
 COMPILER = "django-compose:1"
@@ -198,7 +199,9 @@ def transition_declarations(source: Any) -> tuple[Mapping[str, str], ...]:
 def _default_transitions(entries: tuple[Entry, ...]) -> tuple[Mapping[str, str], ...]:
     records = []
     for entry in entries:
-        for path in sorted((Path(entry.path) / "compose_migrations").glob("*/*.py")):
+        directory = Path(entry.path) / "compose_migrations"
+        report_inputs(globs=[(directory, "*/*.py")])
+        for path in sorted(directory.glob("*/*.py")):
             if path.name == "__init__.py" or not path.is_file():
                 continue
             label = path.parent.name
@@ -221,6 +224,8 @@ def _fingerprints(
     result = []
     for declaration in records:
         location = resolver.resolve(declaration["module"])
+        if location.path is not None:
+            report_inputs(files=[location.path])
         if location.path is None or not location.path.is_file():
             raise ImproperlyConfigured(f"Cannot fingerprint module {declaration['module']!r}")
         result.append(
@@ -335,6 +340,7 @@ def snapshot(
     files: dict[str, str] = {}
     for entry in normalized:
         root = Path(entry.path)
+        report_inputs(globs=[(root, "**/*.py"), *((root, pattern) for pattern in globs)])
         paths = {
             path
             for path in root.rglob("*.py")
@@ -358,6 +364,8 @@ def snapshot(
                 modules[f"config:{owner.__module__}"] = owner.__module__
     for key, module in sorted(modules.items()):
         location = resolver.resolve(module)
+        if location.path is not None:
+            report_inputs(files=[location.path])
         if location.kind in {"builtin", "frozen"}:
             # The interpreter version owns implementations without a source file.
             data = repr(
