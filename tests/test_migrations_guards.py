@@ -456,3 +456,17 @@ for alias in ("default", "other"):
     values = apps.get_model("alpha", "Record")._base_manager.using(alias).values_list("new", flat=True)
     assert list(values) == [alias]
 """)
+
+
+def test_reset_refuses_rebinding_retained_completed_transition(host):
+    _, run = host
+    run("""
+owner().materialize(apps)
+call_command("migrate", interactive=False, verbosity=0)
+before = files()
+from django.db.migrations.recorder import MigrationRecorder
+records = set(MigrationRecorder(connection).applied_migrations())
+expect(RuntimeError, "false guard", lambda: reset_migration_history(("alpha",)))
+assert files() == before
+assert records == set(MigrationRecorder(connection).applied_migrations())
+""")

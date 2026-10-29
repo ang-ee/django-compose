@@ -152,3 +152,85 @@ assert list(model._base_manager.values_list("old", flat=True)) == ["retained"]
 assert ("alpha", "0001_initial") in loader.applied_migrations
 """
     )
+
+
+def test_reset_disabled_history_refuses_secondary_database_scope(host):
+    _, run = host
+    run(
+        DISABLE
+        + """
+from django.db import connections
+connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
+for alias in connections:
+    executor = MigrationExecutor(connections[alias])
+    executor.migrate(executor.loader.graph.leaf_nodes())
+before = files()
+expect(RuntimeError, "also routed", lambda: reset_migration_history(("alpha",)))
+assert files() == before
+"""
+    )
+
+
+def test_purge_secondary_failure_retains_native_migration_for_retry(host):
+    _, run = host
+    run(
+        DISABLE
+        + """
+from django.db import connections
+connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
+for alias in connections:
+    executor = MigrationExecutor(connections[alias])
+    executor.migrate(executor.loader.graph.leaf_nodes())
+native_migrate = MigrationExecutor.migrate
+def fail_secondary(executor, *args, **kwargs):
+    if executor.connection.alias == "other":
+        raise RuntimeError("secondary unavailable")
+    return native_migrate(executor, *args, **kwargs)
+with patch.object(MigrationExecutor, "migrate", fail_secondary):
+    expect(RuntimeError, "secondary unavailable", lambda: retire_history("alpha", purge=True))
+assert not updated.called
+assert len(list(Path("history/alpha").glob("*compose_purge.py"))) == 1
+retire_history("alpha", purge=True)
+assert updated.called
+assert len(list(Path("history/alpha").glob("*compose_purge.py"))) == 1
+for alias in connections:
+    assert "alpha_record" not in connections[alias].introspection.table_names()
+"""
+    )
+
+
+def test_retirement_respects_model_specific_router_exclusions(host):
+    _, run = host
+    run(
+        DISABLE
+        + """
+from django.db import connections, router
+connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
+executor = MigrationExecutor(connection)
+executor.migrate(executor.loader.graph.leaf_nodes())
+class ModelRouter:
+    def allow_migrate(self, db, app_label, model_name=None, **hints):
+        if db == "other" and app_label == "alpha" and model_name:
+            return False
+        return None
+with patch.object(router, "routers", [ModelRouter()]):
+    retire_history("alpha")
+assert updated.called
+assert not Path("other.sqlite3").exists()
+"""
+    )
+
+
+def test_unavailable_routed_database_never_authorizes_retirement(host):
+    _, run = host
+    run(
+        DISABLE
+        + """
+from django.db import connections, DatabaseError
+connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "missing/db.sqlite3"}
+executor = MigrationExecutor(connection)
+executor.migrate(executor.loader.graph.leaf_nodes())
+expect(DatabaseError, "unable to open", lambda: retire_history("alpha"))
+assert not updated.called
+"""
+    )

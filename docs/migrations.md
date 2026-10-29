@@ -50,6 +50,9 @@ tables, accepts only capability-owned retired-row exemptions, and fails when a
 database cannot be inspected. It is used by both native migration commands.
 
 `reset_migration_history` is an explicit maintenance command, separate from clean.
+Remove completed transition declarations at the coordinated cutoff before
+resetting their origin metadata; retaining a declaration that would rebind is
+refused and the history is restored.
 It requires a fully applied, model-clean graph and rejects unsafe cross-app or
 database scopes. Recorder changes are transactional; filesystem bytes are restored
 if authoring or recording fails. Consult its `--help` and the command's tests

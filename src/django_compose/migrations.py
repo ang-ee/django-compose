@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib
+import importlib.util
 import os
 import sys
 import tempfile
@@ -268,8 +269,6 @@ class TransitionBinding:
             if not name.isidentifier() or not name.islower() or name.startswith("_"):
                 raise RuntimeError(f"{origin}: name must be a lower-case Python identifier")
             module_name = declaration["module"]
-            if not module_name.startswith(declaring_app + "."):
-                module_name = declaring_app + "." + module_name
             conventional = declaring_app + ".migrations"
             if module_name == conventional or module_name.startswith(conventional + "."):
                 raise RuntimeError(f"{origin}: source must live outside the conventional migrations package")
@@ -400,10 +399,10 @@ class TransitionBinding:
             raise RuntimeError("pending authored runtime migration " + ", ".join(p.origin for p in pending))
 
     def check_native_history(self, apps: Apps) -> None:
-        """Require model-clean composed history for an offline release build.
+        """Require model-clean history and bound transitions without database access.
 
-        Disabled native migration mappings remain authoritative. Ordinary builds
-        and checks deliberately do not call this release-only validation.
+        Compose check calls this after population. Disabled native migration
+        mappings remain authoritative, and tombstones retain historical state.
         """
         self.check()
         enabled = {label for label in self.labels if MigrationLoader.migrations_module(label)[0] is not None}
@@ -663,12 +662,9 @@ def reset_migration_history(
     connection = connections[database]
     if not connection.features.supports_transactions:
         raise RuntimeError("history reset requires transactional recorder support")
-    for alias in sorted(connections):
-        if alias != database and any(
-            router.allow_migrate_model(alias, model)
-            for label in labels
-            for model in global_apps.get_app_config(label).get_models()
-        ):
+    offline = MigrationLoader(None, ignore_no_migrations=True)
+    for alias in _history_aliases(offline, set(labels)):
+        if alias != database:
             raise RuntimeError(
                 f"selected history is also routed to database {alias!r}; coordinate its cutoff first"
             )
@@ -677,11 +673,7 @@ def reset_migration_history(
     loader.check_consistent_history(connection)
     if executor.migration_plan(loader.graph.leaf_nodes()):
         raise RuntimeError("history reset requires a fully applied migration graph")
-    for key in loader.graph.nodes:
-        if key[0] not in labels and any(parent[0] in labels for parent in loader.graph.forwards_plan(key)):
-            raise RuntimeError(
-                f"history reset has cross-app dependent {key!r}; include its app in the selected scope"
-            )
+    _check_dependents(loader, set(labels))
     before, after = effective_states(loader, global_apps)
     if MigrationAutodetector(before, after).changes(
         graph=loader.graph, trim_to_apps=set(labels), convert_apps=set(labels)
@@ -713,6 +705,9 @@ def reset_migration_history(
                 writer = MigrationWriter(migration, include_header=False)
                 _atomic(Path(writer.path), writer.as_string().encode(), exclusive=True)
         _forget_history(labels)
+        TransitionBinding(labels=(config.label for config in global_apps.get_app_configs())).check(
+            app_labels=labels
+        )
         fresh = MigrationExecutor(connection).loader
         nodes = {key for key in fresh.graph.nodes if key[0] in labels}
         recorder = MigrationRecorder(connection)
@@ -759,17 +754,18 @@ def historical_imports(output_dir: Path) -> tuple[HistoricalImport, ...]:
     for path in sorted(Path(output_dir).glob("*/migrations/*.py")):
         package: str | None = None
         tree = ast.parse(path.read_text(), filename=str(path))
-        for node in tree.body:
+        for statement in tree.body:
             if (
-                isinstance(node, ast.Assign)
+                isinstance(statement, ast.Assign)
                 and any(
-                    isinstance(target, ast.Name) and target.id == "__package__" for target in node.targets
+                    isinstance(target, ast.Name) and target.id == "__package__"
+                    for target in statement.targets
                 )
-                and isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, str)
+                and isinstance(statement.value, ast.Constant)
+                and isinstance(statement.value.value, str)
             ):
-                package = node.value.value
-        modules = set()
+                package = statement.value.value
+        modules: set[str] = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 modules.update(alias.name for alias in node.names)
@@ -791,11 +787,21 @@ def historical_imports(output_dir: Path) -> tuple[HistoricalImport, ...]:
 def _history_aliases(loader: MigrationLoader, labels: set[str]) -> tuple[str, ...]:
     historical = loader.project_state().apps
     models = [model for model in historical.get_models() if model._meta.app_label in labels]
+    if not models:
+        # A previously authored purge may already be the graph leaf on retry.
+        # Its predecessor state still owns model-specific routing facts.
+        for leaf in loader.graph.leaf_nodes():
+            if leaf[0] in labels:
+                prior = loader.project_state(nodes=[leaf], at_end=False).apps
+                models.extend(model for model in prior.get_models() if model._meta.app_label in labels)
     return tuple(
         alias
         for alias in sorted(connections)
-        if any(router.allow_migrate_model(alias, model) for model in models)
-        or any(router.allow_migrate(alias, label) for label in labels)
+        if (
+            any(router.allow_migrate_model(alias, model) for model in models)
+            if models
+            else any(router.allow_migrate(alias, label) for label in labels)
+        )
     )
 
 
@@ -803,7 +809,8 @@ def _check_dependents(loader: MigrationLoader, labels: set[str]) -> None:
     for key in sorted(loader.graph.nodes):
         if key[0] not in labels and any(node[0] in labels for node in loader.graph.forwards_plan(key)):
             raise RuntimeError(
-                f"retained migration {key!r} depends on retiring history; squash or rebase dependents first"
+                f"cross-app dependent retained migration {key!r} depends on retiring history; "
+                "include its app in the cutoff scope, or squash or rebase dependents first"
             )
 
 
