@@ -115,7 +115,6 @@ def test_artifact_accessor_checks_pending_ownership_hash_and_symlinks(tmp_path, 
         "settings",
         SimpleNamespace(
             COMPOSE_EXTERNAL_ARTIFACT_ROOTS=("capability",),
-            COMPOSE_OWNED_ARTIFACT_PATHS=("capability/models.txt",),
         ),
     )
 
@@ -129,9 +128,11 @@ def test_artifact_accessor_checks_pending_ownership_hash_and_symlinks(tmp_path, 
     serving._clear_build(other_cleanup)
     target = serving.artifact_path("capability/models.txt")
     assert target.read_bytes() == b"models"
-    for invalid in ("../escape", "capability/undeclared.txt", str(target)):
+    for invalid in ("../escape", "capability", str(target)):
         with pytest.raises(ImproperlyConfigured, match="Undeclared"):
             serving.artifact_path(invalid)
+    with pytest.raises(ImproperlyConfigured, match="missing or altered"):
+        serving.artifact_path("capability/unowned.txt")
     target.write_bytes(b"altered")
     with pytest.raises(ImproperlyConfigured, match="altered"):
         serving.artifact_path("capability/models.txt")

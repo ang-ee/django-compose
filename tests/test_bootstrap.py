@@ -53,7 +53,6 @@ COMPOSE_OUTPUT_DIR = Path(__file__).parent / "runtime"
 COMPOSE_OUTPUT_MODULE = "runtime"
 COMPOSE_INTEGRATIONS = ("bootapp.integration.Capability",)
 COMPOSE_EXTERNAL_ARTIFACT_ROOTS = ("capability",)
-COMPOSE_OWNED_ARTIFACT_PATHS = ("capability/ready.txt",)
 entries = app_entries(("bootapp.apps.NativeConfig",))
 COMPOSE_SNAPSHOT = snapshot(entries, integration_paths=COMPOSE_INTEGRATIONS, namespace=globals())
 receipt = read_receipt(COMPOSE_OUTPUT_DIR)

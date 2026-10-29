@@ -371,14 +371,12 @@ def artifact_path(relative: Path | str) -> Path:
     from django.conf import settings
 
     path = Path(relative)
-    declared = {Path(value) for value in getattr(settings, "COMPOSE_OWNED_ARTIFACT_PATHS", ())}
     roots = set(getattr(settings, "COMPOSE_EXTERNAL_ARTIFACT_ROOTS", ()))
     if (
         path.is_absolute()
-        or not path.parts
+        or len(path.parts) < 2
         or ".." in path.parts
         or "migrations" in path.parts
-        or path not in declared
         or path.parts[0] not in roots
     ):
         raise ImproperlyConfigured(f"Undeclared artifact: {relative}")

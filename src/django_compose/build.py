@@ -189,29 +189,34 @@ class BuildPlan:
 
     def render_artifacts(self, models_view: ModelsView | Apps, hooks: Iterable[ArtifactHook]) -> None:
         external = set(getattr(settings, "COMPOSE_EXTERNAL_ARTIFACT_ROOTS", ()))
-        explicit = {Path(p) for p in getattr(settings, "COMPOSE_OWNED_ARTIFACT_PATHS", ())}
+        reserved = {entry.label for entry in self.snapshot.entries}
+        reserved.update(self._receipt(progress=True).HISTORY_LABELS)
+        if self.previous is not None:
+            reserved.update(self.previous.RETIRED_LABELS)
         for hook in hooks:
             root = Path(hook.external_root)
             if (
                 root.is_absolute()
                 or len(root.parts) != 1
-                or root.name in {*self.labels, "migrations", "__pycache__", ".."}
+                or root.name in {*reserved, "migrations", "__pycache__", ".."}
                 or root.as_posix() not in external
             ):
                 raise ImproperlyConfigured(f"Undeclared artifact root: {hook.external_root!r}")
-            for path, content in sorted(hook.render(self.composition, models_view).items()):
+            rendered = hook.render(self.composition, models_view)
+            GeneratedTree.validate_artifacts(self.output_dir, rendered)
+            for path, content in sorted(rendered.items()):
                 if (
                     path in self.sources
-                    or not path.parts
+                    or len(path.parts) < 2
                     or path.parts[0] != root.as_posix()
                     or "migrations" in path.parts
-                    or path not in explicit
                 ):
                     raise ImproperlyConfigured(f"Competing or undeclared artifact: {path}")
                 if not isinstance(content, bytes):
                     raise ImproperlyConfigured(f"ArtifactHook must render bytes: {path}")
                 self.sources[path] = content
         tree = GeneratedTree(self.output_dir, self.sources)
+        tree._validate()
         if self.mode == "check":
             if any(
                 not (self.output_dir / path).is_file()
@@ -220,7 +225,6 @@ class BuildPlan:
             ):
                 raise ImproperlyConfigured("Generated artifacts are stale; run compose")
         else:
-            tree._validate()
             current = read_receipt(self.output_dir)
             provisional = dict(current.OWNED_FILES) if current else {}
             provisional.update(tree.hashes())
