@@ -249,8 +249,8 @@ def test_runtime_model_projection_with_independent_descriptor_plugin(tmp_path, c
         RUNTIME_ADAPTER,
         RUNTIME_CONSUMER,
         RUNTIME_FACTORY,
-        RUNTIME_M2M_NEGATIVE,
         RUNTIME_MODELS,
+        RUNTIME_RELATION_NEGATIVE,
     )
 
     models_source = RUNTIME_MODELS
@@ -281,8 +281,20 @@ def test_runtime_model_projection_with_independent_descriptor_plugin(tmp_path, c
         )
         consumer_source = consumer_source.replace(
             "from modelapp.models import Anchor, RuntimeRow",
-            "from modelapp.models import Anchor\nfrom typed_runtime.modelapp.models import RuntimeRow",
+            "from modelapp.models import Anchor\n"
+            "from typed_runtime.modelapp.models import Anchor as ConcreteAnchor, RuntimeRow",
         )
+        for expression in (
+            "row.anchor",
+            "row.optional_anchor",
+            "row.inherited_anchor",
+            "Membership.objects.get().anchor",
+            "RuntimeRow.anchors.through.objects.get().anchor",
+            "RuntimeRow.inherited_anchors.through.objects.get().anchor",
+        ):
+            consumer_source = consumer_source.replace(
+                f"assert_type({expression}, Anchor", f"assert_type({expression}, ConcreteAnchor"
+            )
     config, env = runtime_host(tmp_path, models_source, factory_source)
     factory = tmp_path / "modelapp/factory.py"
     (tmp_path / "adapter.py").write_text(adapter_source)
@@ -296,11 +308,12 @@ def test_runtime_model_projection_with_independent_descriptor_plugin(tmp_path, c
     for _ in range(2):
         result = check(config, env, source)
         assert result.returncode == 0, result.stdout + result.stderr
-    source.write_text(consumer_source + RUNTIME_M2M_NEGATIVE)
+    source.write_text(consumer_source + RUNTIME_RELATION_NEGATIVE)
     invalid = check(config, env, source)
     assert invalid.returncode == 1, invalid.stdout + invalid.stderr
     assert invalid.stdout.count("[arg-type]") == 4, invalid.stdout + invalid.stderr
-    assert invalid.stdout.count(": error:") == 4, invalid.stdout + invalid.stderr
+    assert invalid.stdout.count("[assignment]") == 2, invalid.stdout + invalid.stderr
+    assert invalid.stdout.count(": error:") == 6, invalid.stdout + invalid.stderr
     source.write_text(consumer_source)
     factory.write_text(
         factory_source.replace('"label": models.CharField(max_length=50)', '"label": models.IntegerField()')
@@ -374,3 +387,47 @@ def test_runtime_field_requires_native_static_ancestry(tmp_path):
     for _ in range(2):
         resolved = check(config, env, source, tmp_path / "modelapp/models.py")
         assert resolved.returncode == 0, resolved.stdout + resolved.stderr
+
+
+def test_runtime_model_preserves_inherited_native_field_types(tmp_path):
+    from typing_fixtures import RUNTIME_FACTORY, RUNTIME_MODELS
+
+    models_source = RUNTIME_MODELS.replace(
+        "class RowBase(models.Model):",
+        "import django_stubs_ext\ndjango_stubs_ext.monkeypatch()\n"
+        "class ValueField[T](models.Field[T, T]):\n"
+        "    def __init__(self, value_type: type[T]) -> None:\n        super().__init__()\n"
+        "class RowBase(models.Model):\n    value = ValueField(str)\n"
+        "    reference: models.ForeignKey[models.Model, models.Model]\n",
+    )
+    config, env = runtime_host(
+        tmp_path,
+        models_source,
+        RUNTIME_FACTORY.replace(
+            '        "label":',
+            '        "reference": models.ForeignKey(declarations.Anchor,\n'
+            '            on_delete=models.CASCADE, related_name="+"),\n        "label":',
+        )
+        + '\n    setattr(declarations, "RuntimeOverride", type("RuntimeOverride",\n'
+        "        (declarations.RowBase,), {\n"
+        '        "__module__": declarations.__name__,\n'
+        '        "Meta": type("Meta", (), {"app_label": "modelapp"}),\n'
+        '        "value": models.IntegerField(),\n    }))\n',
+    )
+    source = tmp_path / "consumer.py"
+    source.write_text(
+        "from typing import assert_type\n"
+        "from modelapp.models import RowBase, RuntimeRow, RuntimeOverride, Anchor\n"
+        "def consume(base: RowBase, row: RuntimeRow, override: RuntimeOverride) -> None:\n"
+        "    assert_type(base.value, str)\n    assert_type(row.value, str)\n"
+        "    assert_type(override.value, int)\n"
+        "    assert_type(row.reference, Anchor)\n"
+        '    row.value = "text"\n    override.value = 1\n'
+    )
+    for _ in range(2):
+        inherited = check(config, env, source, tmp_path / "modelapp/models.py")
+        assert inherited.returncode == 0, inherited.stdout + inherited.stderr
+    source.write_text(source.read_text() + "    row.value = 1\n    override.value = {}\n")
+    invalid = check(config, env, source)
+    assert invalid.returncode == 1, invalid.stdout + invalid.stderr
+    assert invalid.stdout.count("[assignment]") == 2, invalid.stdout + invalid.stderr

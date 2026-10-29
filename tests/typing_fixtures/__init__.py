@@ -241,6 +241,9 @@ class Membership(models.Model):
     anchor = models.ForeignKey("modelapp.Anchor", on_delete=models.CASCADE)
 class RowBase(models.Model):
     number = models.IntegerField()
+    inherited_anchor = models.ForeignKey("modelapp.Anchor",
+        on_delete=models.CASCADE, null=True, related_name="+")
+    inherited_anchors = models.ManyToManyField("modelapp.Anchor", related_name="+")
     class Meta:
         abstract = True
 class RowManager(models.Manager[T]):
@@ -259,6 +262,8 @@ def install():
         "label": models.CharField(max_length=50),
         "note": models.TextField(null=True),
         "anchor": models.ForeignKey(declarations.Anchor, on_delete=models.CASCADE, related_name="records"),
+        "optional_anchor": models.ForeignKey(declarations.Anchor,
+            on_delete=models.CASCADE, related_name="+", null=True),
         "anchors": models.ManyToManyField(declarations.Anchor, related_name="m2m_rows"),
         "members": models.ManyToManyField(declarations.Anchor,
             through=declarations.Membership, related_name="member_rows"),
@@ -300,6 +305,10 @@ def consume(row: RuntimeRow, anchor: Anchor) -> None:
     assert_type(row.number, int)
     assert_type(row.note, str | None)
     assert_type(row.anchor, Anchor)
+    assert_type(row.optional_anchor, Anchor | None)
+    assert_type(row.inherited_anchor, Anchor | None)
+    assert_type(row.inherited_anchors.get(), Anchor)
+    assert_type(Membership.objects.get().anchor, Anchor)
     assert_type(row.anchor_id, int)
     assert_type(RuntimeRow.objects.selected(), str)
     assert_type(RuntimeRow.objects.get(), RuntimeRow)
@@ -315,6 +324,8 @@ def consume(row: RuntimeRow, anchor: Anchor) -> None:
     assert_type(anchor.member_rows.selected(), str)
     assert_type(RuntimeRow.anchors.through.objects.get().runtimerow, RuntimeRow)
     assert_type(RuntimeRow.anchors.through.objects.get().anchor, Anchor)
+    assert_type(RuntimeRow.inherited_anchors.through.objects.get().runtimerow, RuntimeRow)
+    assert_type(RuntimeRow.inherited_anchors.through.objects.get().anchor, Anchor)
     assert_type(RuntimeRow.members.through.objects.get().row, RuntimeRow)
     assert_type(RuntimeRow.members.through.objects.get(), Membership)
     row.anchors.add(anchor)
@@ -325,10 +336,14 @@ def consume(row: RuntimeRow, anchor: Anchor) -> None:
     row.label = "text"
     row.note = None
     row.anchor = anchor
+    row.optional_anchor = anchor
+    row.optional_anchor = None
 """
 
-RUNTIME_M2M_NEGATIVE = """
+RUNTIME_RELATION_NEGATIVE = """
 def invalid_relations(row: RuntimeRow, anchor: Anchor) -> None:
+    row.anchor = row
+    row.optional_anchor = row
     row.anchors.add(row)
     row.members.add(row)
     anchor.m2m_rows.add(anchor)

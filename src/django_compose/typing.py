@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
+from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 from mypy.mro import calculate_mro
 from mypy.nodes import (
@@ -328,6 +329,22 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
             for field in self.django_context.get_model_fields(model):
                 if field.name in info.names or isinstance(field, models.ManyToManyField):
                     continue
+                inherited = info.get(field.name)
+                if inherited is not None and isinstance(inherited.node, Var):
+                    owner = self.django_context.get_model_class_by_fullname(inherited.node.info.fullname)
+                    if owner is not None:
+                        try:
+                            original = owner._meta.get_field(field.name)
+                        except FieldDoesNotExist:
+                            # A static annotation need not declare a Django field.
+                            original = None
+                        # Django's abstract-field deepcopy preserves this counter;
+                        # a newly declared override gets a new one.
+                        if (
+                            isinstance(original, models.Field)
+                            and original.creation_counter == field.creation_counter
+                        ):
+                            continue
                 field_fullname = helpers.get_class_fullname(type(field))
                 field_symbol = self.lookup_fully_qualified(field_fullname)
                 if (
@@ -349,14 +366,18 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
                 if isinstance(field, models.ForeignKey):
                     related_model = self.django_context.get_field_related_model_cls(field)
                     related = self.django_context.lookup_model_typeinfo(api, related_model)
-                    if related is None:
+                    concrete_related = helpers.lookup_fully_qualified_typeinfo(
+                        api, helpers.get_class_fullname(related_model)
+                    )
+                    if related is None or concrete_related is None:
                         raise helpers.IncompleteDefnException(helpers.get_class_fullname(related_model))
                     field_type = reparametrize_related_field_type(
                         field_type,
                         set_type=Instance(related, []),
-                        get_type=Instance(related, []),
+                        get_type=Instance(concrete_related, []),
                     )
-                    ctx.api.add_plugin_dependency(make_trigger(related.fullname), target=info.fullname)
+                    for dependency in (related, concrete_related):
+                        ctx.api.add_plugin_dependency(make_trigger(dependency.fullname), target=info.fullname)
                 helpers.add_new_sym_for_info(info, name=field.name, sym_type=field_type)
                 ctx.api.add_plugin_dependency(make_trigger(field_symbol.node.fullname), target=info.fullname)
             model_ctx = ClassDefContext(info.defn, ctx.reason, ctx.api)
