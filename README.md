@@ -1,19 +1,38 @@
 # django-compose
 
-Compose native abstract Django models into an importable concrete package.
-Django owns application population, model construction, ORM and migrations.
-This library adds class declarations, deterministic emission, freshness receipts
-and reusable transition binding. Its only base dependency is Django.
+Compose reusable Django apps into a runnable project.
 
-Python 3.14 and Django 6.1 are supported. The [specification](docs/SPEC.md)
-defines the contract; [extensions](docs/extensions.md) documents capability hooks.
+One app can define a model and another can add fields and behavior to it. The
+result is an ordinary concrete Django model, with Django's ORM and migrations.
 
-## Run the example
+For example, `catalog` defines an item and `reviews` adds a rating:
 
-From this unreleased development checkout:
+```text
+catalog.Item (title) + reviews.Rating (rating, is_recommended)
+    → concrete catalog.Item → one catalog_item table
+```
+
+The reusable declarations are abstract models. An explicit `compose` command
+writes the concrete classes into a Python package before the project runs.
+Select the apps you need; the generated models reflect that selection. You
+write ordinary project settings and a command launcher; django-compose supplies
+the generated models and app configuration.
+
+This is useful when several projects share a model but need different optional
+capabilities. For a single project with a fixed model structure, ordinary Django
+models and abstract bases may already be sufficient.
+
+**Status:** unreleased `0.1.0.dev0`; Python 3.14 and Django 6.1 are supported.
+Django is the only base dependency. The instructions below use this checkout;
+they do not require a published package or another framework.
+
+## Try the example
+
+Install [uv](https://docs.astral.sh/uv/) and run these commands from the checkout
+root. The example uses a local SQLite database.
 
 ```sh
-uv sync --frozen --all-extras
+uv sync --frozen --no-dev
 cd examples/shop
 uv run --project ../.. --no-sync python manage.py compose
 uv run --project ../.. --no-sync python manage.py makemigrations catalog
@@ -22,7 +41,7 @@ uv run --project ../.. --no-sync python manage.py compose --check
 uv run --project ../.. --no-sync python manage.py shell
 ```
 
-In the shell:
+In the Django shell:
 
 ```python
 from django.apps import apps
@@ -30,92 +49,22 @@ from django.apps import apps
 Item = apps.get_model("catalog", "Item")
 item = Item.objects.create(title="A book", rating=5)
 assert item.is_recommended()
+assert Item.objects.get(pk=item.pk).rating == 5
 ```
 
-The app owning an identity declares `concrete=True`. Other apps contribute
-native abstract bases:
+The two apps now contribute to the same model and table. `compose` generated the
+classes; `makemigrations` and `migrate` created and applied ordinary Django
+history. Source apps remain installed when the generated project runs.
 
-```python
-from django.db import models
-from django_compose.models import Composable
+## Where to go next
 
-class Item(Composable, concrete=True):
-    title = models.CharField(max_length=100)
+- [Quick start](docs/quickstart.md): walk through the source, generated files,
+  commands and ORM result.
+- [Model declarations](docs/models.md): add fields to one model or declare
+  native multi-table inheritance.
+- [Project configuration](docs/configuration.md): use django-compose in your own
+  project with the current settings and `manage.py` integration.
+- [Documentation](docs/README.md): optional addon selection, integrations,
+  migrations, packaging, API reference and current limitations.
 
-    class Meta:
-        abstract = True
-
-class Rating(Composable, extends="catalog.Item"):
-    rating = models.PositiveSmallIntegerField(default=0)
-
-    class Meta:
-        abstract = True
-```
-
-`inherits="label.Model"` declares a concrete child of that model through
-multi-table inheritance. It implies `concrete` and may not repeat it.
-`concrete`, `extends` and `inherits` are mutually exclusive.
-`demands="label.Model"` adds an ancestor requirement through the MRO and
-can combine with any declaration or none. Other declarations apply only to
-their declaring class.
-Factories can forward the same keywords to `type()`. Django's usual explicit
-`Meta.abstract = True` rule applies to each reusable declaration.
-
-## Configure a host
-
-Use one ordinary settings module. It selects root apps and owns settings
-composition. For installed addon metadata, install `django-compose[addons]` and
-call `django_compose.addons.enabled_apps(roots, group="your.addons")`. Its frozen
-closure follows active installed requirements and `AppConfig.requires_apps`,
-retaining explicit root config choices. Pass `closure.entries` to the normalizer.
-Plain projects can supply their ordered app list directly.
-
-Normalize the resolved app entries with
-`django_compose.snapshot.app_entries`, create one `Snapshot`, and assign it to
-`COMPOSE_SNAPSHOT`. Set `COMPOSE_OUTPUT_DIR` and `COMPOSE_OUTPUT_MODULE`.
-[The example settings](examples/shop/settings.py) contain the complete wiring:
-
-- In `write` or `check` mode, install source configs, retained history tombstones,
-  and `django_compose.apps.BuildComposeConfig` last. Write permits the first build;
-  check verifies the existing receipt before discovery.
-- In serving mode, call `serving.verify` before finalizing `INSTALLED_APPS`,
-  substitute generated configs using `serving.installed_apps`, and install
-  `django_compose.apps.ComposeConfig`.
-- Build the effective `MIGRATION_MODULES` with `serving.migration_modules`;
-  authored mappings, including `None`, take precedence.
-
-Call `django_compose.management.execute(sys.argv)` in `manage.py`. It sets
-`DJANGO_COMPOSE_MODE` before settings load for `compose` and `compose --check`;
-`compose --help` answers without starting Django. A direct launcher must set
-`DJANGO_COMPOSE_MODE=write` or `check` itself. Migration commands run with the
-variable absent. `python -m django_compose compose --settings settings` is also
-available.
-
-Composition runs inside native phase 2 of `django.setup()`. Concrete models and
-capability artifacts exist before ready callbacks. Serving imports generated
-models through the selected app configs and verifies their receipt; missing,
-changed or stale output requires an explicit compose. Source packages remain
-required at runtime.
-
-Native history lives at `<output>/<label>/migrations/`. Track it in version
-control. Compose never authors or applies migrations, and cleanup preserves
-history and unowned files. History-only apps remain installed as tombstones
-until explicit guarded retirement. Before removing a provider, run
-`check_migrations --imports --removing distribution-name` to audit retained imports
-and enabled apps. See [migration guidance](docs/migrations.md).
-
-## Typing and distribution
-
-The optional `typing` extra extends django-stubs with model composition facts.
-Configure `plugins = django_compose.typing` and the ordinary
-`django_settings_module` pointing at isolated composition settings. The plugin
-sets write mode during setup and preserves native diagnostics on cold, warm and
-incremental runs. Host settings inference belongs in a host plugin. See
-[dependency ownership](docs/dependencies.md) for the pinned upstream revisions.
-
-Build composed output explicitly, review native history, then package it through
-your build backend's ordinary file selection. See [packaging](docs/packaging.md).
-Run `make check` and `make dist-check` for the library's local delivery gates.
-The latter installs a wheel into fresh plain hosts outside this checkout and
-checks metadata activation with two real addon distributions. Broader host,
-ASGI, settings contribution and dev-loop work remains in [the roadmap](docs/ROADMAP.md).
+The source is licensed under [LGPL-3.0-or-later](LICENSE).
