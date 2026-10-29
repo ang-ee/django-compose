@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from typing_fixtures import DONOR_SOURCE, MODEL_SOURCE, NEGATIVE, POSITIVE
 
 SOURCE = Path(__file__).resolve().parents[1] / "src"
@@ -214,3 +215,91 @@ for previous in (None, "check"):
         [sys.executable, "-c", script], cwd=tmp_path, env=env, text=True, capture_output=True, timeout=40
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("composed", [False, True])
+def test_runtime_model_projection_with_independent_descriptor_plugin(tmp_path, composed):
+    from typing_fixtures import RUNTIME_ADAPTER, RUNTIME_CONSUMER, RUNTIME_FACTORY, RUNTIME_MODELS
+
+    config, env = host(tmp_path)
+    models_source = RUNTIME_MODELS
+    factory_source = RUNTIME_FACTORY
+    consumer_source = RUNTIME_CONSUMER
+    adapter_source = RUNTIME_ADAPTER
+    if composed:
+        models_source = models_source.replace(
+            "class Anchor(models.Model):",
+            "from django_compose.models import Composable\n"
+            "class Anchor(Composable, concrete=True):\n"
+            "    class Meta:\n        abstract = True",
+        )
+        factory_source = (
+            factory_source.replace(
+                "from modelapp import models as declarations",
+                "from modelapp import models as declarations\nfrom django.apps import apps\nimport importlib",
+            )
+            .replace(
+                '    setattr(declarations, "RuntimeRow",',
+                '    anchor = apps.get_model("modelapp", "Anchor")\n'
+                "    output = importlib.import_module(anchor.__module__)\n"
+                '    setattr(output, "RuntimeRow",',
+            )
+            .replace('"__module__": declarations.__name__', '"__module__": anchor.__module__')
+            .replace("models.ForeignKey(declarations.Anchor,", "models.ForeignKey(anchor,")
+        )
+        consumer_source = consumer_source.replace(
+            "from modelapp.models import Anchor, RuntimeRow",
+            "from modelapp.models import Anchor\nfrom typed_runtime.modelapp.models import RuntimeRow",
+        )
+    (tmp_path / "modelapp/models.py").write_text(models_source)
+    (tmp_path / "modelapp/apps.py").write_text(
+        "from django.apps import AppConfig\n"
+        "class Config(AppConfig):\n"
+        "    name = 'modelapp'\n"
+        "    def ready(self):\n"
+        "        from modelapp.factory import install\n"
+        "        install()\n"
+    )
+    factory = tmp_path / "modelapp/factory.py"
+    factory.write_text(factory_source)
+    (tmp_path / "adapter.py").write_text(adapter_source)
+    config.write_text(
+        config.read_text().replace(
+            "plugins = django_compose.typing", "plugins = django_compose.typing, adapter"
+        )
+    )
+    source = tmp_path / "consumer.py"
+    source.write_text(consumer_source)
+    for _ in range(2):
+        result = check(config, env, source)
+        assert result.returncode == 0, result.stdout + result.stderr
+    factory.write_text(
+        factory_source.replace('"label": models.CharField(max_length=50)', '"label": models.IntegerField()')
+    )
+    changed = check(config, env, source)
+    assert changed.returncode == 1, changed.stdout + changed.stderr
+    assert 'Expression is of type "int", not "str"' in changed.stdout
+    source.write_text(
+        consumer_source.replace("row.label, str", "row.label, int").replace(
+            'row.label = "text"', "row.label = 1"
+        )
+    )
+    changed_valid = check(config, env, source)
+    assert changed_valid.returncode == 0, changed_valid.stdout + changed_valid.stderr
+    factory.write_text(factory_source.replace('        "label": models.CharField(max_length=50),\n', ""))
+    removed = check(config, env, source)
+    assert removed.returncode == 1 and 'has no attribute "label"' in removed.stdout, (
+        removed.stdout + removed.stderr
+    )
+    factory.write_text(factory_source)
+    source.write_text(consumer_source)
+    restored = check(config, env, source)
+    assert restored.returncode == 0, restored.stdout + restored.stderr
+    config.write_text(config.read_text().replace(str(tmp_path / "cache"), "/dev/null"))
+    result = check(config, env, source)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "modelapp/models.py").read_text() == models_source
+    assert not tuple((tmp_path / "typed_runtime").rglob("*.pyi"))
+    if composed:
+        generated = tmp_path / "typed_runtime/modelapp/models.py"
+        assert "RuntimeRow" not in generated.read_text()
