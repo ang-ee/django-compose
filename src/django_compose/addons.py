@@ -86,17 +86,17 @@ def installed_addons(group: str) -> InstalledAddons:
 
     Each participating distribution must declare exactly one group entry point.
     Its value remains a native app/config string, never a loaded entry point.
+    Native metadata.distribution selects the winner for same-name installations.
     """
     if not isinstance(group, str) or not group:
         raise ImproperlyConfigured("An explicit non-empty addon entry-point group is required")
     distributions: dict[str, metadata.Distribution] = {}
     points: dict[str, metadata.EntryPoint] = {}
     app_providers: dict[str, str] = {}
-    for distribution in sorted(metadata.distributions(), key=lambda dist: dist.metadata["Name"]):
-        name = canonicalize_name(distribution.metadata["Name"])
+    names = {canonicalize_name(dist.metadata["Name"]) for dist in metadata.distributions()}
+    for name in sorted(names):
+        distribution = metadata.distribution(name)
         entries = distribution.entry_points.select(group=group)
-        if name in distributions:
-            raise ImproperlyConfigured(f"Multiple installed distributions named {name!r}")
         distributions[name] = distribution
         if not entries:
             continue
