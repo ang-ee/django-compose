@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import importlib.util
 import json
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from importlib.machinery import PathFinder
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
@@ -122,6 +122,31 @@ def enabled_apps(entries: Iterable[str | Entry]) -> tuple[Entry, ...]:
     return tuple(result)
 
 
+def _module_source(module: str) -> Path:
+    """Locate source through native path finders without executing parent packages.
+
+    Each short component is resolved against its parent's search locations. This
+    also lets namespace packages work without installing their parents in
+    sys.modules, which a qualified namespace spec would otherwise require.
+    """
+    locations: tuple[str, ...] | None = None
+    components = module.split(".")
+    if not all(component.isidentifier() for component in components):
+        raise ImproperlyConfigured(f"Cannot fingerprint module {module!r}")
+    for index, component in enumerate(components):
+        spec = PathFinder.find_spec(component, locations)
+        if spec is None:
+            break
+        if index == len(components) - 1:
+            if spec.origin and Path(spec.origin).is_file():
+                return Path(spec.origin)
+            break
+        if spec.submodule_search_locations is None:
+            break
+        locations = tuple(spec.submodule_search_locations)
+    raise ImproperlyConfigured(f"Cannot fingerprint module {module!r}")
+
+
 def snapshot(
     entries: Iterable[str | Entry],
     *,
@@ -152,10 +177,8 @@ def snapshot(
     integrations = tuple(integration_paths)
     for dotted in integrations:
         module = dotted.rpartition(".")[0]
-        spec = importlib.util.find_spec(module)
-        if spec is None or not spec.origin or not Path(spec.origin).is_file():
-            raise ImproperlyConfigured(f"Cannot fingerprint integration {dotted!r}")
-        files[f"integration:{module}"] = hashlib.sha256(Path(spec.origin).read_bytes()).hexdigest()
+        source = _module_source(module)
+        files[f"integration:{module}"] = hashlib.sha256(source.read_bytes()).hexdigest()
     values = namespace or {}
     return Snapshot(
         tuple(normalized),
@@ -202,13 +225,11 @@ def transition_fingerprints(source: Any) -> tuple[tuple[str, str], ...]:
     """Hash declared transition modules without executing their model imports."""
     result = []
     for declaration in transition_declarations(source):
-        spec = importlib.util.find_spec(declaration["module"])
-        if spec is None or not spec.origin or not Path(spec.origin).is_file():
-            raise ImproperlyConfigured(f"Cannot fingerprint transition {declaration['module']!r}")
+        source = _module_source(declaration["module"])
         result.append(
             (
                 f"{declaration['declaring_app']}:{declaration['name']}",
-                hashlib.sha256(Path(spec.origin).read_bytes()).hexdigest(),
+                hashlib.sha256(source.read_bytes()).hexdigest(),
             )
         )
     return tuple(sorted(result))

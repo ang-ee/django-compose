@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import sys
+from importlib import import_module
+
 from django.apps import AppConfig
+from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+
+from django_compose.serving import mode, verify
+from django_compose.snapshot import Snapshot, transition_declarations
 
 
 class ComposeConfig(AppConfig):
@@ -13,19 +20,9 @@ class ComposeConfig(AppConfig):
     default = True
 
     def ready(self) -> None:
-        from django_compose.serving import mode
-
         if mode() is not None:
             raise ImproperlyConfigured("Compose mode requires BuildComposeConfig last in INSTALLED_APPS")
-        import sys
-
-        from django.conf import settings
-
-        from django_compose.serving import verify
-
         receipt = verify(settings.COMPOSE_SNAPSHOT, settings.COMPOSE_OUTPUT_MODULE)
-        from importlib import import_module
-
         root = import_module(settings.COMPOSE_OUTPUT_MODULE)
         if root is None or getattr(root, "GENERATION", None) != receipt.GENERATION:
             raise ImproperlyConfigured("Generated composition changed during population; run compose")
@@ -47,10 +44,6 @@ class BuildComposeConfig(AppConfig):
 
     def import_models(self) -> None:
         super().import_models()
-        from django.conf import settings
-
-        from django_compose.serving import mode
-
         selected_mode = mode()
         if selected_mode is None:
             raise ImproperlyConfigured("BuildComposeConfig requires DJANGO_COMPOSE_MODE before settings load")
@@ -59,7 +52,6 @@ class BuildComposeConfig(AppConfig):
         self.compose_mode = selected_mode
         from django_compose.build import ConcreteModels, emit, finalize, render_artifacts
         from django_compose.declarations import ArtifactHook, resolve_integrations
-        from django_compose.snapshot import Snapshot, transition_declarations
 
         snap = getattr(settings, "COMPOSE_SNAPSHOT", None)
         if not isinstance(snap, Snapshot):
@@ -91,8 +83,6 @@ class BuildComposeConfig(AppConfig):
             raise
 
     def ready(self) -> None:
-        from django_compose.serving import mode
-
         if mode() != self.compose_mode:
             raise ImproperlyConfigured("DJANGO_COMPOSE_MODE changed after settings load")
         if self.compose_mode == "check":

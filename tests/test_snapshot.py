@@ -1,6 +1,8 @@
 """Snapshot immutability, input coverage, receipt integrity and import boundaries."""
 
 import hashlib
+import os
+import subprocess
 import sys
 
 import pytest
@@ -121,3 +123,42 @@ def test_mode_change_after_snapshot_is_refused(monkeypatch):
     monkeypatch.setenv("DJANGO_COMPOSE_MODE", "write")
     with pytest.raises(ImproperlyConfigured, match="changed"):
         snap.check_mode()
+
+
+@pytest.mark.parametrize("kind", ["integration", "transition"])
+@pytest.mark.parametrize("namespace_parent", [False, True])
+def test_nested_fingerprints_never_execute_model_importing_packages(tmp_path, kind, namespace_parent):
+    package = tmp_path / "probeapp"
+    nested = package / "integrations"
+    nested.mkdir(parents=True)
+    model_source = (
+        "from django.db import models\n"
+        "class ParentModel(models.Model):\n"
+        "    class Meta:\n"
+        "        app_label = 'probeapp'\n"
+    )
+    if not namespace_parent:
+        (package / "__init__.py").write_text("")
+        (nested / "__init__.py").write_text(model_source)
+    leaf = nested / "hooks.py"
+    leaf.write_text(model_source)
+    script = f"""import hashlib
+import sys
+from django.conf import settings
+settings.configure(INSTALLED_APPS=[])
+from django_compose.snapshot import snapshot, transition_fingerprints
+expected = hashlib.sha256({model_source!r}.encode()).hexdigest()
+if {kind!r} == "integration":
+    result = snapshot((), integration_paths=("probeapp.integrations.hooks.Hook",))
+    assert dict(result.files)["integration:probeapp.integrations.hooks"] == expected
+else:
+    result = transition_fingerprints([{{"declaring_app": "probeapp", "name": "conversion",
+        "app_label": "probeapp", "module": "integrations.hooks"}}])
+    assert result == (("probeapp:conversion", expected),)
+assert not any(name == "probeapp" or name.startswith("probeapp.") for name in sys.modules)
+"""
+    environment = dict(os.environ, PYTHONPATH=os.pathsep.join([str(tmp_path), *sys.path]))
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", script], env=environment, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
