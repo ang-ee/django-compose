@@ -70,11 +70,15 @@ class _Contributions:
         self.module = ModuleType(str(namespace.get("__name__", "project.settings")))
         self.module.__dict__.update(namespace)
         attributes = self.module.__dict__.setdefault(_ATTRIBUTES, {})
+        self.literal_inputs: set[str] = set()
         for name, value in namespace.items():
             if not name.startswith("_") and name.isupper() and name not in attributes:
                 django_yamlconf.add_attr_info(attributes, name, value, self.module.__name__)
                 # Project values are reference inputs, not new expansion templates.
-                django_yamlconf.add_attr_info(attributes, f"{name}:raw", True, self.module.__name__)
+                marker = f"{name}:raw"
+                if marker not in attributes:
+                    django_yamlconf.add_attr_info(attributes, marker, True, self.module.__name__)
+                    self.literal_inputs.add(name)
 
     def merge(self, values: Mapping[str, Any], owner: str, *, derived: bool = False) -> set[str]:
         accepted = {}
@@ -117,6 +121,10 @@ class _Contributions:
         try:
             attributes = vars(self.module)[_ATTRIBUTES]
             for key, value in values.items():
+                name = _root(key)
+                if name in self.literal_inputs:
+                    del attributes[f"{name}:raw"]
+                    self.literal_inputs.remove(name)
                 django_yamlconf.set_attr_value(attributes, self.module, owner, key, deepcopy(value))
             expanded = deepcopy(attributes)
             django_yamlconf.expand_attribute_refs(expanded)

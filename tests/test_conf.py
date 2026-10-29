@@ -420,3 +420,30 @@ def test_reference_to_preexisting_environment_dictionary_leaf(project):
     ns["INSTALLED_APPS"] = [app("SETTINGS = {'CUSTOM_INPUT': '{OPTIONS[child]}'}")]
     with pytest.raises(ImproperlyConfigured, match="CUSTOM_INPUT.*environment.*OPTIONS.child"):
         conf.configure(ns)
+
+
+def test_native_append_expands_templates_in_project_authored_list(project):
+    app, ns = project
+    ns.update(BASE_DIR="/project", ITEMS=[], TEMPLATE="literal {not_a_reference}")
+    ns["INSTALLED_APPS"] = [app("SETTINGS = {'ITEMS:append': ['{BASE_DIR}/data']}")]
+    conf.configure(ns)
+    assert ns["ITEMS"] == ["/project/data"]
+    assert ns["TEMPLATE"] == "literal {not_a_reference}"
+
+
+def test_preexisting_native_raw_marker_remains_authoritative(project):
+    app, ns = project
+    ns.update(BASE_DIR="/project", ITEMS=[])
+    ns["_YAMLCONF_ATTRIBUTES"] = {
+        "ITEMS:raw": {
+            "value": True,
+            "evalue": True,
+            "source": "project",
+            "history": [],
+            "doc": [],
+            "hide": False,
+        }
+    }
+    ns["INSTALLED_APPS"] = [app("SETTINGS = {'ITEMS:append': ['{BASE_DIR}/data']}")]
+    conf.configure(ns)
+    assert ns["ITEMS"] == ["{BASE_DIR}/data"]
