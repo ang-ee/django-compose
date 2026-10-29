@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "django-compose"
+version = "0.1.0.dev0"
+description = "Compile reusable native Django apps into deterministic, prebuilt runtime packages."
+readme = "README.md"
+requires-python = ">=3.14"
+license = "LGPL-3.0-or-later"
+license-files = ["LICENSE", "COPYING", "NOTICE"]
+authors = [{name = "Angee, Inc.", email = "hi@angee.ai"}]
+dependencies = [
+    "django>=6.1.2,<6.2",
+    "django-yamlconf>=1.5.0,<2",
+    "hatch-angee>=0.2.6,<0.3",
+]
+
+[project.optional-dependencies]
+hatch = ["hatchling>=1.27"]
+typing = [
+    "django-stubs[compatible-mypy] @ git+https://github.com/ang-ee/django-stubs.git@423ed850e5f2d7ea9e67f3e0f9e8bee4be215988",
+    "django-stubs-ext @ git+https://github.com/ang-ee/django-stubs.git@423ed850e5f2d7ea9e67f3e0f9e8bee4be215988#subdirectory=ext",
+    "mypy @ git+https://github.com/ang-ee/mypy.git@ac3de6e4c34b04728e768e07d4842f4309ff6c45",
+]
+
+[project.scripts]
+django-compose = "django_compose.cli:main"
+
+[project.entry-points.hatch]
+django-compose = "django_compose.hatch"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-django>=4.8", "ruff>=0.15.12", "hatchling>=1.27", "build>=1.2", "twine>=6"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/django_compose"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/examples", "/scripts", "/docs", "/AGENTS.md", "/README.md", "/CONTRIBUTING.md", "/CHANGELOG.md", "/LICENSE", "/COPYING", "/NOTICE", "/Makefile", "/pyproject.toml", "/uv.lock"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "--strict-markers --strict-config"
+
+[tool.ruff]
+line-length = 110
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["src/django_compose"]
+ignore_missing_imports = true
+

@@ -132,6 +132,9 @@ in native phase 2, after source import hooks and before every ready callback.
 It discovers, validates and renders once, writes guarded output, then imports
 concrete models and declared integration modules. It must not connect to the
 deployment database or author native migrations during an ordinary build.
+Check mode uses that same plan but refuses drift before any write or import of
+stale generated output. Source import hooks run once before composition; every
+ready callback, rather than an earlier source import hook, sees concrete classes.
 
 There are two settings entrypoints. The authored settings module is raw input:
 it must not invoke Composer or import build modules. A separate build wrapper
@@ -196,6 +199,9 @@ removed. Both legacy `angee_origin`/`angee_source_sha256` and the package's
 canonical `compose_origin`/`compose_source_sha256` metadata are read for future
 adoption; new files write only the canonical spelling. This narrow historical
 reader is not a second active migration implementation.
+An `applies` result of False may skip an already-satisfied schema transition;
+it cannot prove data operations ran. Refuse a data-changing declaration with a
+false guard unless immutable materialization/native history supplies its path.
 
 Plan the whole graph before writing. Handle symbolic dependencies, cross-app
 ordering, data-only migrations, multiple leaves, complete squash chains, partial
