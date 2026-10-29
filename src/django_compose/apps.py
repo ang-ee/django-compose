@@ -6,6 +6,7 @@ from django.apps import AppConfig
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
+from django_compose import checks  # noqa: F401 -- register deferred native system checks
 from django_compose.serving import _close_startup_verification, _finish_startup_verification, mode, verify
 from django_compose.snapshot import Snapshot
 

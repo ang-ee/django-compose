@@ -11,8 +11,9 @@ from pathlib import Path
 import pytest
 from django.apps import AppConfig
 from django.core.exceptions import ImproperlyConfigured
+from packaging.requirements import Requirement
 
-from django_compose.addons import enabled_apps
+from django_compose.addons import active_requirements, enabled_apps, installed_addons
 
 GROUP = "testsite.addons"
 
@@ -73,6 +74,7 @@ def test_closure_uses_provider_metadata_across_package_names_and_is_frozen(insta
     assert closure.roots == (root,)
     assert closure.required == {dependency, native}
     assert closure.addons == {root, dependency}
+    assert closure.dependencies == {root: (dependency, native), dependency: (), native: ()}
     assert not any(name.endswith(".models") for name in sys.modules if name.startswith("selection_"))
     with pytest.raises(FrozenInstanceError):
         closure.entries = ()
@@ -99,6 +101,7 @@ def test_roots_are_preselected_and_explicit_config_overrides_dependency_defaults
     assert closure.roots == (root, target)
     assert closure.required == {selected_only}
     assert closure.addons == {root, target}
+    assert closure.dependencies == {root: (target,), target: (selected_only,), selected_only: ()}
 
 
 def test_root_explicit_config_overrides_requires_apps_config_choice(installed):
@@ -248,7 +251,7 @@ def test_closure_runs_without_configuring_settings_in_fresh_process():
     script = (
         "import sys\n"
         "from django.conf import settings\n"
-        "from django_compose.addons import enabled_apps\n"
+        "from django_compose.addons import active_requirements, enabled_apps, installed_addons\n"
         "assert not settings.configured\n"
         "assert 'django.db.models' not in sys.modules\n"
         "result = enabled_apps(('django.contrib.contenttypes',), group='independent.addons')\n"
@@ -317,3 +320,120 @@ def test_unset_group_resolves_native_graph_without_distribution_access(installed
     assert result.entries == (explicit, "selection_z", root)
     assert result.required == {"selection_z"}
     assert result.addons == frozenset()
+    assert result.dependencies == {root: (target, "selection_z"), target: (), "selection_z": ()}
+
+
+def test_installed_index_retains_native_metadata_without_importing_or_loading(installed, monkeypatch):
+    distribution = installed.distribution(
+        "Mixed.Provider", app="unimportable.app", entry="unimportable.app.apps.Config"
+    )
+    ordinary = installed.distribution("ordinary-library")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("metadata inspection must not activate apps")
+
+    monkeypatch.setattr(AppConfig, "create", forbidden)
+    monkeypatch.setattr(metadata.EntryPoint, "load", forbidden)
+    index = installed_addons(GROUP)
+    assert index.distributions == {"mixed-provider": distribution, "ordinary-library": ordinary}
+    assert index.providers == {"unimportable.app": "mixed-provider"}
+    point = index.entry_points["mixed-provider"]
+    assert isinstance(point, metadata.EntryPoint)
+    assert point.value == "unimportable.app.apps.Config"
+    assert "unimportable" not in sys.modules
+    for mapping in (index.distributions, index.entry_points, index.providers):
+        with pytest.raises(TypeError):
+            mapping["new"] = None
+    with pytest.raises(FrozenInstanceError):
+        index.providers = {}
+
+
+def test_active_requirements_are_native_platform_filtered_and_extra_empty(installed):
+    installed.distribution(
+        "root-dist",
+        app="unimportable.app",
+        requires=(
+            'optional; extra == "feature"',
+            'included[feature]>=1; extra != "feature"',
+            f'platform-present; sys_platform == "{sys.platform}"',
+            f'platform-absent; sys_platform != "{sys.platform}"',
+            'disjunction; extra == "feature" or python_version >= "3"',
+        ),
+    )
+    requirements = installed_addons(GROUP).active_requirements("root-dist")
+    assert all(isinstance(requirement, Requirement) for requirement in requirements)
+    assert tuple(requirement.name for requirement in requirements) == (
+        "disjunction",
+        "included",
+        "platform-present",
+    )
+    assert requirements[1].extras == {"feature"}
+    assert str(requirements[1].specifier) == ">=1"
+
+
+@pytest.mark.parametrize("kind", ("provider", "entries", "distribution"))
+def test_installed_index_rejects_metadata_collisions_without_activation(installed, kind):
+    installed.distribution(
+        "first-provider",
+        app="unimportable.app",
+        extra_points=("other.app = other.app",) if kind == "entries" else (),
+    )
+    if kind == "provider":
+        installed.distribution("second-provider", app="unimportable.app")
+    elif kind == "distribution":
+        installed.distribution("first.provider")
+    with pytest.raises(ImproperlyConfigured, match="Competing providers|one entry point|Multiple installed"):
+        installed_addons(GROUP)
+
+
+@pytest.mark.parametrize("group", ("", None, 12, False))
+def test_installed_index_requires_explicit_group(group):
+    with pytest.raises(ImproperlyConfigured, match="group"):
+        installed_addons(group)
+
+
+def test_installed_index_defers_native_app_identity_validation(installed):
+    root = installed.app("selection_root")
+    wrong = installed.app("selection_wrong")
+    installed.distribution("root-dist", app=root, entry=wrong)
+    assert installed_addons(GROUP).entry_points["root-dist"].value == wrong
+    assert wrong not in sys.modules
+    with pytest.raises(ImproperlyConfigured, match="Entry point .* selects app"):
+        enabled_apps((root,), group=GROUP)
+
+
+def test_raw_requirements_project_without_installed_providers(monkeypatch):
+    def forbidden():
+        raise AssertionError("raw requirements must not inspect installed metadata")
+
+    monkeypatch.setattr(metadata, "distributions", forbidden)
+    requirements = (
+        "zeta[requested]>=2",
+        'optional; extra == "feature"',
+        f'platform; sys_platform == "{sys.platform}"',
+        f'inactive; sys_platform != "{sys.platform}"',
+        'alpha; extra != "feature"',
+    )
+    projected = active_requirements(iter(requirements))
+    assert tuple(requirement.name for requirement in projected) == ("alpha", "platform", "zeta")
+    assert all(isinstance(requirement, Requirement) for requirement in projected)
+    assert projected[-1].extras == {"requested"}
+    assert str(projected[-1].specifier) == ">=2"
+    assert active_requirements(reversed(requirements)) == projected
+    assert active_requirements(()) == ()
+
+
+def test_closure_dependency_projection_is_immutable_and_includes_leaf_apps(installed):
+    root = installed.app("selection_root", requires=("selection_z", "selection_a"))
+    installed.app("selection_z")
+    installed.app("selection_a")
+    closure = enabled_apps((root,))
+    assert closure.dependencies[root] == ("selection_a", "selection_z")
+    assert closure.dependencies["selection_a"] == ()
+    assert closure.dependencies["selection_z"] == ()
+    with pytest.raises(TypeError):
+        closure.dependencies[root] = ()
+    with pytest.raises(TypeError):
+        closure.dependencies[root][0] = "changed"
+    with pytest.raises(FrozenInstanceError):
+        closure.dependencies = {}

@@ -1,5 +1,6 @@
 """GeneratedTree preserves history and refuses unsafe or unowned paths."""
 
+import stat
 from pathlib import Path
 
 import pytest
@@ -125,3 +126,20 @@ def test_artifact_accessor_checks_pending_ownership_hash_and_symlinks(tmp_path, 
     target.symlink_to(original)
     with pytest.raises(ImproperlyConfigured, match="altered"):
         serving.artifact_path("capability/models.txt")
+
+
+@pytest.mark.parametrize("name", ["pyproject.toml", "uv.lock"])
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o755])
+def test_atomic_replacement_and_rollback_preserve_authored_permissions(tmp_path, name, mode):
+    path = tmp_path / name
+    original = b"original metadata\n"
+    path.write_bytes(original)
+    path.chmod(mode)
+
+    atomic_write(path, b"updated metadata\n")
+    assert path.read_bytes() == b"updated metadata\n"
+    assert stat.S_IMODE(path.stat().st_mode) == mode
+
+    atomic_write(path, original)
+    assert path.read_bytes() == original
+    assert stat.S_IMODE(path.stat().st_mode) == mode

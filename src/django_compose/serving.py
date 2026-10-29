@@ -354,6 +354,7 @@ def artifact_path(relative: Path | str) -> Path:
         path.is_absolute()
         or not path.parts
         or ".." in path.parts
+        or "migrations" in path.parts
         or path not in declared
         or path.parts[0] not in roots
     ):
