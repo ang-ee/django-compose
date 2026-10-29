@@ -6,11 +6,13 @@ project history. The default is `<output>/<app>/migrations/`; explicit
 while ignoring surrounding generated output. Removed apps' history also survives
 normal build and clean.
 
-Use native Django commands against generated settings:
+Use the project's authored settings through its `manage.py` launcher. Settings
+select verified serving apps for native migration commands; no settings module
+is generated:
 
 ```sh
-DJANGO_SETTINGS_MODULE=runtime.settings python -m django makemigrations
-DJANGO_SETTINGS_MODULE=runtime.settings python -m django migrate
+python manage.py makemigrations
+python manage.py migrate
 ```
 
 An ordinary compose emits models but never authors history or connects to a
