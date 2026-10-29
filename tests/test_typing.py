@@ -29,13 +29,12 @@ def host(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     (tmp_path / "typing_settings.py").write_text(
         "from authored import *\n"
         "from django_compose.snapshot import enabled_apps, snapshot\n"
-        "from django_compose.serving import (installed_apps, migration_modules,\n"
+        "from django_compose.serving import (installed_apps, migration_modules, mode,\n"
         "    read_receipt, tombstones, verify)\n"
-        "import os\n"
         "entries = enabled_apps(INSTALLED_APPS)\n"
         "COMPOSE_SNAPSHOT = snapshot(entries, namespace=globals(), authored_migration_modules={})\n"
         "previous = read_receipt(COMPOSE_OUTPUT_DIR)\n"
-        "if os.environ.get('DJANGO_COMPOSE_MODE'):\n"
+        "if mode():\n"
         "    INSTALLED_APPS = tuple(e.entry for e in entries)"
         " + tombstones(previous, entries, COMPOSE_OUTPUT_MODULE)"
         " + ('django_compose.apps.BuildComposeConfig',)\n"
@@ -185,3 +184,33 @@ def test_donor_analysis_preserves_native_override_diagnostics(tmp_path):
     invalid = check(config, env, donor)
     assert invalid.returncode == 1, invalid.stdout + invalid.stderr
     assert "[override]" in invalid.stdout, invalid.stdout
+
+
+def test_context_restores_mode_when_native_setup_fails(tmp_path):
+    script = """import os
+from unittest.mock import patch
+from django_compose.typing import CompositionContext
+
+def fail(self, module):
+    assert os.environ["DJANGO_COMPOSE_MODE"] == "write"
+    raise RuntimeError("native setup failed")
+
+for previous in (None, "check"):
+    if previous is None:
+        os.environ.pop("DJANGO_COMPOSE_MODE", None)
+    else:
+        os.environ["DJANGO_COMPOSE_MODE"] = previous
+    with patch("mypy_django_plugin.django.context.DjangoContext.__init__", fail):
+        try:
+            CompositionContext("unused")
+        except RuntimeError as error:
+            assert str(error) == "native setup failed"
+        else:
+            raise AssertionError("Native setup should fail")
+    assert os.environ.get("DJANGO_COMPOSE_MODE") == previous
+"""
+    env = dict(os.environ, PYTHONPATH=str(SOURCE))
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=tmp_path, env=env, text=True, capture_output=True, timeout=40
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

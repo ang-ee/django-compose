@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import email.parser
 import hashlib
 import os
 import shutil
@@ -40,12 +41,22 @@ def main() -> None:
         for required in (
             "__init__.py",
             "py.typed",
-            "runtime.py",
+            "models.py",
+            "snapshot.py",
+            "serving.py",
+            "build.py",
             "typing.py",
             "management/commands/makemigrations.py",
         ):
             assert f"django_compose/{required}" in names, required
         assert any(name.endswith("/licenses/LICENSE") for name in names)
+        metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
+        metadata = email.parser.Parser().parsestr(archive.read(metadata_name).decode())
+        base_dependencies = [value for value in metadata.get_all("Requires-Dist", []) if ";" not in value]
+        assert len(base_dependencies) == 1 and base_dependencies[0].lower().startswith("django"), metadata
+        assert metadata.get_all("Provides-Extra") == ["typing"]
+        for removed in ("runtime.py", "composer.py", "appgraph.py", "hatch.py", "yamlconf.py"):
+            assert f"django_compose/{removed}" not in names, removed
         assert not any(name.startswith(("angee/", "tests/", "examples/")) for name in names)
     with tarfile.open(sdist) as archive:
         names = set(archive.getnames())
@@ -64,7 +75,7 @@ def main() -> None:
     environment = {
         key: value
         for key, value in os.environ.items()
-        if key not in {"PYTHONPATH", "DJANGO_SETTINGS_MODULE", "VIRTUAL_ENV"}
+        if key not in {"PYTHONPATH", "DJANGO_SETTINGS_MODULE", "DJANGO_COMPOSE_MODE", "VIRTUAL_ENV"}
     }
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["SHOP_SECRET_KEY"] = "build-only-secret-proof"
@@ -84,27 +95,33 @@ def main() -> None:
                 "-c",
                 "import django_compose, importlib.util; "
                 "assert 'site-packages' in django_compose.__file__; "
-                "assert importlib.util.find_spec('mypy') is None",
+                "assert importlib.util.find_spec('mypy') is None; "
+                "assert importlib.util.find_spec('hatch_angee') is None; "
+                "assert importlib.util.find_spec('django_yamlconf') is None",
             ],
             cwd=host,
             env=environment,
         )
         compiler = [str(python), "-m", "django_compose"]
-        run([*compiler, "build", "--settings", "settings"], cwd=host, env=environment)
+        run(
+            [*compiler, "compose", "--help", "--settings", "not_a_settings_module"], cwd=host, env=environment
+        )
+        assert not (host / "runtime").exists(), "Help started composition"
+        run([*compiler, "compose", "--settings", "settings"], cwd=host, env=environment)
         first = digest(host / "runtime")
         assert all(
             "build-only-secret-proof" not in path.read_text() for path in (host / "runtime").rglob("*.py")
         )
-        run([*compiler, "build", "--settings", "settings"], cwd=host, env=environment)
+        run([*compiler, "compose", "--settings", "settings"], cwd=host, env=environment)
         assert first == digest(host / "runtime"), "Repeat build changed output"
-        run([*compiler, "check", "--settings", "settings"], cwd=host, env=environment)
 
-        environment["DJANGO_SETTINGS_MODULE"] = "runtime.settings"
+        environment["DJANGO_SETTINGS_MODULE"] = "settings"
         run(
             [str(python), "-m", "django", "makemigrations", "catalog", "--noinput"], cwd=host, env=environment
         )
         run([str(python), "-m", "django", "migrate", "--noinput"], cwd=host, env=environment)
         run([str(python), "-m", "django", "check"], cwd=host, env=environment)
+        run([*compiler, "compose", "--check", "--settings", "settings"], cwd=host, env=environment)
         environment["SHOP_SECRET_KEY"] = "serving-secret-proof"
         cold = """
 import importlib.abc
@@ -135,13 +152,27 @@ assert Item.objects.get(pk=item.pk).rating == 5
         models = host / "runtime/catalog/models.py"
         models.write_text(models.read_text() + "\n# manual drift\n")
         before = digest(host / "runtime")
-        run([*compiler, "check", "--settings", "settings"], cwd=host, env=environment, success=False)
+        run(
+            [*compiler, "compose", "--check", "--settings", "settings"],
+            cwd=host,
+            env=environment,
+            success=False,
+        )
         assert before == digest(host / "runtime"), "Check mutated output"
-        run([*compiler, "build", "--settings", "settings"], cwd=host, env=environment)
-        run([*compiler, "clean", "--settings", "settings"], cwd=host, env=environment)
+        run([*compiler, "compose", "--settings", "settings"], cwd=host, env=environment)
+        run(
+            [
+                str(python),
+                "-c",
+                "import django; django.setup(); "
+                "from pathlib import Path; from django_compose.build import clean; clean(Path('runtime'))",
+            ],
+            cwd=host,
+            env=environment,
+        )
         assert history == digest(host / "runtime/catalog/migrations")
         assert (host / "runtime/keep.txt").read_text() == "Unowned file\n"
-        run([*compiler, "build", "--settings", "settings"], cwd=host, env=environment)
+        run([*compiler, "compose", "--settings", "settings"], cwd=host, env=environment)
         assert history == digest(host / "runtime/catalog/migrations")
     print(
         "Wheel/sdist contents and fresh installed-host build, serve, ORM, "

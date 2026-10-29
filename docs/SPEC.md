@@ -2,270 +2,270 @@
 
 Status: implementation contract for 0.1.0.dev0.
 
-## Purpose
+## Purpose and owners
 
-`django-compose` compiles reusable native Django applications into an importable
-runtime directory. Abstract models declare concrete sources and additive donors;
-the compiler emits ordinary Python classes and lets Django construct them.
-Ordinary serving imports prebuilt output before `AppConfig.ready()` and never
-invokes the compiler or repairs files.
-
-The distribution is `django-compose`; its Python package is `django_compose`.
-Python 3.14 and Django 6.1 are the initial supported series. This package is
-independent of any consumer framework. Its license is LGPL-3.0-or-later, preserving
-the lineage of the composition contracts reconstructed here.
-
-## Ownership and dependencies
+`django-compose` emits ordinary concrete Django classes from native abstract
+sources and additive donors. It is an independent Python 3.14 / Django 6.1
+library, distributed as `django-compose` and imported as `django_compose` under
+LGPL-3.0-or-later. Django is its only base dependency.
 
 | Concern | Owner |
 | --- | --- |
-| Application identity, labels, native hooks and registration | Django `AppConfig` and `Apps` |
-| Fields, inheritance, constraints, managers, relations and model registration | Django models and `_meta` |
-| Model selection, donor ordering and concrete source emission | `ModelComposition` and rendering |
-| App declaration input | `AppDeclarationSource`, an explicit adapter; plain Django defaults to no dependency declarations |
-| Manifest parsing, discovery, metadata graph and requirement projection | The existing independently published `hatch_angee` APIs, reused rather than copied |
-| Settings merge operations | `django_yamlconf`; package autoconfig supplies app ordering and provenance |
-| Literal feature declarations and generated capability files | `BuildIntegration`, implemented by the capability that owns the fact |
-| Generated paths, drift, safe writes and cleanup | `GeneratedTree` |
-| Migration detection, graphs, execution, routing and recording | Django migrations |
-| Addon migration origin binding and materialization | `RuntimeMigrations` |
-| Build invocation | One build process, selected by `BuildComposeConfig` |
-| Prebuilt serving | `ComposeConfig` and the import-only runtime loader |
-| Wheel/sdist formats | Hatchling, through an optional build hook |
-| Model type inference | An optional extension to django-stubs' native mypy plugin |
+| App identity, population, source import hooks and ready callbacks | Django AppConfig / Apps |
+| Fields, managers, MRO, constraints, registration, ORM | Django models / ModelBase / Options |
+| Class keyword declarations | models.Composable |
+| Discovery, ordered donors, parent edges and composition facts | ModelComposition |
+| Concrete Python source | rendering.render_models |
+| Literal metadata and capability contributions | ModelDeclaration and three structural protocols |
+| Immutable pre-setup inputs and digest | snapshot.Snapshot |
+| Freshness, generated config substitution and receipt reads | serving |
+| Phase-2 emission, model imports and artifact hooks | build.BuildPlan / BuildComposeConfig |
+| Safe output ownership, locks and atomic replacement | artifacts.GeneratedTree |
+| Migration graphs, state, execution, routers and history | Django migrations |
+| Reusable transition origins and destructive-change policy | TransitionBinding / DropGuardAutodetector |
+| Model type inference | Optional django-stubs extension |
 
-No runtime source imports `angee`, consumer addons, or the build modules. No
-module creates an application registry separate from Django's. There is no
-dependency installer, migration executor, AST model language, deployment manager,
-or runtime repair loop. Packaging, direct CLI builds and checks call the same
-compiler. Manifest metadata stays usable without importing Django application
-code or initializing Django; consumers can use upstream APIs directly.
+The package has no host app graph, manifest parser, settings composer, dependency
+installer, runtime registry, migration executor or build-backend adapter. Host
+frameworks own enabled-app closure and settings composition. Package imports do
+not configure Django. No source depends on a consumer framework.
 
-## Inputs and public API
+## Model declarations
 
-The primary project input is an ordinary importable Django settings module.
-It defines `INSTALLED_APPS` and deployment settings using normal Django practices.
-`COMPOSE_RUNTIME_DIR` chooses the output directory (default `runtime` in the
-project directory for the CLI); its final component is a valid Python identifier.
-The CLI accepts `--settings` and an optional explicit output path. Host YAML,
-environment conventions, source acquisition and product defaults remain outside
-the package. Hosts may load those inputs before calling the settings composer.
+`Composable` is an abstract native Django model. Its `__init_subclass__` accepts:
 
-The stable owner classes are `Composer`, `AppGraph`, `AppDeclarationSource`,
-`ModelComposition`, `ModelDeclaration`, `BuildIntegration`, `Runtime`,
-`BuildComposeConfig`, `ComposeConfig`, `RuntimeMigrations` and
-`DropGuardAutodetector`. Public modules explain concrete signatures and lifecycle
-in their docstrings. `__init__.py` has no eager Django configuration or imports
-of models, compiler, typing plugins or Hatchling.
+| Keyword | Fact | Inherited declaration |
+| --- | --- | --- |
+| `materialize=True` | A new concrete identity | No |
+| `contributes_to="label.Model"` | Add a donor base to that identity | No |
+| `parent="label.Model"` | Immediate materialized multi-table parent | No |
+| `requires_ancestor="label.Model"` | Every concrete descendant requires this ancestor | Yes, through the MRO |
 
-Retain the neutral settings contracts:
+Keywords store `compose_*` facts on the declaring class. `parent` requires
+`materialize=True`; `contributes_to` excludes materialization and parent. Invalid
+combinations and references fail at native class creation. Factories may pass
+keywords to `type()`. Django's native explicit `Meta.abstract=True` requirement
+still applies; Composable does not infer abstractness or replace ModelBase.
 
-- `COMPOSE_APP_DECLARATIONS`: dotted subclass of `AppDeclarationSource`.
-- `COMPOSE_INTEGRATIONS`: ordered dotted subclasses of `BuildIntegration`.
-- `COMPOSE_RUNTIME_DIR`: generated package directory.
-- `COMPOSE_RUNTIME_MODULE`: importable dotted runtime package (default `runtime`).
-- `COMPOSE_ENV_PREFIXES`: explicit opt-in prefixes for declared environment overrides.
-- `COMPOSE_EXTERNAL_ARTIFACT_ROOTS` and `COMPOSE_OWNED_ARTIFACT_PATHS`: explicit
-  relative producer directories and owned files within them. They cannot permit
-  writes outside the configured generated root.
-- `MIGRATION_MODULES` is Django's mapping, including explicit `None` values.
+Discovery uses the selected app config's native `models_module` exports,
+including model packages and custom `import_models()` hooks. Foreign reexports,
+helpers with inherited materialization/donor keywords, and ordinary native models
+do not become declarations. Concrete classes with own composition facts fail.
 
-`AppDeclarationSource.dependencies(app, refresh=False)` returns dependency app
-entries. `migrations(app)` returns native migration declarations containing
-`name`, `app_label`, and `module`. The manifest adapter delegates parsing to
-`hatch_angee`; it does not reproduce that library's schemas or caches.
+Generated bases are donors in enabled-app/declaration order, source, then
+concrete parent. Django clones fields and resolves native MRO/managers. The first
+donor's manager overrides a source manager; distinct donors declaring one manager
+name fail. Shared abstract ancestry is one declaration. Native field names,
+attnames, columns, field-versus-manager collisions and parent column
+redeclarations are validated. Unknown references, parent/module cycles and unmet
+ancestor requirements fail explicitly.
 
-`Composer(namespace).compose_settings(...)` accepts an already loaded mutable
-namespace. It preserves selected custom AppConfig classes, expands dependencies,
-rejects duplicate identities/labels and cycles, preserves deterministic authored
-root order, selects a lifecycle config last, and applies app autoconfig without
-importing source models. Static `SETTINGS` and derived `settings(mapping)` retain
-the native YAML merge contract and project override precedence. Configuration
-errors, including merge errors logged by upstream, fail the build explicitly.
+The source's Meta is preserved. Donors may author constraints and structural
+`abstract`/`app_label` metadata. Other authored native donor Meta options fail
+with their owner named. Compiler/hook metadata is structural, not donor policy.
+Constraint selection preserves shared ancestry and refuses duplicate effective
+names using Django's native interpolation.
 
-## Models
+The public facts API exposes `ordered_models`, `models_by_label`,
+`donors(source)`, `parent(source)`, `contributed_fields(source)` and
+`contributed_field_origins(source)`. Emitted concrete classes expose
+`compose_contributed_field_origins` as sorted (field name, declaring app name)
+pairs. This package interprets no capability vocabulary.
 
-Only abstract classes declared by a source app and exported through its native
-`models_module` participate. Model packages and custom `import_models()` hooks
-are valid; foreign reexports are not declarations.
+## Settings and immutable inputs
 
-- An own `runtime = True` marker materializes an abstract source.
-- An own `extends = "label.Model"` on a non-materialized abstract class contributes
-  a donor to that target. A materialized source with `extends` selects its concrete
-  multi-table parent.
-- `requires_parent` declares an ancestor requirement and is checked against the
-  resolved concrete parent chain.
-- Inherited markers never silently create another declaration. Concrete classes
-  carrying composition markers are invalid.
+Hosts set `COMPOSE_OUTPUT_DIR`, `COMPOSE_OUTPUT_MODULE` and `COMPOSE_SNAPSHOT`.
+Additional compiler inputs are `COMPOSE_INTEGRATIONS`,
+`COMPOSE_TRANSITION_SOURCE`, `COMPOSE_EXTERNAL_ARTIFACT_ROOTS`,
+`COMPOSE_OWNED_ARTIFACT_PATHS`, `COMPOSE_FINGERPRINT_GLOBS` and
+`COMPOSE_FINGERPRINT_SETTINGS`. Native `MIGRATION_MODULES` remains authoritative,
+including explicit `None` values.
 
-Donors precede the source, followed by the concrete parent where applicable.
-Donor order follows installed app order and native declaration export order.
-Concrete source classes and emitted mappings are ordered deterministically.
-Django owns field cloning, native MRO, managers, constraints and registration.
-The compiler preserves source Meta and additive donor constraints, field origin
-metadata (`compose_contributed_field_origins`), native labels, relations and
-required parent contracts. Shared abstract ancestry is one declaration, not a
-field collision. Different owners of the same local field/manager are refused.
-Invalid targets, labels, concrete-parent column redeclarations, model cycles and
-generated module import cycles fail before writing.
+`snapshot.enabled_apps` normalizes the host's already resolved ordered app
+closure. Entries must be strings; explicit config classes are preserved. Instances
+are rejected because a generated subclass cannot preserve instance state and a
+snapshot cannot identify it. Native duplicate app identity/label rules remain.
 
-## Integration contract
+Create one immutable `Snapshot` after host settings composition and before
+finalizing `INSTALLED_APPS`. It records selected app identities/configs/paths;
+sorted source Python and declared glob digests; dotted integration paths and
+module-byte digests; transition origins/digests; authored migration mappings;
+declared effective fingerprint settings; caller facts; and compiler identity.
+Source scanning excludes web, tests, migrations and bytecode caches. It imports
+no model, integration or build module. Integration classes may therefore import
+models when later loaded in phase 2. Pre-setup declarations are ordinary settings,
+never methods on integration classes.
 
-`BuildIntegration` has four narrow contributions: `model_declaration`,
-`render_sources`, `runtime_imports`, and `retired_primary_keys`.
-`ModelDeclaration` contains literal attributes and custom Meta options. Literal
-values are None, bool, int, str, recursively nested lists/tuples and string-keyed
-dicts. Sorting is deterministic. Executable source injection through declarations,
-private/reserved names, overriding fields/managers/methods/native Meta options,
-and two owners of one name are rejected.
+The same Snapshot object feeds build and serve, so equal inputs produce equal
+digests by construction. Deployment secrets should not be fingerprint inputs.
 
-Capability file outputs are explicit relative paths. Competing paths, traversal,
-symlinks and collision with the generated structure or native history are errors.
-Post-model imports name emitted modules; they run after all concrete classes and
-before ready callbacks. Capabilities own permission, resource, web or protocol
-semantics; the compiler knows none of their vocabulary.
+## Setup lifecycle
 
-## Build and serving lifecycle
+`DJANGO_COMPOSE_MODE` is absent for serving, `write` for compose, and `check` for
+non-mutating validation. Every other value fails. The launcher must select mode
+before settings load:
 
-Each composition runs in a fresh Django process. `BuildComposeConfig` runs last
-in native phase 2, after source import hooks and before every ready callback.
-It discovers, validates and renders once, writes guarded output, then imports
-concrete models and declared integration modules. It must not connect to the
-deployment database or author native migrations during an ordinary build.
-Check mode uses that same plan but refuses drift before any write or import of
-stale generated output. Source import hooks run once before composition; every
-ready callback, rather than an earlier source import hook, sees concrete classes.
+- `django_compose.management.execute(argv)` is a drop-in manage.py launcher.
+  `compose` selects write, `compose --check` selects check, and compose help
+  answers from its static parser without Django startup.
+- The optional typing plugin selects write around django-stubs initialization
+  and restores the previous environment value afterward.
+- Direct django-admin or other launchers must set the variable themselves.
+  Compose without it refuses with an actionable error.
 
-There are two settings entrypoints. The authored settings module is raw input:
-it must not invoke Composer or import build modules. A separate build wrapper
-loads it, invokes Composer, and selects BuildComposeConfig. Generated serving
-settings import that raw authored module, compare its authored root entries to
-the sealed roots, and replay autoconfig through a small serving-safe owner over
-the sealed module list. No serving-time graph resolution occurs. The manifest
-records serving config identities: BuildComposeConfig normalizes to ComposeConfig
-through an explicit `runtime_config` class attribute, also usable by host subclasses.
+In write/check mode, settings install source configs plus retained tombstones and
+`django_compose.apps.BuildComposeConfig` last. They do not call serving.verify,
+so an absent output tree can be built for the first time. In serving mode,
+settings verify the receipt, substitute generated source-config subclasses with
+`serving.installed_apps`, and install `django_compose.apps.ComposeConfig`.
+The two lifecycle configs share one native Django identity and cannot coexist.
 
-The generated runtime contains normal Python package files, concrete model
-modules, structural settings and a deterministic manifest. Generated settings
-retain late-bound deployment values from the authored settings module and replay
-app defaults over the sealed app set; secrets or effective environment values
-are never serialized into output. The runtime still requires its source app
-packages and dependencies to be installed.
+BuildComposeConfig performs this sequence in native phase 2, after source import
+hooks and before ready callbacks:
 
-`ComposeConfig` is import-only. It validates the generated manifest's version,
-native app identities, selected config classes and migration mapping, imports
-prebuilt model and integration modules, and refuses missing or incompatible
-artifacts. It never imports compiler/model-composition/migration-authoring modules,
-rescans app candidates, rebuilds a dependency graph, or modifies output.
-Structural changes require an explicit build. Source native hooks run exactly
-once and see concrete classes before ready.
+1. `build.emit` discovers, validates and renders model modules; check mode
+   compares existing bytes and refuses drift before stale imports.
+2. Import generated model modules to register native concrete classes.
+3. Run ArtifactHook.render against a restricted ModelsView, writing or comparing
+   the capability's explicitly owned files.
+4. Finalize the successful write receipt, or fail check without mutation.
 
-CLI commands are `django-compose build`, `check`, and `clean`, also available via
-`python -m django_compose`. Build and check use the same plan/render owner. Check
-reports drift with a nonzero exit code and changes no files. Clean operates only
-on a valid generated tree, preserves all native history and unowned producer
-paths, and refuses symlinked or unmarked roots. The command layer only validates
-arguments, selects the process, dispatches and formats diagnostics.
+The restricted view exposes `composition` and
+`get_model(label, name)` backed by `apps.get_model(..., require_ready=False)`.
+The full registry API belongs to ready callbacks. BuildComposeConfig.ready runs
+last and in check mode compares native history and reports pending transitions.
+Compose never loads migrations in phase 2, connects to deployment databases for
+ordinary emission, or authors/applies history.
 
-## Generated artifacts
+Serving ComposeConfig registers management commands and imports no compiler.
+Generated app configs subclass the selected source config, call its native
+import_models once, then select the generated models_module. Source packages
+remain installed dependencies. All ready callbacks see concrete models.
 
-Generated source is byte-deterministic across repeated builds and hash seeds.
-No timestamp, random identifier, filesystem iteration order, host absolute source
-path, credential or transient environment value is emitted. Root ownership uses
-a package-specific versioned marker. Each generated file has one owner. Atomic
-file replacement avoids truncated files; stale cleanup is limited to previously
-owned generated paths. Validate the complete plan before writing anything.
+Migration commands (`makemigrations`, `migrate`, `check_migrations`,
+`retire_history`, `reset_migration_history`) require serving mode and refuse a set
+mode variable. A separate process reads the completed receipt and history mapping.
 
-`*/migrations/` is durable authored history, even for a removed app, and survives
-all normal builds and cleanup. Explicit retained external paths also survive.
-External outputs require declared ownership and get the same path/symlink rules.
-Cleaning is never a history reset.
+## Integrations
 
-## Native migration history
+Ordered dotted classes in COMPOSE_INTEGRATIONS are resolved once in phase 2.
+They implement one or more independent runtime-checkable protocols:
 
-Default composed history lives at `runtime/<app_label>/migrations/`. Explicit
-`MIGRATION_MODULES` mappings, including disabled migrations, remain authoritative.
-Builds preserve history byte for byte; production validation checks it without
-authoring. Django's `makemigrations` authors history, `migrate` applies it, and
-provisioning remains a consumer concern.
+- ModelDeclarationHook.model_declaration(composition, source) -> ModelDeclaration.
+- ArtifactHook.external_root and render(composition, models) -> Mapping[Path, bytes].
+- MigrationPolicy.retired_primary_keys(model, alias) -> Iterable[Any].
 
-An authored migration module exports a native `Migration` and a pure
-`applies(ProjectState)` guard. Dependencies, `run_before`, `replaces`, operations,
-aliases and routers use Django's native contracts. `RuntimeMigrations` binds a
-reusable origin to each host's actual project leaf, stores immutable origin and
-source/body digests, and materializes native Python migrations only during
-explicit authoring. Historical modules stay executable after a declaration is
-removed. Both legacy `angee_origin`/`angee_source_sha256` and the package's
-canonical `compose_origin`/`compose_source_sha256` metadata are read for future
-adoption; new files write only the canonical spelling. This narrow historical
-reader is not a second active migration implementation.
-A pending declaration whose `applies` guard returns False is refused. Matching
-schema alone cannot prove a transition ran. Completed transitions must remain in
-immutable materialization/native history, including original squash chains.
+ModelDeclaration contains literal attributes and custom Meta options. Values are
+None, bool, int, str, nested list/tuple and string-keyed dict. Rendering is
+closed and deterministic. Fields, managers, methods, private/structural names,
+native Meta options and competing ownership are refused. Reserved names follow
+native model owners and current composition facts. Executable code belongs in
+explicit capability artifacts rather than literal declarations.
 
-Plan the whole graph before writing. Handle symbolic dependencies, cross-app
-ordering, data-only migrations, multiple leaves, complete squash chains, partial
-upgrade states, a consumer author targeting another app, scoped authoring and
-repeat calls. Reject changed immutable source/body, duplicate origins, missing
-prerequisites and cycles before mutations. Dry-run and check paths do not create
-history or packages. Native writers serialize ordinary autodetected migrations
-and resolve native migration package paths. Authored reusable migrations preserve
-their complete source plus frozen edges and digest metadata; this bounded snapshot
-keeps local RunPython functions and custom operations executable after declaration
-removal instead of serializing imports back to a deleted author module.
+Artifact paths stay under each hook's declared output subtree. Traversal,
+symlinks, generated structure/history collisions and competing ownership fail.
+The complete plan is validated before output mutation.
 
-`DropGuardAutodetector` extends native autodetection only for destructive changes.
-It proves the relevant rows/columns empty on every routed database before an
-automatic drop; unavailable databases do not count as empty. Preserve shared
-physical tables and explicit capability-owned retired row exemptions. The same
-autodetector is installed on native makemigrations and migrate command classes
-so Django's command consistency checks pass.
+## Generated output and freshness
 
-Explicit `reset_migration_history` remains a separate guarded maintenance command.
-Require a fully applied, model-clean native graph; respect selected apps and
-cross-app dependencies; use a transactional recorder update with filesystem
-rollback. A normal build/clean never reaches this operation.
+```text
+<output>/
+├── __init__.py           # literal receipt
+├── history.py            # source-free tombstone configs
+└── <label>/
+    ├── __init__.py       # __generation__
+    ├── apps.py           # selected source config subclass; __generation__
+    ├── models.py         # concrete classes; __generation__
+    └── migrations/       # durable authored native history
+```
 
-## Typing
+The receipt records GENERATION, HISTORY_LABELS, RETIRED_LABELS, DIGEST (or
+IN_PROGRESS), OWNED_FILES with sha256, and COMPILER. Generation and emitted
+bytes are deterministic for identical inputs; no clock, randomness, secrets or
+host-absolute source path enters emitted code.
 
-The optional `django_compose.typing` plugin composes django-stubs rather than
-replacing it. Infer concrete relation identities, source/donor fields and manager
-types, required-parent contracts, donor methods/properties and composed settings.
-Recognize composition through the generic lifecycle contract, without a hardcoded
-consumer app name. Track source dependencies so cold, warm and incremental runs
-agree and invalid consumer code continues to receive actual diagnostics. The
-typing extra uses the verified compatible upstream revisions of django-stubs and
-mypy; these dependencies are absent from ordinary serving installations.
+Every receipt mutation takes one common output lock. Writers invalidate first,
+write guarded files through GeneratedTree using atomic replacement and generation
+headers, then finalize last. A failed build leaves IN_PROGRESS and reverting a
+source cannot revive it. Stale cleanup touches only recorded generated paths.
+Normal generation/clean preserve every migrations directory and unowned file.
+Foreign, unmarked and symlinked trees are refused.
 
-## Packaging and verification
+`serving.verify(snapshot, output_module)` runs in settings and refuses missing,
+in-progress, mismatched or content-altered output, naming the compose command.
+It checks every owned file digest. Hosts retain the verified GENERATION and
+compare it with the imported receipt/modules after population to detect a writer
+publishing between verification and import. check mode refuses all drift without
+changing a byte. Cleanup follows the same lock/invalidation protocol.
 
-The package uses a `src` layout, `py.typed`, a committed uv lock, focused public
-contract tests and one Makefile shared by local checks and CI. Build wheel and
-sdist with ordinary packaging tools. The optional Hatch hook invokes the same
-compiler in editable development mode and validates/copies sealed output in
-release mode; it never reimplements compilation or silently authors migrations.
-No distribution is published by default.
+## Native history and transitions
 
-Acceptance requires:
+Default history is `<output>.<label>.migrations`. Generated defaults derive from
+the receipt first; authored MIGRATION_MODULES overrides are applied last.
+HISTORY_LABELS retains models, previous history, on-disk migration packages and
+transition targets, minus explicit RETIRED_LABELS. History-only labels receive
+native tombstone configs in both modes, with no live models or lifecycle.
+A generated source-free history.py declares a History_<label> config for every
+retained label. It binds the native registry without importing old models, so
+a removed source distribution cannot prevent the next compose process starting.
 
-1. A plain Django host with no consumer framework installed builds, checks,
-   starts, authors/applies native migrations and performs ORM operations.
-2. Custom AppConfig hooks, dependencies, donors, multi-table inheritance,
-   constraints, managers and relations exercise the emitted classes.
-3. A cold serving process blocks build imports and verifies phase ordering.
-4. Repeated output matches byte for byte; drift, collisions and unsafe paths fail
-   explicitly; cleanup preserves native history and unowned output.
-5. Two projects with different leaf names bind the same authored migration;
-   cross-app schema/conversion/parity/retirement, partial/squashed history,
-   historical declaration removal, scoped authoring, drop guards and reset
-   rollback are exercised through native Django.
-6. Typing checks cover valid and invalid programs on cold/warm/incremental runs.
-7. Wheel and sdist contents are inspected; a wheel installed in a fresh environment
-   outside the checkout executes the same plain-host workflow.
-8. Independent architecture and Django reviews have no unresolved material
-   findings. Local checks and unexecuted remote CI are reported separately.
+Django owns migration detection, graph loading, serialization, execution,
+recording, aliases and routers. One `effective_states(loader, registry, purge=...)`
+owner preserves history-only models in comparison state; an explicit purge alone
+removes them from that desired state. Every migration comparison command uses it.
 
-The future consumer migration must replace imports/config selections at their
-owners, preserve historical import aliases, regenerate artifacts, migrate tests
-and delete the superseded compiler. That migration is separate from building
-this independent package; no consumer source changes are part of this release.
+COMPOSE_TRANSITION_SOURCE supplies explicit declarations or a dotted callable.
+TransitionBinding binds reusable native migration origins `<declaring app>:<name>`
+to the host's actual leaves. Guards are pure applies(ProjectState) functions;
+a pending false guard is refused. Immutable source/body digests, dependencies,
+run_before, replaces and complete squash chains are preserved. Materialized
+historical source remains executable after the declaration is removed. New
+metadata uses compose_origin/compose_source_sha256; legacy angee spellings are
+read only for historical adoption. Plan the whole graph before mutation; refuse
+changed immutable source, duplicate origins, missing prerequisites and cycles.
+Dry-run/check never author history.
+
+DropGuardAutodetector proves relevant rows/columns empty on every routed database
+before automatic destructive changes. Unavailable databases are not empty.
+Capability retirement exemptions are explicit. Native makemigrations and migrate
+share the same autodetector class.
+
+Retirement is an explicit operation for history-only labels. It verifies
+consistent fully applied history on every configured migration-relevant database
+and refuses any retained migration in another label depending on retired nodes.
+Rebase/squash incoming dependencies before this coordinated cutoff. Optional
+purge first authors/applies a final deletion transition across that same database
+scope; purge alone never authorizes retirement. Successful retirement updates the
+receipt under the common lock; the next compose removes the tombstone. External
+databases absent from command settings are outside the provable scope.
+
+check_migrations also reports migration import distributions using native import
+metadata, so consumers can preserve historical field/validator imports before
+uninstalling source packages. Explicit reset_migration_history remains guarded:
+fully applied, model-clean native graph, selected apps, cross-app dependencies,
+transactional recorder updates and filesystem rollback. Normal build/clean never
+reset history. See [migration guidance](migrations.md).
+
+## Typing, boundaries and verification
+
+The optional django_compose.typing plugin composes django-stubs model inference:
+source/donor fields, relations, managers, inherited requirements, donor methods,
+properties, generics and native diagnostics. It consumes build.discover and the
+composition facts API. It tracks source dependencies so cold, warm and
+incremental analysis agree. Host settings inference and history projections
+belong to host plugins. The extra pins verified upstream revisions; ordinary
+serving installations do not need mypy or django-stubs.
+
+Snapshot and serving import stdlib and pre-setup Django configuration/exceptions
+only: never models, build, composition, rendering, artifacts or integrations.
+Models imports native Django models but never build. Apps lazily imports build
+only from BuildComposeConfig.import_models. Serving and management dispatch do
+not rebuild an app graph or introduce another composition engine.
+
+Delivery requires make check and make dist-check: public behavioral contracts,
+independent plain host setup/ready ordering, no-write check/help, fingerprint and
+receipt failures, artifact readiness, native ORM/history/transition/retirement,
+routed multi-database safety, isolated typing cache behavior, archive inspection
+and a fresh installed-wheel workflow outside the checkout. Architecture and
+Django reviews have no unresolved material findings. Report local evidence and
+remote CI separately. Building local archives does not authorize publication.

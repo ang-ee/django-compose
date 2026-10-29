@@ -15,7 +15,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 from django.db import models
-from mypy.maptype import map_instance_to_supertype
 from mypy.mro import calculate_mro
 from mypy.nodes import (
     MDEF,
@@ -269,6 +268,7 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
         # Load this native owner after mypy.types: its standalone import cycle
         # otherwise prevents importing CompositionContext outside mypy's CLI.
         from mypy.expandtype import expand_type, expand_type_by_instance
+        from mypy.maptype import map_instance_to_supertype
 
         assert declaration.type is not None
         instance = fill_typevars(receiver)

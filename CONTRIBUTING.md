@@ -14,7 +14,7 @@ The Makefile is shared with CI. Python 3.14, Django 6.1 and the compatible typin
 revisions in `uv.lock` define the supported development environment. Optional
 typing checks require the `typing` extra; distribution smoke installs only the
 base package. `scripts/check_distribution.py` inspects wheel and sdist contents,
-then exercises CLI compilation, native migration authoring/execution, cold
+then exercises phase-2 composition, native migration authoring/execution, cold
 serving, ORM writes, drift refusal and history-preserving cleanup outside the
 checkout.
 

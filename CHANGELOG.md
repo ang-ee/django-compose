@@ -2,10 +2,9 @@
 
 ## 0.1.0.dev0 — unreleased
 
-- Independent native Django app, settings and abstract model composition.
-- Direct deterministic directory builds and import-only prebuilt serving.
-- Explicit capability declarations and safe generated-file ownership.
-- Native reusable migration binding, immutable snapshots, drop guards and guarded
-  history reset.
-- Optional django-stubs composition typing and native Hatch packaging hook.
+- Native `Composable` class keywords and a public composition facts API.
+- Phase-2 emission during Django setup with structural capability protocols.
+- Pre-setup fingerprints, verified receipts and import-only serving configs.
+- Retained history tombstones, explicit retirement and native migration guards.
+- Optional django-stubs model composition typing; Django-only base dependency.
 - Plain Django example and fresh installed-wheel verification.

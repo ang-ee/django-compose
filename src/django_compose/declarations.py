@@ -146,7 +146,7 @@ def model_declaration(
             (attributes, declaration.attributes, reserved),
             (options, declaration.meta_options, set(DEFAULT_NAMES)),
         ):
-            for name, value in sorted(values.items()):
+            for name, value in values.items():
                 if (
                     not isinstance(name, str)
                     or not name.isidentifier()
