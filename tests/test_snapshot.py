@@ -465,3 +465,45 @@ print(first.digest())
     for result in results:
         assert result.returncode == 0, result.stdout + result.stderr
     assert results[0].stdout == results[1].stdout
+
+
+@pytest.mark.parametrize("directory", ("tests", "migrations", "private"))
+def test_explicit_globs_override_default_walk_exclusions(tmp_path, directory):
+    app = tmp_path / "app"
+    path = app / directory / "rules.py"
+    path.parent.mkdir(parents=True)
+    path.write_text("first")
+    entries = (Entry("app", "app", "django.apps.AppConfig", str(app), "app"),)
+    arguments = {"fingerprint_excludes": (f"{directory}/**",)}
+    assert f"app/{directory}/rules.py" not in dict(snapshot(entries, **arguments).files)
+    before = snapshot(entries, fingerprint_globs=(f"{directory}/*.py",), **arguments)
+    assert f"app/{directory}/rules.py" in dict(before.files)
+    path.write_text("second")
+    assert (
+        before.digest() != snapshot(entries, fingerprint_globs=(f"{directory}/*.py",), **arguments).digest()
+    )
+
+
+def test_structural_settings_owns_environment_boundary_and_custom_inputs():
+    from django_compose.snapshot import structural_settings
+
+    keys = structural_settings({"COMPOSE_FINGERPRINT_SETTINGS": ["CUSTOM_MODEL"], "COMPOSE_EXTENSION": 1})
+    assert {"INSTALLED_APPS", "MIGRATION_MODULES", "COMPOSE_ENV_PREFIXES", "CUSTOM_MODEL"} <= keys
+    assert "COMPOSE_EXTENSION" in keys
+    assert "EXTRA" in structural_settings({}, settings_keys=("EXTRA",))
+    assert not {"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_COMMAND_CONTEXT"}.intersection(keys)
+
+
+def test_command_context_never_enters_snapshot_even_when_explicitly_requested():
+    assert (
+        snapshot(()).digest()
+        == snapshot(
+            (), namespace={"COMPOSE_COMMAND_CONTEXT": object()}, settings_keys=("COMPOSE_COMMAND_CONTEXT",)
+        ).digest()
+    )
+
+
+@pytest.mark.parametrize("declared", ("CUSTOM", (12,), None))
+def test_fingerprint_setting_names_are_validated(declared):
+    with pytest.raises(ImproperlyConfigured, match="COMPOSE_FINGERPRINT_SETTINGS"):
+        snapshot((), namespace={"COMPOSE_FINGERPRINT_SETTINGS": declared})

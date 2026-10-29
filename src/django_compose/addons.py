@@ -55,10 +55,11 @@ def _installed(group: str) -> tuple[dict[str, metadata.Distribution], dict[str, 
     return distributions, points
 
 
-def enabled_apps(roots: Iterable[str], *, group: str) -> Closure:
+def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
     """Expand explicit roots using installed providers and selected requires_apps.
 
-    The group is explicit and settings are never read. Its entry-point keys are
+    Settings are never read. Without a group, only native requires_apps edges
+    apply and distribution metadata is not inspected. Its entry-point keys are
     native app names and values are native INSTALLED_APPS strings, never loaded
     entry-point objects. An addon's active Requires-Dist edges (extra='') activate
     only distributions in this group. Ordinary roots have no metadata expansion.
@@ -67,7 +68,7 @@ def enabled_apps(roots: Iterable[str], *, group: str) -> Closure:
     Root configs are preselected and override dependency/default config choices.
     Conflicting dependency configs, duplicate native labels and cycles fail.
     """
-    if not isinstance(group, str) or not group:
+    if group is not None and (not isinstance(group, str) or not group):
         raise ImproperlyConfigured("An explicit non-empty addon entry-point group is required")
     root_entries = tuple(roots)
     if any(not isinstance(entry, str) for entry in root_entries):
@@ -76,7 +77,7 @@ def enabled_apps(roots: Iterable[str], *, group: str) -> Closure:
     selected = {entry.name: (entry.entry, AppConfig.create(entry.entry)) for entry in normalized_roots}
     root_names = tuple(selected)
     root_set = frozenset(root_names)
-    distributions, points = _installed(group)
+    distributions, points = _installed(group) if group is not None else ({}, {})
     by_app = {point.name: name for name, point in points.items()}
     graph: dict[str, tuple[str, ...]] = {}
 

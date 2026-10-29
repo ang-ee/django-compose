@@ -23,6 +23,45 @@ from django_compose.sources import SourceResolver
 COMPILER = "django-compose:1"
 DEFAULT_EXCLUDES = ("**/__pycache__/**", "**/migrations/**", "**/tests/**")
 
+NON_INPUT_SETTINGS = frozenset({"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_COMMAND_CONTEXT"})
+STRUCTURAL_SETTINGS = frozenset(
+    {
+        "INSTALLED_APPS",
+        "MIGRATION_MODULES",
+        "DEFAULT_AUTO_FIELD",
+        "AUTH_USER_MODEL",
+        "COMPOSE_ADDON_GROUP",
+        "COMPOSE_OUTPUT_DIR",
+        "COMPOSE_OUTPUT_MODULE",
+        "COMPOSE_INTEGRATIONS",
+        "COMPOSE_TRANSITION_SOURCE",
+        "COMPOSE_EXTERNAL_ARTIFACT_ROOTS",
+        "COMPOSE_OWNED_ARTIFACT_PATHS",
+        "COMPOSE_FINGERPRINT_GLOBS",
+        "COMPOSE_FINGERPRINT_SETTINGS",
+        "COMPOSE_FINGERPRINT_EXCLUDES",
+        "COMPOSE_ENV_PREFIXES",
+        "COMPOSE_WATCH_PATHS",
+    }
+)
+
+
+def structural_settings(namespace: Mapping[str, Any], *, settings_keys: Iterable[str] = ()) -> frozenset[str]:
+    """Name compiler inputs, including capability-declared fingerprint settings.
+
+    Configuration uses this same ownership boundary to refuse environment inputs.
+    Derived state and command execution context never participate in a snapshot.
+    """
+    declared = namespace.get("COMPOSE_FINGERPRINT_SETTINGS", ())
+    if isinstance(declared, str) or not isinstance(declared, Iterable):
+        raise ImproperlyConfigured("COMPOSE_FINGERPRINT_SETTINGS must contain setting names")
+    custom = (*settings_keys, *declared)
+    if any(not isinstance(key, str) or not key for key in custom):
+        raise ImproperlyConfigured("COMPOSE_FINGERPRINT_SETTINGS must contain setting names")
+    return (
+        STRUCTURAL_SETTINGS | {key for key in namespace if key.startswith("COMPOSE_")} | set(custom)
+    ) - NON_INPUT_SETTINGS
+
 
 def mode() -> Literal["write", "check"] | None:
     value = os.environ.get("DJANGO_COMPOSE_MODE")
@@ -263,7 +302,7 @@ def snapshot(
     effective_settings = {
         key: value
         for key, value in values.items()
-        if key.startswith("COMPOSE_") and key not in {"COMPOSE_SNAPSHOT", "COMPOSE_ROOTS"}
+        if key.startswith("COMPOSE_") and key not in NON_INPUT_SETTINGS
     }
     output_dir = values.get("COMPOSE_OUTPUT_DIR")
     effective_settings.update(
@@ -284,24 +323,25 @@ def snapshot(
             "AUTH_USER_MODEL": values.get("AUTH_USER_MODEL", global_settings.AUTH_USER_MODEL),
         }
     )
-    hook_settings = set(settings_keys) | set(values.get("COMPOSE_FINGERPRINT_SETTINGS", ()))
-    extras = (
-        hook_settings
-        - set(effective_settings)
-        - {"COMPOSE_FINGERPRINT_SETTINGS", "COMPOSE_SNAPSHOT", "COMPOSE_ROOTS"}
-    )
+    hook_settings = structural_settings(values, settings_keys=settings_keys)
+    hook_settings -= STRUCTURAL_SETTINGS
+    extras = hook_settings - set(effective_settings)
     effective_settings["COMPOSE_FINGERPRINT_SETTINGS"] = tuple(sorted(extras))
     for key in sorted(extras):
         effective_settings[key] = values.get(key, getattr(global_settings, key, None))
     files: dict[str, str] = {}
     for entry in normalized:
         root = Path(entry.path)
-        paths = set(root.rglob("*.py"))
+        paths = {
+            path
+            for path in root.rglob("*.py")
+            if not any(path.relative_to(root).full_match(pattern) for pattern in excludes)
+        }
         for pattern in globs:
             paths.update(root.glob(pattern))
         for path in sorted(paths):
             relative = path.relative_to(root)
-            if path.is_file() and not any(relative.full_match(pattern) for pattern in excludes):
+            if path.is_file():
                 files[f"{entry.name}/{relative.as_posix()}"] = hashlib.sha256(path.read_bytes()).hexdigest()
     modules = {
         f"integration:{dotted.rpartition('.')[0]}": dotted.rpartition(".")[0] for dotted in integrations

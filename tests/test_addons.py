@@ -139,12 +139,11 @@ def test_plain_root_has_no_package_based_expansion_but_honors_native_edges(insta
     assert enabled_apps((plain,), group=GROUP).entries == (native, plain)
 
 
-def test_group_is_explicit_and_other_groups_do_not_activate(installed):
+def test_other_groups_do_not_activate_and_invalid_explicit_group_fails(installed):
     root = installed.app("selection_root")
     installed.distribution("other-dist", app=root, requires=("missing",), group="another.addons")
     assert enabled_apps((root,), group=GROUP).addons == frozenset()
-    with pytest.raises(TypeError, match="group"):
-        enabled_apps((root,))
+    assert enabled_apps((root,)).entries == (root,)
     with pytest.raises(ImproperlyConfigured, match="group"):
         enabled_apps((root,), group="")
 
@@ -293,3 +292,28 @@ def test_transitive_metadata_uses_entry_point_configs_without_enabling_requested
     assert closure.addons == {leaf, middle, root}
     assert isinstance(closure.addons, frozenset)
     assert isinstance(closure.required, frozenset)
+
+
+@pytest.mark.parametrize("group", ("", 12, False))
+def test_invalid_explicit_groups_are_rejected(installed, group):
+    root = installed.app("selection_root")
+    with pytest.raises(ImproperlyConfigured, match="group"):
+        enabled_apps((root,), group=group)
+
+
+def test_unset_group_resolves_native_graph_without_distribution_access(installed, monkeypatch):
+    root = installed.app("selection_root", requires=("selection_z", "selection_a.apps.DefaultConfig"))
+    installed.app("selection_z")
+    target = installed.app(
+        "selection_a", configs="class SelectedConfig(DefaultConfig):\n    default = False\n"
+    )
+    explicit = target + ".apps.SelectedConfig"
+
+    def forbidden():
+        raise AssertionError("unset group must not inspect distributions")
+
+    monkeypatch.setattr(metadata, "distributions", forbidden)
+    result = enabled_apps((root, explicit))
+    assert result.entries == (explicit, "selection_z", root)
+    assert result.required == {"selection_z"}
+    assert result.addons == frozenset()
