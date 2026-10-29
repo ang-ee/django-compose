@@ -650,6 +650,7 @@ class Literals:
         return ModelDeclaration()
 class Files:
     external_root = "files"
+    phase = "models"
     def render(self, composition, models):
         return {}
 class Retired:

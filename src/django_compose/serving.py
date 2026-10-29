@@ -39,10 +39,10 @@ def receipt_lock(
         raise ValueError("Composition wait must be finite and non-negative")
     root = Path(output_dir)
     _validate_output_root(root)
+    path = root / ".compose.lock"
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError("Generated lock must be a regular file, not a symlink")
     if not write:
-        path = root / ".compose.lock"
-        if path.is_symlink():
-            raise ValueError("Generated lock is a symlink")
         if path.exists():
             with path.open("rb") as stream:
                 os.set_inheritable(stream.fileno(), False)
@@ -57,9 +57,6 @@ def receipt_lock(
             yield
         return
     root.mkdir(parents=True, exist_ok=True)
-    path = root / ".compose.lock"
-    if path.is_symlink():
-        raise ValueError("Generated lock is a symlink")
     with path.open("a+b") as stream:
         os.set_inheritable(stream.fileno(), False)
         if wait is None:
@@ -121,10 +118,12 @@ def read_receipt(output_module: Path | str) -> Receipt | None:
     path = root / "__init__.py"
     if not path.exists():
         return None
-    if root.is_symlink() or path.is_symlink():
-        raise ImproperlyConfigured("Generated receipt cannot be a symlink")
+    if root.is_symlink() or path.is_symlink() or not path.is_file():
+        raise ImproperlyConfigured("Generated receipt must be a regular file, not a symlink")
     try:
         source = path.read_text()
+        if not source:
+            return None
         if GENERATED_SENTINEL not in source:
             raise ValueError("missing generated-output marker")
         values = {}

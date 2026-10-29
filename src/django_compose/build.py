@@ -105,6 +105,11 @@ class BuildPlan:
             self.previous = GeneratedTree(self.output_dir, {})._validate()
             if self.mode == "write":
                 receipt = self._receipt(progress=True)
+                if self.previous is None:
+                    self.sources.update({Path(label) / "__init__.py": "" for label in receipt.HISTORY_LABELS})
+                    receipt = self._receipt(
+                        progress=True, hashes=GeneratedTree(self.output_dir, self.sources).hashes()
+                    )
                 atomic_write(self.output_dir / "__init__.py", receipt.source().encode())
             self.composition = discover(self.configs)
             models = {model for config in self.configs for model in (config.models or {}).values()}
