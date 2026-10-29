@@ -39,7 +39,6 @@ STRUCTURAL_SETTINGS = frozenset(
         "COMPOSE_INTEGRATIONS",
         "COMPOSE_TRANSITION_SOURCE",
         "COMPOSE_EXTERNAL_ARTIFACT_ROOTS",
-        "COMPOSE_OWNED_ARTIFACT_PATHS",
         "COMPOSE_FINGERPRINT_GLOBS",
         "COMPOSE_FINGERPRINT_SETTINGS",
         "COMPOSE_FINGERPRINT_EXCLUDES",
@@ -352,9 +351,6 @@ def snapshot(
             "COMPOSE_TRANSITION_SOURCE": records,
             "COMPOSE_EXTERNAL_ARTIFACT_ROOTS": tuple(
                 sorted(set(values.get("COMPOSE_EXTERNAL_ARTIFACT_ROOTS", ())))
-            ),
-            "COMPOSE_OWNED_ARTIFACT_PATHS": tuple(
-                sorted(set(values.get("COMPOSE_OWNED_ARTIFACT_PATHS", ())))
             ),
             "DEFAULT_AUTO_FIELD": values.get("DEFAULT_AUTO_FIELD", global_settings.DEFAULT_AUTO_FIELD),
             "AUTH_USER_MODEL": values.get("AUTH_USER_MODEL", global_settings.AUTH_USER_MODEL),

@@ -170,7 +170,6 @@ assert not any(name == "probeapp" or name.startswith("probeapp.") for name in sy
         ("COMPOSE_OUTPUT_MODULE", "runtime", "other_runtime"),
         ("COMPOSE_OUTPUT_DIR", "runtime", "other_runtime"),
         ("COMPOSE_EXTERNAL_ARTIFACT_ROOTS", (), ("permissions",)),
-        ("COMPOSE_OWNED_ARTIFACT_PATHS", (), ("permissions/schema.zed",)),
     ],
 )
 def test_compiler_settings_always_change_snapshot_digest(key, first, changed):
@@ -188,7 +187,6 @@ def test_compiler_defaults_and_normalized_paths_produce_identical_build_serve_in
         "COMPOSE_OUTPUT_MODULE": "runtime",
         "COMPOSE_OUTPUT_DIR": None,
         "COMPOSE_EXTERNAL_ARTIFACT_ROOTS": [],
-        "COMPOSE_OWNED_ARTIFACT_PATHS": [],
     }
     assert snapshot(()).digest() == snapshot((), namespace=explicit_defaults).digest()
     build = snapshot(
