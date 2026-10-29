@@ -1,120 +1,299 @@
-"""Explicit, process-isolated compilation of raw native Django settings."""
+"""Compose-only model emission, concrete imports, artifacts and final publication."""
 
 from __future__ import annotations
 
 import importlib
-import os
-import sys
-from collections.abc import Mapping
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import Any, Literal
 
-from django.apps import AppConfig
+from django.apps import AppConfig, apps
+from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
-from django_compose.composer import Composer
-from django_compose.declarations import BuildIntegration
-from django_compose.loader import runtime_directory_declaration
-from django_compose.yamlconf import YAMLCONF_ATTRIBUTES, is_setting_name
+from django_compose.artifacts import GeneratedTree, atomic_write, receipt_lock
+from django_compose.declarations import ArtifactHook, ModelDeclarationHook, model_declaration
+from django_compose.model_composition import ModelComposition
+from django_compose.rendering import render_models
+from django_compose.serving import Receipt, read_receipt
+from django_compose.snapshot import Snapshot
 
-if TYPE_CHECKING:
-    from django_compose.runtime import Runtime
+
+def discover(configs: Iterable[AppConfig]) -> ModelComposition:
+    return ModelComposition.discover(tuple(configs))
 
 
-class SettingsIntegration(BuildIntegration):
-    """Contribute only the late-bound generated settings entrypoint."""
+@dataclass(frozen=True)
+class ConcreteModels:
+    composition: ModelComposition
 
-    def render_sources(self, runtime: Runtime) -> Mapping[Path, str]:
-        return {
-            Path("settings.py"): (
-                '"""Generated settings: deployment inputs remain in the raw authored module."""\n'
-                "from django_compose.loader import load_settings as _load_settings\n\n"
-                "_load_settings(globals(), __file__)\n"
-                "del _load_settings\n"
+    def get_model(self, label: str, name: str) -> Any:
+        return apps.get_model(label, name, require_ready=False)
+
+
+class BuildPlan:
+    """One phase-2 build, retaining its writer lock until final publication."""
+
+    def __init__(
+        self,
+        snap: Snapshot,
+        configs: Iterable[AppConfig],
+        *,
+        mode: Literal["write", "check"],
+        integrations: tuple[object, ...],
+        transitions: Iterable[Any],
+        output_dir: Path,
+        output_module: str,
+    ) -> None:
+        if mode not in ("write", "check"):
+            raise ImproperlyConfigured("BuildPlan requires write or check mode")
+        if (
+            not all(part.isidentifier() for part in output_module.split("."))
+            or not output_dir.name.isidentifier()
+        ):
+            raise ImproperlyConfigured("Output package must have Python identifiers")
+        self.snapshot = snap
+        self.configs = tuple(c for c in configs if c.name != "django_compose")
+        self.mode = mode
+        self.integrations = integrations
+        self.transitions = tuple(transitions)
+        self.output_dir = output_dir
+        self.output_module = output_module
+        self.previous = read_receipt(output_dir)
+        self.generation = snap.digest()
+        self.sources: dict[Path, str | bytes] = {}
+        self._lock = receipt_lock(output_dir, write=mode == "write")
+        self._locked = False
+
+    @property
+    def labels(self) -> tuple[str, ...]:
+        return self.composition.labels
+
+    def _receipt(self, *, progress: bool, hashes: dict[str, str] | None = None) -> Receipt:
+        previous = self.previous
+        retired = previous.RETIRED_LABELS if previous else ()
+        history = set(previous.HISTORY_LABELS if previous else ())
+        history.update(getattr(self, "labels", ()))
+        history.update(path.parent.name for path in self.output_dir.glob("*/migrations") if path.is_dir())
+        history.update(transition["app_label"] for transition in self.transitions)
+        return Receipt(
+            self.generation,
+            tuple(sorted(history - set(retired))),
+            retired,
+            self.snapshot.digest(),
+            hashes if hashes is not None else (dict(previous.OWNED_FILES) if previous else {}),
+            self.snapshot.compiler,
+            tuple(getattr(self, "labels", ())),
+            progress,
+        )
+
+    def _header(self, source: str) -> str:
+        header = f"__generation__ = {self.generation!r}\n"
+        future = "from __future__ import annotations\n"
+        if future in source:
+            return source.replace(future, future + header, 1)
+        return header + source
+
+    def emit(self) -> BuildPlan:
+        self._lock.__enter__()
+        self._locked = True
+        try:
+            # Guard ownership before invalidation. A failed discovery remains invalid.
+            self.previous = GeneratedTree(self.output_dir, {})._validate()
+            if self.mode == "write":
+                receipt = self._receipt(progress=True)
+                atomic_write(self.output_dir / "__init__.py", receipt.source().encode())
+            self.composition = discover(self.configs)
+            declarations = {
+                source: model_declaration(
+                    self.composition,
+                    source,
+                    tuple(h for h in self.integrations if isinstance(h, ModelDeclarationHook)),
+                )
+                for source in self.composition.ordered_models
+            }
+            history_labels = self._receipt(progress=True).HISTORY_LABELS
+            history_source = (
+                "from django.apps import AppConfig\n\n"
+                "class HistoryConfig(AppConfig):\n"
+                "    default = False\n"
+                "    def import_models(self):\n"
+                "        self.models = self.apps.all_models[self.label]\n"
+                "        self.models_module = None\n\n"
             )
-        }
+            for label in history_labels:
+                history_source += (
+                    f"class History_{label}(HistoryConfig):\n"
+                    f"    name = {f'{self.output_module}.{label}'!r}\n"
+                    f"    label = {label!r}\n\n"
+                )
+            self.sources[Path("history.py")] = self._header(history_source)
+            for label in history_labels:
+                self.sources[Path(label) / "__init__.py"] = self._header("")
+                config = next((c for c in self.configs if c.label == label), None)
+                if config:
+                    config_path = f"{type(config).__module__}.{type(config).__qualname__}"
+                    module, _, name = config_path.rpartition(".")
+                    model_module = f"{self.output_module}.{label}.models"
+                    body = (
+                        f"from {module} import {name} as SourceConfig\n\n"
+                        "class GeneratedConfig(SourceConfig):\n"
+                        f"    name = {config.name!r}\n    label = {label!r}\n\n"
+                        "    def import_models(self):\n"
+                        "        super().import_models()\n"
+                        "        from importlib import import_module\n"
+                        f"        self.models_module = import_module({model_module!r})\n"
+                    )
+                else:
+                    body = (
+                        "from django.apps import AppConfig\n\nclass LegacyConfig(AppConfig):\n"
+                        f"    name = {f'{self.output_module}.{label}'!r}\n    label = {label!r}\n"
+                    )
+                self.sources[Path(label) / "apps.py"] = self._header(body)
+                if label in self.labels:
+                    self.sources[Path(label) / "models.py"] = self._header(
+                        render_models(
+                            self.composition,
+                            label,
+                            runtime_module=self.output_module,
+                            declarations=declarations,
+                        )
+                    )
+                migration_init = self.output_dir / label / "migrations" / "__init__.py"
+                effective = getattr(settings, "MIGRATION_MODULES", {}).get(
+                    label, f"{self.output_module}.{label}.migrations"
+                )
+                if effective == f"{self.output_module}.{label}.migrations" and not migration_init.exists():
+                    self.sources[Path(label) / "migrations" / "__init__.py"] = ""
+            if self.mode == "check":
+                if (
+                    self.previous is None
+                    or self.previous.IN_PROGRESS
+                    or self.previous.DIGEST != self.snapshot.digest()
+                ):
+                    raise ImproperlyConfigured("Generated composition is stale; run compose")
+                changed = [
+                    p
+                    for p, value in self.sources.items()
+                    if not (self.output_dir / p).is_file()
+                    or (self.output_dir / p).read_bytes() != GeneratedTree._bytes(value)
+                ]
+                if changed:
+                    raise ImproperlyConfigured(f"Generated models are stale: {changed}; run compose")
+            else:
+                GeneratedTree(self.output_dir, self.sources).reconcile(prune=False)
+                provisional = dict(self.previous.OWNED_FILES) if self.previous else {}
+                provisional.update(GeneratedTree(self.output_dir, self.sources).hashes())
+                atomic_write(
+                    self.output_dir / "__init__.py",
+                    self._receipt(progress=True, hashes=provisional).source().encode(),
+                )
+            importlib.invalidate_caches()
+            for label in self.labels:
+                importlib.import_module(f"{self.output_module}.{label}.models")
+            return self
+        except BaseException:
+            self.close()
+            raise
+
+    def render_artifacts(self, models_view: ConcreteModels, hooks: Iterable[ArtifactHook]) -> None:
+        external = set(getattr(settings, "COMPOSE_EXTERNAL_ARTIFACT_ROOTS", ()))
+        explicit = {Path(p) for p in getattr(settings, "COMPOSE_OWNED_ARTIFACT_PATHS", ())}
+        for hook in hooks:
+            root = Path(hook.external_root)
+            if (
+                root.is_absolute()
+                or len(root.parts) != 1
+                or root.name in {*self.labels, "migrations", "__pycache__", ".."}
+                or root.as_posix() not in external
+            ):
+                raise ImproperlyConfigured(f"Undeclared artifact root: {hook.external_root!r}")
+            for path, content in sorted(hook.render(self.composition, models_view).items()):
+                if (
+                    path in self.sources
+                    or not path.parts
+                    or path.parts[0] != root.as_posix()
+                    or "migrations" in path.parts
+                    or path not in explicit
+                ):
+                    raise ImproperlyConfigured(f"Competing or undeclared artifact: {path}")
+                if not isinstance(content, bytes):
+                    raise ImproperlyConfigured(f"ArtifactHook must render bytes: {path}")
+                if path.suffix == ".py":
+                    content = self._header(content.decode("utf-8")).encode("utf-8")
+                self.sources[path] = content
+        tree = GeneratedTree(self.output_dir, self.sources)
+        if self.mode == "check":
+            if tree.drift():
+                raise ImproperlyConfigured("Generated artifacts are stale; run compose")
+            actual = tree.hashes()
+            if self.previous is None or dict(self.previous.OWNED_FILES) != actual:
+                raise ImproperlyConfigured("Generated receipt is stale; run compose")
+        else:
+            tree._validate()
+            current = read_receipt(self.output_dir)
+            provisional = dict(current.OWNED_FILES) if current else {}
+            provisional.update(tree.hashes())
+            atomic_write(
+                self.output_dir / "__init__.py",
+                self._receipt(progress=True, hashes=provisional).source().encode(),
+            )
+            tree.reconcile()
+
+    def finalize(self) -> Receipt:
+        try:
+            receipt = self._receipt(
+                progress=False, hashes=GeneratedTree(self.output_dir, self.sources).hashes()
+            )
+            if self.mode == "write":
+                atomic_write(self.output_dir / "__init__.py", receipt.source().encode())
+            return receipt
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        if self._locked:
+            self._locked = False
+            self._lock.__exit__(None, None, None)
 
 
-class BuildComposeConfig(AppConfig):
-    """Compile once as the last native phase-2 import hook.
-
-    Host specializations can override ``create_runtime``. Their serving identity
-    must be explicit through ``runtime_config`` so no build import is required
-    to select that config later.
-    """
-
-    name = "django_compose"
-    default = False
-    runtime_config = "django_compose.apps.ComposeConfig"
-    runtime: Runtime
-
-    def create_runtime(self) -> Runtime:
-        """Construct the compiler with the normal settings integration."""
-        from django_compose.runtime import Runtime
-
-        return Runtime.from_django(integrations=(SettingsIntegration(), *BuildIntegration.configured()))
-
-    def import_models(self) -> None:
-        super().import_models()
-        if self.apps is None or tuple(self.apps.get_app_configs())[-1] is not self:
-            raise ImproperlyConfigured("BuildComposeConfig must be last in INSTALLED_APPS")
-        from django.conf import settings
-
-        self.runtime = self.create_runtime()
-        self.runtime.emit_sources(check=getattr(settings, "COMPOSE_CHECK", False))
-        self.runtime.import_generated_models()
-
-
-def compile_settings(
-    settings_module: str,
+def emit(
+    snap: Snapshot,
+    configs: Iterable[AppConfig],
     *,
-    output: str | None = None,
-    check: bool = False,
-    check_history: bool = False,
+    mode: Literal["write", "check"],
+    integrations: tuple[object, ...],
+    transitions: Iterable[Any],
+    output_dir: Path | str,
+    output_module: str,
+) -> BuildPlan:
+    return BuildPlan(
+        snap,
+        configs,
+        mode=mode,
+        integrations=integrations,
+        transitions=transitions,
+        output_dir=Path(output_dir),
+        output_module=output_module,
+    ).emit()
+
+
+def render_artifacts(
+    composition: BuildPlan, models_view: ConcreteModels, hooks: Iterable[ArtifactHook], *, mode: str
 ) -> None:
-    """Compile in this fresh process, without opening deployment databases.
+    if mode != composition.mode:
+        raise ImproperlyConfigured("Compose mode cannot change during population")
+    composition.render_artifacts(models_view, hooks)
 
-    CLI and Hatch launch this same operation in an isolated interpreter. The raw
-    authored module must not compose settings itself. A separate in-memory
-    settings wrapper selects the build lifecycle config and never becomes part
-    of the generated serving dependency graph.
-    """
-    import django
-    from django.apps import apps
 
-    if apps.ready or apps.loading:
-        raise ImproperlyConfigured("Compilation requires a fresh Django process")
-    sys.dont_write_bytecode = True
-    raw = importlib.import_module(settings_module)
-    namespace = {
-        name: value
-        for name, value in vars(raw).items()
-        if is_setting_name(name) or name == YAMLCONF_ATTRIBUTES
-    }
-    raw_file = getattr(raw, "__file__", None)
-    if not raw_file:
-        raise ImproperlyConfigured("The authored settings module must have a source location")
-    source_root = Path(raw_file).resolve().parent
-    configured_output = output if output is not None else namespace.get("COMPOSE_RUNTIME_DIR", "runtime")
-    runtime_dir = Path(configured_output).expanduser()
-    if not runtime_dir.is_absolute():
-        runtime_dir = source_root / runtime_dir
-    namespace.update(
-        COMPOSE_SETTINGS_MODULE=settings_module,
-        COMPOSE_RUNTIME_DIR=runtime_dir,
-        COMPOSE_CHECK=check,
-        COMPOSE_AUTHORED_RUNTIME_DIR=runtime_directory_declaration(namespace, raw_file),
-    )
-    Composer(namespace).compose_settings()
-    wrapper_name = "_django_compose_build_settings"
-    wrapper = ModuleType(wrapper_name)
-    wrapper.__dict__.update(namespace)
-    sys.modules[wrapper_name] = wrapper
-    os.environ["DJANGO_SETTINGS_MODULE"] = wrapper_name
-    django.setup()
-    if check_history:
-        config = tuple(apps.get_app_configs())[-1]
-        if not isinstance(config, BuildComposeConfig):
-            raise ImproperlyConfigured("Native history validation requires the build lifecycle config")
-        config.runtime.runtime_migrations().check_native_history(apps)
+def finalize(receipt_fields: BuildPlan, output_dir: Path | str, output_module: str) -> Receipt:
+    if Path(output_dir) != receipt_fields.output_dir or output_module != receipt_fields.output_module:
+        raise ImproperlyConfigured("Cannot finalize a different generated package")
+    return receipt_fields.finalize()
+
+
+def clean(
+    output_dir: Path | str, *, external_roots: Iterable[str] = (), owned_paths: Iterable[str] = ()
+) -> tuple[Path, ...]:
+    return GeneratedTree(Path(output_dir), {}).clean()

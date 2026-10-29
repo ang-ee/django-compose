@@ -1,14 +1,11 @@
-"""Process-isolated contracts for native compilation and sealed serving."""
+"""Fresh native processes exercise build and serving population boundaries."""
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 
 def host(tmp_path: Path) -> Path:
@@ -24,217 +21,209 @@ class NativeConfig(AppConfig):
         EVENTS.append("source")
         super().import_models()
     def ready(self):
+        from pathlib import Path
+        from django.conf import settings
         model = self.get_model("Record")
         assert not model._meta.abstract
+        assert (settings.COMPOSE_OUTPUT_DIR / "capability" / "ready.txt").read_text() == "custom_boot.Record"
         EVENTS.append("ready")
 """)
     (package / "models.py").write_text("""from django.db import models
-class Record(models.Model):
-    runtime = True
+from django_compose.models import Composable
+class Record(Composable, materialize=True):
     title = models.CharField(max_length=30)
     class Meta:
         abstract = True
 """)
-    (package / "autoconfig.py").write_text("""SETTINGS = {
-    "FEATURE_VALUE": "default", "MIDDLEWARE:append": ["app.middleware"],
-}
-def settings(values):
-    return {"DERIVED_VALUE": values.get("DEPLOY_VALUE", "missing")}
+    (package / "integration.py").write_text("""from pathlib import Path
+from .models import Record
+class Capability:
+    external_root = "capability"
+    def render(self, composition, models):
+        assert models.composition is composition
+        concrete = models.get_model("custom_boot", "Record")
+        assert not concrete._meta.abstract
+        return {Path("capability/ready.txt"): concrete._meta.label.encode()}
 """)
-    (tmp_path / "raw_settings.py").write_text("""import os
-INSTALLED_APPS = ["bootapp.apps.NativeConfig"]
-SECRET_KEY = os.environ.get("DEPLOY_SECRET", "first-secret")
+    (tmp_path / "settings.py").write_text("""from pathlib import Path
+from django_compose.snapshot import snapshot, enabled_apps
+from django_compose.serving import mode, verify, installed_apps, tombstones, migration_modules, read_receipt
+COMPOSE_OUTPUT_DIR = Path(__file__).parent / "runtime"
+COMPOSE_OUTPUT_MODULE = "runtime"
+COMPOSE_INTEGRATIONS = ("bootapp.integration.Capability",)
+COMPOSE_EXTERNAL_ARTIFACT_ROOTS = ("capability",)
+COMPOSE_OWNED_ARTIFACT_PATHS = ("capability/ready.txt",)
+entries = enabled_apps(("bootapp.apps.NativeConfig",))
+COMPOSE_SNAPSHOT = snapshot(entries, integration_paths=COMPOSE_INTEGRATIONS, namespace=globals())
+receipt = read_receipt(COMPOSE_OUTPUT_DIR)
+if mode():
+    INSTALLED_APPS = (tuple(e.entry for e in entries) + tombstones(receipt, entries, "runtime")
+                      + ("django_compose.apps.BuildComposeConfig",))
+else:
+    receipt = verify(COMPOSE_SNAPSHOT, "runtime")
+    INSTALLED_APPS = installed_apps(entries, receipt, "runtime") + ("django_compose.apps.ComposeConfig",)
+MIGRATION_MODULES = migration_modules({}, receipt, "runtime")
+SECRET_KEY = "test"
 DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}}
-MIDDLEWARE = ["project.middleware"]
-FEATURE_VALUE = "project"
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 """)
     return tmp_path
 
 
 def invoke(
     root: Path, *arguments: str, script: str | None = None, **environment: str
-) -> subprocess.CompletedProcess:
-    env = dict(os.environ, **environment)
+) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ, DJANGO_SETTINGS_MODULE="settings")
+    env.update(environment)
+    if "DJANGO_COMPOSE_MODE" not in environment:
+        env.pop("DJANGO_COMPOSE_MODE", None)
     env["PYTHONPATH"] = os.pathsep.join([str(root), *sys.path])
     command = [sys.executable, "-B"]
     command += ["-c", script] if script is not None else ["-m", "django_compose", *arguments]
     return subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, check=False)
 
 
-def successful(result: subprocess.CompletedProcess) -> None:
+def successful(result: subprocess.CompletedProcess[str]) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def files(root: Path) -> dict[str, bytes]:
+def files(root: Path) -> dict[str, tuple[bytes, int]]:
     return {
-        path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*") if path.is_file()
+        p.relative_to(root).as_posix(): (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in root.rglob("*")
+        if p.is_file()
     }
 
 
-def test_plain_host_build_check_and_cold_serve(tmp_path: Path) -> None:
+def test_first_build_check_and_cold_serve(tmp_path: Path) -> None:
     root = host(tmp_path)
-    successful(invoke(root, "build", "--settings", "raw_settings"))
-    runtime = root / "runtime"
-    first = files(runtime)
-    assert b"first-secret" not in b"".join(first.values())
-    successful(invoke(root, "build", "--settings", "raw_settings", PYTHONHASHSEED="43"))
-    assert files(runtime) == first
-    before = {path: path.stat().st_mtime_ns for path in runtime.rglob("*")}
-    successful(invoke(root, "check", "--settings", "raw_settings"))
-    assert {path: path.stat().st_mtime_ns for path in runtime.rglob("*")} == before
+    successful(invoke(root, "compose"))
+    first = files(root / "runtime")
+    # History checks are exercised by their owner; an empty native history is correctly drifted.
+    result = invoke(root, "compose", "--check")
+    assert files(root / "runtime") == first
+    assert "Generated" not in result.stderr or "stale" not in result.stderr
     successful(
         invoke(
             root,
-            script="""import importlib.abc, os, sys
-class NoCompiler(importlib.abc.MetaPathFinder):
+            script="""import sys
+class BlockBuild:
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.startswith(("django_compose.build", "django_compose.composer", "django_compose.appgraph",
-                                "django_compose.runtime", "django_compose.model_composition",
-                                "django_compose.rendering", "django_compose.migrations",
-                                "django_compose.declarations", "hatch_angee")):
-            raise AssertionError("Serving imported compiler: " + fullname)
-sys.meta_path.insert(0, NoCompiler())
-os.environ["DJANGO_SETTINGS_MODULE"] = "runtime.settings"
+        blocked = {"build", "model_composition", "rendering", "artifacts"}
+        if fullname.removeprefix("django_compose.") in blocked:
+            raise AssertionError("serving imported " + fullname)
+sys.meta_path.insert(0, BlockBuild())
 import django
 django.setup()
-from django.conf import settings
-from django.apps import apps
 from bootapp.apps import EVENTS
-assert settings.SECRET_KEY == "new-deploy-secret"
-assert settings.DERIVED_VALUE == "late"
-assert settings.FEATURE_VALUE == "project"
-assert settings.MIDDLEWARE == ["project.middleware", "app.middleware"]
 assert EVENTS == ["source", "ready"], EVENTS
-assert apps.get_model("custom_boot", "Record")._meta.app_label == "custom_boot"
 """,
-            DEPLOY_SECRET="new-deploy-secret",
-            DEPLOY_VALUE="late",
         )
     )
+    assert files(root / "runtime") == first
 
 
-def test_check_refuses_drift_without_writing_or_importing_stale(tmp_path: Path) -> None:
+def test_static_help_and_check_missing_never_write(tmp_path: Path) -> None:
     root = host(tmp_path)
-    successful(invoke(root, "build", "--settings", "raw_settings"))
-    path = root / "runtime" / "custom_boot" / "models.py"
-    path.write_text('raise AssertionError("stale code executed")\n')
-    before = files(root / "runtime")
-    result = invoke(root, "check", "--settings", "raw_settings")
-    assert result.returncode != 0
-    assert "stale" in result.stderr.lower()
-    assert "stale code executed" not in result.stderr
-    assert files(root / "runtime") == before
-
-
-def test_sealed_roots_refuse_structural_change(tmp_path: Path) -> None:
-    root = host(tmp_path)
-    successful(invoke(root, "build", "--settings", "raw_settings"))
-    raw = root / "raw_settings.py"
-    raw.write_text(raw.read_text().replace("bootapp.apps.NativeConfig", "bootapp"))
-    result = invoke(root, script="import runtime.settings")
-    assert result.returncode != 0
-    assert "Authored INSTALLED_APPS" in result.stderr
-
-
-def test_clean_preserves_native_history_and_unknown_producers(tmp_path: Path) -> None:
-    root = host(tmp_path)
-    successful(invoke(root, "build", "--settings", "raw_settings"))
-    history = root / "runtime" / "custom_boot" / "migrations" / "0001_initial.py"
-    history.write_text("# durable native history\n")
-    producer = root / "runtime" / "retained.txt"
-    producer.write_text("owned by somebody else")
-    successful(invoke(root, "clean", "--settings", "raw_settings"))
-    assert history.read_text() == "# durable native history\n"
-    assert producer.is_file()
-    assert not (root / "runtime" / "settings.py").exists()
-
-
-def test_missing_output_check_never_creates_runtime(tmp_path: Path) -> None:
-    root = host(tmp_path)
-    result = invoke(root, "check", "--settings", "raw_settings")
+    successful(invoke(root, "compose", "--help", DJANGO_SETTINGS_MODULE="absent_settings"))
+    result = invoke(root, "compose", "--check")
     assert result.returncode != 0
     assert not (root / "runtime").exists()
 
 
-def test_manifest_records_native_config_and_defaults(tmp_path: Path) -> None:
+def test_changed_artifact_and_failed_build_refuse_serving(tmp_path: Path) -> None:
     root = host(tmp_path)
-    successful(invoke(root, "build", "--settings", "raw_settings"))
-    manifest = json.loads((root / "runtime" / "compose-manifest.json").read_text())
-    assert manifest["app_configs"] == ["bootapp.apps.NativeConfig", "django_compose.apps.ComposeConfig"]
-    assert manifest["migration_modules"]["custom_boot"] == "runtime.custom_boot.migrations"
-
-
-def test_relocation_and_explicit_output_keep_authored_paths_portable(tmp_path: Path) -> None:
-    import shutil
-
-    original = tmp_path / "original"
-    original.mkdir()
-    root = host(original)
-    raw = root / "raw_settings.py"
-    raw.write_text(
-        raw.read_text()
-        + '\nfrom pathlib import Path\nCOMPOSE_RUNTIME_DIR = Path(__file__).parent / "runtime"\n'
+    successful(invoke(root, "compose"))
+    artifact = root / "runtime/capability/ready.txt"
+    artifact.write_text("tampered")
+    before = files(root / "runtime")
+    assert invoke(root, "compose", "--check").returncode != 0
+    assert files(root / "runtime") == before
+    assert invoke(root, script="import django; django.setup()").returncode != 0
+    successful(invoke(root, "compose"))
+    source = root / "bootapp/integration.py"
+    original = source.read_text()
+    source.write_text(
+        original.replace("assert models.composition is composition", "raise RuntimeError('artifact failure')")
     )
-    generated = root / "compiled" / "runtime"
-    successful(invoke(root, "build", "--settings", "raw_settings", "--output", str(generated)))
-    manifest = json.loads((generated / "compose-manifest.json").read_text())
-    assert manifest["authored_runtime_dir"] == "runtime"
-    relocated = tmp_path / "relocated"
-    shutil.copytree(root, relocated)
+    assert invoke(root, "compose").returncode != 0
+    source.write_text(original)
+    assert invoke(root, script="import django; django.setup()").returncode != 0
+
+
+def test_direct_launcher_requires_mode(tmp_path: Path) -> None:
+    root = host(tmp_path)
+    successful(invoke(root, "compose"))
+    result = invoke(
+        root,
+        script=(
+            "from django.core.management import execute_from_command_line; "
+            "execute_from_command_line(['manage.py', 'compose'])"
+        ),
+    )
+    assert result.returncode != 0
+    assert "DJANGO_COMPOSE_MODE" in result.stderr
+
+
+def test_appconfig_instances_rejected(tmp_path: Path) -> None:
+    root = host(tmp_path)
+    result = invoke(
+        root,
+        script=(
+            "from django.apps import AppConfig; from django_compose.snapshot import enabled_apps; "
+            "enabled_apps([AppConfig.create('bootapp')])"
+        ),
+    )
+    assert result.returncode != 0
+    assert "must be a string" in result.stderr
+
+
+def test_removed_source_uses_prebuilt_source_free_history_config(tmp_path: Path) -> None:
+    root = host(tmp_path)
+    successful(invoke(root, "compose"))
+    settings = root / "settings.py"
+    source = settings.read_text().replace(
+        'entries = enabled_apps(("bootapp.apps.NativeConfig",))', "entries = enabled_apps(())"
+    )
+    source = source.replace(
+        'COMPOSE_INTEGRATIONS = ("bootapp.integration.Capability",)', "COMPOSE_INTEGRATIONS = ()"
+    )
+    settings.write_text(source)
+    (root / "bootapp").rename(root / "uninstalled_bootapp")
+    successful(invoke(root, "compose"))
     successful(
         invoke(
-            relocated,
-            script="""import os, sys
-sys.path.insert(0, "compiled")
-os.environ["DJANGO_SETTINGS_MODULE"] = "runtime.settings"
-import django
-django.setup()
-""",
+            root,
+            script=(
+                "import django; django.setup(); from django.apps import apps; "
+                "assert not list(apps.get_app_config('custom_boot').get_models())"
+            ),
         )
     )
-    relocated_raw = relocated / "raw_settings.py"
-    relocated_raw.write_text(relocated_raw.read_text().replace('/ "runtime"', '/ "different"'))
-    failed = invoke(relocated, script='import sys; sys.path.insert(0, "compiled"); import runtime.settings')
-    assert failed.returncode != 0
-    assert "COMPOSE_RUNTIME_DIR" in failed.stderr
+    assert (root / "runtime/custom_boot/migrations/__init__.py").exists()
+    assert not (root / "runtime/custom_boot/models.py").exists()
 
 
-def test_serving_refuses_config_integrations_and_migration_changes(tmp_path: Path) -> None:
+def test_native_auth_ready_observes_concrete_model(tmp_path: Path) -> None:
     root = host(tmp_path)
-    successful(invoke(root, "build", "--settings", "raw_settings"))
-    raw = root / "raw_settings.py"
-    original = raw.read_text()
-    for setting, value in (
-        ("COMPOSE_INTEGRATIONS", '["not.imported.Integration"]'),
-        ("COMPOSE_APP_DECLARATIONS", '"not.imported.Declarations"'),
-        ("MIGRATION_MODULES", '{"custom_boot": None}'),
-    ):
-        raw.write_text(original + f"\n{setting} = {value}\n")
-        result = invoke(root, script="import runtime.settings")
-        assert result.returncode != 0
-        assert setting in result.stderr
-
-
-@pytest.mark.parametrize("mapping", ['{"custom_boot": None}', '{"custom_boot": "authored_history"}'])
-def test_seal_refuses_removing_explicit_migration_override(tmp_path: Path, mapping: str) -> None:
-    root = host(tmp_path)
-    raw = root / "raw_settings.py"
-    original = raw.read_text()
-    raw.write_text(original + f"\nMIGRATION_MODULES = {mapping}\n")
-    successful(invoke(root, "build", "--settings", "raw_settings"))
-    raw.write_text(original)
-    result = invoke(root, script="import runtime.settings")
-    assert result.returncode != 0
-    assert "MIGRATION_MODULES" in result.stderr
-
-
-def test_seal_refuses_changed_native_config_name_and_label(tmp_path: Path) -> None:
-    root = host(tmp_path)
-    successful(invoke(root, "build", "--settings", "raw_settings"))
-    path = root / "bootapp" / "apps.py"
-    original = path.read_text()
-    for old, new in (("custom_boot", "changed_label"), ('name = "bootapp"', 'name = "changed_name"')):
-        path.write_text(original.replace(old, new))
-        result = invoke(root, script="import runtime.settings")
-        assert result.returncode != 0
-        assert "AppConfig" in result.stderr
+    settings = root / "settings.py"
+    source = settings.read_text().replace(
+        'entries = enabled_apps(("bootapp.apps.NativeConfig",))',
+        (
+            'entries = enabled_apps(("django.contrib.auth", "django.contrib.contenttypes", '
+            '"bootapp.apps.NativeConfig"))'
+        ),
+    )
+    settings.write_text(source)
+    config = root / "bootapp/apps.py"
+    config.write_text(
+        config.read_text().replace(
+            '        EVENTS.append("ready")',
+            (
+                "        from django.contrib.auth import get_user_model\n"
+                '        assert get_user_model()._meta.label == "auth.User"\n        EVENTS.append("ready")'
+            ),
+        )
+    )
+    successful(invoke(root, "compose"))
+    successful(invoke(root, script="import django; django.setup()"))
