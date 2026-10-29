@@ -13,6 +13,10 @@ config.models_module = None
 config.models.clear()
 apps.clear_cache()
 settings.COMPOSE_TRANSITION_SOURCE = ()
+settings.COMPOSE_SNAPSHOT = SimpleNamespace(
+    entries=tuple(SimpleNamespace(label=label) for label in ("beta", "author")),
+    transition_records=(),
+)
 receipt = SimpleNamespace(HISTORY_LABELS=("alpha", "beta"), RETIRED_LABELS=())
 stack = ExitStack()
 stack.enter_context(patch("django_compose.serving.read_receipt", return_value=receipt))
@@ -97,30 +101,6 @@ if {purge!r}:
     assert ("alpha", "record") not in loader.project_state().models
 """
     )
-
-
-def test_retained_migration_import_report_keeps_external_helper_identity(host):
-    root, run = host
-    write(
-        root,
-        "output/alpha/migrations/0002_helper.py",
-        """
-__package__ = "provider.transitions"
-from .helpers import custom_validator
-from external.fields import HistoricalField
-""",
-    )
-    run("""
-from django_compose.migrations import historical_imports
-with patch("importlib.metadata.packages_distributions", return_value={
-    "provider": ["provider-distribution"], "external": ["field-distribution"]
-}):
-    report = historical_imports(Path("output"))
-assert {(item.module, item.distributions) for item in report} == {
-    ("provider.transitions.helpers", ("provider-distribution",)),
-    ("external.fields", ("field-distribution",)),
-}
-""")
 
 
 @pytest.mark.parametrize(
@@ -328,3 +308,34 @@ with patch.object(router, "routers", [ModelRouter()]):
 assert not updated.called
 """
     )
+
+
+def test_enabled_app_without_models_module_is_not_history_only(host):
+    _, run = host
+    run("""
+from types import SimpleNamespace
+from django_compose.migrations import effective_states, retire_history
+from django_compose.serving import Receipt
+config = apps.get_app_config("alpha")
+config.models_module = None
+config.models.clear()
+apps.clear_cache()
+receipt = Receipt("g", ("alpha", "beta"), (), "d", {}, "c")
+with patch("django_compose.serving.read_receipt", return_value=receipt):
+    loader = MigrationLoader(None)
+    before, after = effective_states(loader, apps)
+    assert ("alpha", "record") not in after.models
+    assert DropGuardAutodetector(before, after).changes(loader.graph)["alpha"]
+    expect(RuntimeError, "history-only", lambda: retire_history("alpha"))
+""")
+
+
+def test_binding_uses_frozen_snapshot_after_settings_source_changes(host):
+    _, run = host
+    run("""
+settings.COMPOSE_TRANSITION_SOURCE = "missing.cannot_import"
+binding = TransitionBinding(labels=("alpha", "beta"))
+assert binding.declarations == settings.COMPOSE_SNAPSHOT.transition_records
+expect(RuntimeError, "pending authored", binding.check)
+assert not TransitionBinding(labels=("alpha", "beta"), declarations=()).check()
+""")

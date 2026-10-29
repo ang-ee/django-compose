@@ -23,7 +23,11 @@ execution, routing and the recorder.
 ## Reusable authored transitions
 
 `COMPOSE_TRANSITION_SOURCE` supplies ordered `{declaring_app, name, app_label, module}`
-entries, either directly or through a dotted callable safe to import before setup. The
+entries, either directly or through a dotted callable safe to import before setup.
+Selected apps also contribute default `compose_migrations/<label>/<name>.py`
+transitions. Snapshot normalizes these once into immutable `transition_records`;
+build and `TransitionBinding`'s settings fallback use that same collection.
+Explicit declarations passed to `TransitionBinding` remain supported. The
 module exports native `Migration` and a pure `applies(ProjectState)` guard.
 Native `dependencies`, `run_before`, `replaces` and operation semantics determine
 ordering. A consumer may contribute a transition targeting another installed
@@ -64,7 +68,10 @@ before use. It is never invoked by build, check, packaging or cleanup.
 
 The receipt's `HISTORY_LABELS` retain disabled apps as history-only configs.
 `effective_states(loader, registry, purge=frozenset())` compares live models for
-active apps and preserves historical models for those tombstones. Ordinary
+active apps and preserves historical models for those tombstones. Membership is
+`HISTORY_LABELS` minus retired labels and the snapshot's selected app labels.
+An enabled app with no models module is still active: deleting its last model
+continues to produce native deletion operations. Ordinary
 `makemigrations`, `migrate`, checks and history maintenance therefore never turn
 an app disable into automatic `DeleteModel` operations.
 
@@ -78,13 +85,37 @@ for retry and never records retirement. Retirement updates the receipt through
 the compiler's writer lock; the next compose removes the tombstone. The retired
 migration package can then leave version control.
 
-`check_migrations` performs the native state and pending-transition check and
-reports imports retained in generated migration packages, including distribution
-identities from installed package metadata. Copies of transitions may still
-import addon helpers, validators and custom fields: keep those providers
-available until the retained native history no longer imports them. An unresolved
-distribution is not evidence that removal is safe.
+`check_migrations` performs the native state and pending-transition check.
+Use the separate import audit before removing historical providers:
+
+```sh
+python manage.py check_migrations --imports
+python manage.py check_migrations --imports --removing old-addon historical-fields
+```
+
+The audit enumerates selected native migration packages, including authored
+`MIGRATION_MODULES`, without relying on loaded migration objects. It parses
+imports at every depth, follows project and transition helper bodies recursively,
+and recognizes literal `import_module`, `import_string` and `__import__` targets.
+Copied transitions retain their original relative import package. Historical
+`apps.get_model()` calls remain migration-state references rather than Python
+provider lookups. The report performs no migration execution or database queries;
+it also reports errors from an offline native loader without losing the source
+report when import or graph loading fails.
+
+Providers are classified as stdlib/built-in/frozen, exact installed-distribution
+file owners through RECORD or PEP 610 metadata, enabled-app sources, or project
+sources. It never guesses a distribution from the top-level package name.
+Distribution imports are leaves except for transition helpers, whose bodies
+remain part of the audit. Unsupported non-literal dynamic imports and unresolved
+modules are visible and block removal. `--removing` also refuses a distribution
+that provides an enabled app or any retained import; loader failures block that
+proof too. Distribution names use the standard case/punctuation normalization.
+Keep historical field, validator and helper providers until their retained native
+history no longer needs them. The command reports a verdict and never uninstalls
+packages.
 
 Migration commands require serving mode and reject `DJANGO_COMPOSE_MODE` when
-set. `compose --check` invokes the same native-history comparison after app
-population and remains read-only.
+set. The package launcher enforces this before settings load; command handlers
+also enforce it for native command dispatch. `compose --check` invokes the same
+native-history comparison after app population and remains read-only.

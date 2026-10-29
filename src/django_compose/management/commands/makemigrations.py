@@ -16,11 +16,11 @@ from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.writer import MigrationWriter
 from django.utils.module_loading import module_dir
 
+from django_compose.management import require_serving_mode
 from django_compose.migrations import (
     DropGuardAutodetector,
     TransitionBinding,
     _metadata,
-    require_serving_mode,
 )
 
 

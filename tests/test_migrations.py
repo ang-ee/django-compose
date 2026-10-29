@@ -105,10 +105,19 @@ declarations = Declarations()
 def transition_source():
     return [{"declaring_app": "author", **entry} for entry in declarations.entries]
 settings.COMPOSE_TRANSITION_SOURCE = "__main__.transition_source"
+# Explicit native test hosts supply their frozen selection and declarations.
+# Individual binding scenarios mutate declarations through their explicit API.
+from types import SimpleNamespace
+from django_compose.snapshot import transition_declarations
+settings.COMPOSE_SNAPSHOT = SimpleNamespace(
+    entries=tuple(SimpleNamespace(label=label) for label in ("alpha", "beta", "author")),
+    transition_records=transition_declarations(transition_source()),
+)
 # These binding tests isolate native history from the compiler receipt writer.
 from contextlib import contextmanager
 @contextmanager
 def receipt_labels():
+    settings.COMPOSE_SNAPSHOT.transition_records = transition_declarations(transition_source())
     target = "django_compose.management.commands.makemigrations.history_labels"
     with patch(target, return_value=("alpha", "beta")):
         yield

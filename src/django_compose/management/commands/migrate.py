@@ -4,7 +4,8 @@ from typing import Any
 
 from django.core.management.commands.migrate import Command as NativeCommand
 
-from django_compose.migrations import DropGuardAutodetector, require_serving_mode
+from django_compose.management import require_serving_mode
+from django_compose.migrations import DropGuardAutodetector
 
 
 class Command(NativeCommand):

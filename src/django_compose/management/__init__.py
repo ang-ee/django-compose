@@ -6,11 +6,24 @@ import os
 import sys
 
 from django.core.exceptions import ImproperlyConfigured
+from django.core.management.base import CommandError
+
+MIGRATION_COMMANDS = frozenset(
+    {"makemigrations", "migrate", "check_migrations", "retire_history", "reset_migration_history"}
+)
+
+
+def require_serving_mode() -> None:
+    """Migration commands require a process populated from verified serving apps."""
+    if "DJANGO_COMPOSE_MODE" in os.environ:
+        raise CommandError("Migration commands require serving mode; unset DJANGO_COMPOSE_MODE")
 
 
 def execute(argv: list[str] | None = None) -> None:
     """Drop-in execute_from_command_line; static compose help needs no setup."""
     arguments = list(sys.argv if argv is None else argv)
+    if len(arguments) > 1 and arguments[1] in MIGRATION_COMMANDS:
+        require_serving_mode()
     if len(arguments) > 1 and arguments[1] == "compose":
         if "--help" in arguments[2:] or "-h" in arguments[2:]:
             from django_compose.management.commands.compose import Command

@@ -4,7 +4,8 @@ from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 
-from django_compose.migrations import require_serving_mode, retire_history
+from django_compose.management import require_serving_mode
+from django_compose.migrations import retire_history
 
 
 class Command(BaseCommand):

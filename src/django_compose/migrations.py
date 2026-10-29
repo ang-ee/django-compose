@@ -38,6 +38,9 @@ from django.db.models.expressions import DatabaseDefault
 from django.utils.module_loading import module_dir
 
 from django_compose.declarations import MigrationPolicy, resolve_integrations
+from django_compose.management import require_serving_mode as require_serving_mode
+from django_compose.migration_imports import HistoricalImport as HistoricalImport
+from django_compose.migration_imports import historical_imports as historical_imports
 
 Node = tuple[str, str]
 MATERIALIZED_FOOTER = "# DJANGO-COMPOSE MATERIALIZED MIGRATION - DO NOT EDIT"
@@ -45,20 +48,28 @@ _LEGACY_FOOTER = b"# ANGEE MATERIALIZED MIGRATION - DO NOT EDIT"
 _SEAL_PREFIX = b"Migration.compose_materialization_sha256 = "
 
 
-def require_serving_mode() -> None:
-    """Migration commands cannot run in a process importing source declarations."""
-    if "DJANGO_COMPOSE_MODE" in os.environ:
-        raise CommandError("Migration commands require serving mode; unset DJANGO_COMPOSE_MODE")
+def history_only_labels() -> frozenset[str]:
+    """Receipt-retained labels absent from the frozen selected source apps.
+
+    A live app may legitimately have no models module. Native apps without a
+    composition snapshot have no compiler-declared history-only membership.
+    """
+    from django_compose.serving import read_receipt
+
+    snap = getattr(settings, "COMPOSE_SNAPSHOT", None)
+    if snap is None:
+        return frozenset()
+    receipt = read_receipt(settings.COMPOSE_OUTPUT_DIR)
+    if receipt is None:
+        return frozenset()
+    active = {entry.label for entry in snap.entries}
+    return frozenset(receipt.HISTORY_LABELS) - active - frozenset(receipt.RETIRED_LABELS)
 
 
 def _preserve_history(
-    before: ProjectState, after: ProjectState, registry: Apps, purge: frozenset[str] = frozenset()
+    before: ProjectState, after: ProjectState, purge: frozenset[str] = frozenset()
 ) -> ProjectState:
-    retained = {
-        config.label
-        for config in registry.get_app_configs()
-        if config.models_module is None and config.label not in purge
-    }
+    retained = history_only_labels() - purge
     for key, model in before.models.items():
         if key[0] in retained:
             after.models[key] = model.clone()
@@ -70,11 +81,11 @@ def effective_states(
 ) -> tuple[ProjectState, ProjectState]:
     """Compare active models while retaining disabled labels' historical state.
 
-    A history-only AppConfig has no models module. Only explicit purge is allowed
-    to compare its durable history with an empty target state.
+    Receipt retention and frozen source selection identify history-only labels.
+    Only explicit purge compares their durable history with an empty target state.
     """
     before = loader.project_state()
-    after = _preserve_history(before, ProjectState.from_apps(registry), registry, purge)
+    after = _preserve_history(before, ProjectState.from_apps(registry), purge)
     return before, after
 
 
@@ -219,7 +230,9 @@ class TransitionBinding:
 
         self.labels = frozenset(labels)
         self.declarations = transition_declarations(
-            getattr(settings, "COMPOSE_TRANSITION_SOURCE", ()) if declarations is None else declarations
+            getattr(getattr(settings, "COMPOSE_SNAPSHOT", None), "transition_records", ())
+            if declarations is None
+            else declarations
         )
 
     def _history(self, loader: MigrationLoader) -> dict[str, tuple[Node, Migration]]:
@@ -521,7 +534,7 @@ class DropGuardAutodetector(MigrationAutodetector):
     """
 
     def __init__(self, from_state: ProjectState, to_state: ProjectState, questioner: Any = None) -> None:
-        to_state = _preserve_history(from_state, to_state.clone(), global_apps)
+        to_state = _preserve_history(from_state, to_state.clone())
         super().__init__(from_state, to_state, questioner)
 
     def changes(
@@ -732,58 +745,6 @@ def reset_migration_history(
     return labels, len(original), count
 
 
-@dataclass(frozen=True)
-class HistoricalImport:
-    """A retained Python import and its installed distribution identities."""
-
-    path: Path
-    module: str
-    distributions: tuple[str, ...]
-
-
-def historical_imports(output_dir: Path) -> tuple[HistoricalImport, ...]:
-    """Report imports whose providers must survive retained native history.
-
-    A copied transition can still import custom fields, validators, or helpers.
-    Distribution ownership is metadata evidence, not proof of uninstall safety.
-    """
-    from importlib.metadata import packages_distributions
-
-    providers = packages_distributions()
-    result = []
-    for path in sorted(Path(output_dir).glob("*/migrations/*.py")):
-        package: str | None = None
-        tree = ast.parse(path.read_text(), filename=str(path))
-        for statement in tree.body:
-            if (
-                isinstance(statement, ast.Assign)
-                and any(
-                    isinstance(target, ast.Name) and target.id == "__package__"
-                    for target in statement.targets
-                )
-                and isinstance(statement.value, ast.Constant)
-                and isinstance(statement.value.value, str)
-            ):
-                package = statement.value.value
-        modules: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                modules.update(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                if node.level:
-                    if package is not None:
-                        modules.add(
-                            importlib.util.resolve_name("." * node.level + (node.module or ""), package)
-                        )
-                elif node.module:
-                    modules.add(node.module)
-        for module in sorted(modules):
-            result.append(
-                HistoricalImport(path, module, tuple(sorted(providers.get(module.split(".")[0], ()))))
-            )
-    return tuple(result)
-
-
 def _history_aliases(loader: MigrationLoader, labels: set[str]) -> tuple[str, ...]:
     """Union routes for every native historical model, including deleted models.
 
@@ -856,8 +817,8 @@ def retire_history(label: str, *, purge: bool = False) -> None:
             return
         if label not in receipt.HISTORY_LABELS:
             raise RuntimeError(f"Unknown history label {label!r}")
-        config = global_apps.get_app_config(label)
-        if config.models_module is not None:
+        global_apps.get_app_config(label)
+        if label not in history_only_labels():
             raise RuntimeError(f"{label!r} must be history-only before retirement")
         loader = MigrationLoader(None, ignore_no_migrations=True)
         _check_dependents(loader, {label})

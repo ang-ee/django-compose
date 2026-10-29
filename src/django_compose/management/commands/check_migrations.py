@@ -1,25 +1,50 @@
-"""Check native history and report retained migration import providers."""
+"""Check native history or audit its retained Python import providers."""
 
-from pathlib import Path
 from typing import Any
 
 from django.apps import apps
-from django.conf import settings
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import BaseCommand, CommandError, CommandParser
+from django.db.migrations.loader import MigrationLoader
 
+from django_compose.management import require_serving_mode
 from django_compose.management.commands.makemigrations import history_labels
-from django_compose.migrations import TransitionBinding, historical_imports, require_serving_mode
+from django_compose.migration_imports import MigrationImportReport
+from django_compose.migrations import TransitionBinding
 
 
 class Command(BaseCommand):
-    help = "Check native history and pending transitions; report retained Python imports."
+    help = "Check native history and pending transitions, or audit retained Python imports."
+    requires_system_checks: list[str] = []
+
+    def add_arguments(self, parser: CommandParser) -> None:
+        parser.add_argument("--imports", action="store_true", help="Audit imports without database access.")
+        parser.add_argument("--removing", nargs="+", metavar="DIST", help="Prove named providers removable.")
 
     def handle(self, *args: Any, **options: Any) -> None:
         require_serving_mode()
+        if options.get("removing") and not options.get("imports"):
+            raise CommandError("--removing requires --imports")
+        if options.get("imports"):
+            report = MigrationImportReport()
+            for item in report.collect():
+                providers = ", ".join(item.distributions)
+                detail = ": ".join(value for value in (item.kind, providers, item.detail) if value)
+                self.stdout.write(f"{item.path}: {item.module}: {detail}")
+            loader_error = None
+            try:
+                MigrationLoader(None, ignore_no_migrations=True)
+            except Exception as error:
+                loader_error = f"Native migration loader: {type(error).__name__}: {error}"
+                self.stdout.write(loader_error)
+            if options.get("removing"):
+                refusals = list(report.removal_refusals(options["removing"]))
+                if loader_error:
+                    refusals.append(loader_error)
+                if refusals:
+                    raise CommandError("Cannot remove distributions:\n" + "\n".join(refusals))
+                self.stdout.write("No retained history or enabled app requires the named distributions.")
+            return
         try:
             TransitionBinding(labels=history_labels()).check_native_history(apps)
         except RuntimeError as error:
             raise CommandError(str(error)) from error
-        for item in historical_imports(Path(settings.COMPOSE_OUTPUT_DIR)):
-            providers = ", ".join(item.distributions) or "unresolved distribution"
-            self.stdout.write(f"{item.path}: {item.module}: {providers}")
