@@ -11,7 +11,7 @@ from django_compose.serving import (
     tombstones,
     verify,
 )
-from django_compose.snapshot import enabled_apps, snapshot
+from django_compose.snapshot import app_entries, snapshot
 
 BASE_DIR = Path(__file__).resolve().parent
 SECRET_KEY = os.environ.get("SHOP_SECRET_KEY", "local-example-only")
@@ -21,7 +21,7 @@ COMPOSE_OUTPUT_DIR = BASE_DIR / "runtime"
 COMPOSE_OUTPUT_MODULE = "runtime"
 
 # A host owns app selection and any dependency closure or settings composition.
-entries = enabled_apps(("catalog", "reviews"))
+entries = app_entries(("catalog", "reviews"))
 authored_migrations = {}
 COMPOSE_SNAPSHOT = snapshot(entries, namespace=globals(), authored_migration_modules=authored_migrations)
 previous = read_receipt(COMPOSE_OUTPUT_DIR)

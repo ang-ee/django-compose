@@ -8,7 +8,6 @@ import json
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from importlib.machinery import PathFinder
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
@@ -16,7 +15,10 @@ from typing import Any, Literal
 from django.conf import global_settings
 from django.core.exceptions import ImproperlyConfigured
 
+from django_compose.sources import SourceResolver
+
 COMPILER = "django-compose:1"
+DEFAULT_EXCLUDES = ("**/__pycache__/**", "**/migrations/**", "**/tests/**")
 
 
 def mode() -> Literal["write", "check"] | None:
@@ -65,9 +67,9 @@ class Snapshot:
     files: tuple[tuple[str, str], ...]
     integration_paths: tuple[str, ...]
     transitions: tuple[tuple[str, str], ...]
+    transition_records: tuple[Mapping[str, str], ...]
     authored_migration_modules: Mapping[str, str | None]
     settings: Mapping[str, Any]
-    caller: Mapping[str, Any]
     compiler: str = COMPILER
     _process_mode: Literal["write", "check"] | None = field(default_factory=mode, repr=False, compare=False)
 
@@ -81,9 +83,9 @@ class Snapshot:
             "files": self.files,
             "integrations": self.integration_paths,
             "transitions": self.transitions,
+            "transition_records": self.transition_records,
             "migrations": self.authored_migration_modules,
             "settings": self.settings,
-            "caller": self.caller,
             "compiler": self.compiler,
         }
         return hashlib.sha256(
@@ -91,7 +93,7 @@ class Snapshot:
         ).hexdigest()
 
 
-def enabled_apps(entries: Iterable[str | Entry]) -> tuple[Entry, ...]:
+def app_entries(entries: Iterable[str | Entry]) -> tuple[Entry, ...]:
     """Resolve native app identities without importing any app models."""
     from django.apps import AppConfig
 
@@ -99,114 +101,25 @@ def enabled_apps(entries: Iterable[str | Entry]) -> tuple[Entry, ...]:
     names: set[str] = set()
     labels: set[str] = set()
     for entry in entries:
-        if isinstance(entry, Entry):
-            result.append(entry)
-            continue
-        if not isinstance(entry, str):
-            raise ImproperlyConfigured(f"INSTALLED_APPS entry must be a string: {entry!r}")
-        config = AppConfig.create(entry)
-        if config.name == "django_compose":
-            continue
-        if config.name in names or config.label in labels:
-            raise ImproperlyConfigured(f"Duplicate app identity: {entry!r}")
-        names.add(config.name)
-        labels.add(config.label)
-        result.append(
-            Entry(
+        if not isinstance(entry, Entry):
+            if not isinstance(entry, str):
+                raise ImproperlyConfigured(f"INSTALLED_APPS entry must be a string: {entry!r}")
+            config = AppConfig.create(entry)
+            entry = Entry(
                 config.name,
                 config.label,
                 f"{type(config).__module__}.{type(config).__qualname__}",
                 config.path,
                 entry,
             )
-        )
+        if entry.name == "django_compose":
+            continue
+        if entry.name in names or entry.label in labels:
+            raise ImproperlyConfigured(f"Duplicate app identity: {entry.entry!r}")
+        names.add(entry.name)
+        labels.add(entry.label)
+        result.append(entry)
     return tuple(result)
-
-
-def _module_source(module: str) -> Path:
-    """Locate source through native path finders without executing parent packages.
-
-    Each short component is resolved against its parent's search locations. This
-    also lets namespace packages work without installing their parents in
-    sys.modules, which a qualified namespace spec would otherwise require.
-    """
-    locations: tuple[str, ...] | None = None
-    components = module.split(".")
-    if not all(component.isidentifier() for component in components):
-        raise ImproperlyConfigured(f"Cannot fingerprint module {module!r}")
-    for index, component in enumerate(components):
-        spec = PathFinder.find_spec(component, locations)
-        if spec is None:
-            break
-        if index == len(components) - 1:
-            if spec.origin and Path(spec.origin).is_file():
-                return Path(spec.origin)
-            break
-        if spec.submodule_search_locations is None:
-            break
-        locations = tuple(spec.submodule_search_locations)
-    raise ImproperlyConfigured(f"Cannot fingerprint module {module!r}")
-
-
-def snapshot(
-    entries: Iterable[str | Entry],
-    *,
-    integration_paths: Iterable[str] = (),
-    fingerprint_globs: Iterable[str] = (),
-    settings_keys: Iterable[str] = (),
-    namespace: Mapping[str, Any] | None = None,
-    transitions: Iterable[tuple[str, str]] = (),
-    authored_migration_modules: Mapping[str, str | None] | None = None,
-    caller: Mapping[str, Any] | None = None,
-) -> Snapshot:
-    """Hash sources, compiler settings and explicit hook settings without model imports.
-
-    Compiler inputs always participate with their effective defaults. Hook settings
-    are the union of settings_keys and COMPOSE_FINGERPRINT_SETTINGS in namespace.
-    """
-    selected = tuple(entries)
-    normalized = enabled_apps(selected)
-    files: dict[str, str] = {}
-    globs = tuple(fingerprint_globs)
-    for entry in normalized:
-        root = Path(entry.path)
-        paths = set(root.rglob("*.py"))
-        for pattern in globs:
-            paths.update(root.glob(pattern))
-        for path in sorted(paths):
-            relative = path.relative_to(root)
-            if path.is_file() and not {"web", "tests", "migrations", "__pycache__"}.intersection(
-                relative.parts
-            ):
-                files[f"{entry.name}/{relative.as_posix()}"] = hashlib.sha256(path.read_bytes()).hexdigest()
-    integrations = tuple(integration_paths)
-    for dotted in integrations:
-        module = dotted.rpartition(".")[0]
-        source = _module_source(module)
-        files[f"integration:{module}"] = hashlib.sha256(source.read_bytes()).hexdigest()
-    values = namespace or {}
-    output_dir = values.get("COMPOSE_OUTPUT_DIR")
-    effective_settings = {
-        "COMPOSE_OUTPUT_DIR": Path(output_dir).as_posix() if output_dir is not None else None,
-        "COMPOSE_OUTPUT_MODULE": values.get("COMPOSE_OUTPUT_MODULE", "runtime"),
-        "COMPOSE_EXTERNAL_ARTIFACT_ROOTS": tuple(
-            sorted(set(values.get("COMPOSE_EXTERNAL_ARTIFACT_ROOTS", ())))
-        ),
-        "COMPOSE_OWNED_ARTIFACT_PATHS": tuple(sorted(set(values.get("COMPOSE_OWNED_ARTIFACT_PATHS", ())))),
-        "DEFAULT_AUTO_FIELD": values.get("DEFAULT_AUTO_FIELD", global_settings.DEFAULT_AUTO_FIELD),
-    }
-    hook_settings = set(settings_keys) | set(values.get("COMPOSE_FINGERPRINT_SETTINGS", ()))
-    for key in sorted(hook_settings):
-        effective_settings.setdefault(key, values.get(key))
-    return Snapshot(
-        tuple(normalized),
-        tuple(sorted(files.items())),
-        integrations,
-        tuple(sorted(transitions)),
-        _freeze(authored_migration_modules or {}),
-        _freeze(effective_settings),
-        _freeze(caller or {}),
-    )
 
 
 def transition_declarations(source: Any) -> tuple[Mapping[str, str], ...]:
@@ -239,15 +152,168 @@ def transition_declarations(source: Any) -> tuple[Mapping[str, str], ...]:
     return tuple(declarations)
 
 
-def transition_fingerprints(source: Any) -> tuple[tuple[str, str], ...]:
-    """Hash declared transition modules without executing their model imports."""
+def _default_transitions(entries: tuple[Entry, ...]) -> tuple[Mapping[str, str], ...]:
+    records = []
+    for entry in entries:
+        for path in sorted((Path(entry.path) / "compose_migrations").glob("*/*.py")):
+            if path.name == "__init__.py" or not path.is_file():
+                continue
+            label = path.parent.name
+            if not label.isidentifier() or not ("_" + path.stem).isidentifier():
+                raise ImproperlyConfigured(f"Invalid default transition path: {path}")
+            records.append(
+                {
+                    "declaring_app": entry.name,
+                    "name": path.stem,
+                    "app_label": label,
+                    "module": f"{entry.name}.compose_migrations.{label}.{path.stem}",
+                }
+            )
+    return transition_declarations(records)
+
+
+def _fingerprints(
+    records: tuple[Mapping[str, str], ...], resolver: SourceResolver
+) -> tuple[tuple[str, str], ...]:
     result = []
-    for declaration in transition_declarations(source):
-        source = _module_source(declaration["module"])
+    for declaration in records:
+        location = resolver.resolve(declaration["module"])
+        if location.path is None or not location.path.is_file():
+            raise ImproperlyConfigured(f"Cannot fingerprint module {declaration['module']!r}")
         result.append(
             (
                 f"{declaration['declaring_app']}:{declaration['name']}",
-                hashlib.sha256(source.read_bytes()).hexdigest(),
+                hashlib.sha256(location.path.read_bytes()).hexdigest(),
             )
         )
-    return tuple(sorted(result))
+    return tuple(result)
+
+
+def transition_fingerprints(source: Any) -> tuple[tuple[str, str], ...]:
+    """Hash declared transition modules without executing their model imports."""
+    return _fingerprints(transition_declarations(source), SourceResolver())
+
+
+def _effective_sequence(
+    values: Mapping[str, Any], key: str, argument: Iterable[str] | None, default: Iterable[str] = ()
+) -> tuple[str, ...]:
+    explicit = tuple(argument) if argument is not None else None
+    value = tuple(values.get(key, default))
+    if explicit is not None and key in values and explicit != value:
+        raise ImproperlyConfigured(f"Conflicting snapshot argument and {key}")
+    result = value if explicit is None else explicit
+    if not all(isinstance(item, str) for item in result):
+        raise ImproperlyConfigured(f"{key} must contain strings")
+    return result
+
+
+def snapshot(
+    entries: Iterable[str | Entry],
+    *,
+    integration_paths: Iterable[str] | None = None,
+    fingerprint_globs: Iterable[str] | None = None,
+    fingerprint_excludes: Iterable[str] | None = None,
+    settings_keys: Iterable[str] = (),
+    namespace: Mapping[str, Any] | None = None,
+    transitions: Any = None,
+    authored_migration_modules: Mapping[str, str | None] | None = None,
+) -> Snapshot:
+    """Freeze effective compiler inputs once, without importing source models.
+
+    Explicit integration/glob/exclusion arguments and namespace declarations must
+    agree. Extra setting keys extend COMPOSE_FINGERPRINT_SETTINGS. An omitted
+    transition source discovers compose_migrations/<label>/<name>.py in app order.
+    """
+    normalized = app_entries(entries)
+    values = namespace if namespace is not None else {}
+    integrations = _effective_sequence(values, "COMPOSE_INTEGRATIONS", integration_paths)
+    globs = tuple(sorted(set(_effective_sequence(values, "COMPOSE_FINGERPRINT_GLOBS", fingerprint_globs))))
+    excludes = tuple(
+        sorted(
+            set(
+                _effective_sequence(
+                    values, "COMPOSE_FINGERPRINT_EXCLUDES", fingerprint_excludes, DEFAULT_EXCLUDES
+                )
+            )
+        )
+    )
+    resolver = SourceResolver(normalized)
+    if transitions is None and "COMPOSE_TRANSITION_SOURCE" not in values:
+        records = _default_transitions(normalized)
+    else:
+        records = transition_declarations(
+            values.get("COMPOSE_TRANSITION_SOURCE", ()) if transitions is None else transitions
+        )
+        if (
+            transitions is not None
+            and "COMPOSE_TRANSITION_SOURCE" in values
+            and transitions != values["COMPOSE_TRANSITION_SOURCE"]
+        ):
+            if records != transition_declarations(values["COMPOSE_TRANSITION_SOURCE"]):
+                raise ImproperlyConfigured("Conflicting snapshot argument and COMPOSE_TRANSITION_SOURCE")
+    authored = (
+        values.get("MIGRATION_MODULES", {})
+        if authored_migration_modules is None
+        else authored_migration_modules
+    )
+    if authored_migration_modules is not None and "MIGRATION_MODULES" in values:
+        if dict(authored_migration_modules) != dict(values["MIGRATION_MODULES"]):
+            raise ImproperlyConfigured("Conflicting snapshot argument and MIGRATION_MODULES")
+    effective_settings = {
+        key: value
+        for key, value in values.items()
+        if key.startswith("COMPOSE_") and key not in {"COMPOSE_SNAPSHOT", "COMPOSE_ROOTS"}
+    }
+    output_dir = values.get("COMPOSE_OUTPUT_DIR")
+    effective_settings.update(
+        {
+            "COMPOSE_OUTPUT_DIR": Path(output_dir).as_posix() if output_dir is not None else None,
+            "COMPOSE_OUTPUT_MODULE": values.get("COMPOSE_OUTPUT_MODULE", "runtime"),
+            "COMPOSE_INTEGRATIONS": integrations,
+            "COMPOSE_FINGERPRINT_GLOBS": globs,
+            "COMPOSE_FINGERPRINT_EXCLUDES": excludes,
+            "COMPOSE_TRANSITION_SOURCE": records,
+            "COMPOSE_EXTERNAL_ARTIFACT_ROOTS": tuple(
+                sorted(set(values.get("COMPOSE_EXTERNAL_ARTIFACT_ROOTS", ())))
+            ),
+            "COMPOSE_OWNED_ARTIFACT_PATHS": tuple(
+                sorted(set(values.get("COMPOSE_OWNED_ARTIFACT_PATHS", ())))
+            ),
+            "DEFAULT_AUTO_FIELD": values.get("DEFAULT_AUTO_FIELD", global_settings.DEFAULT_AUTO_FIELD),
+            "AUTH_USER_MODEL": values.get("AUTH_USER_MODEL", global_settings.AUTH_USER_MODEL),
+        }
+    )
+    hook_settings = set(settings_keys) | set(values.get("COMPOSE_FINGERPRINT_SETTINGS", ()))
+    extras = (
+        hook_settings
+        - set(effective_settings)
+        - {"COMPOSE_FINGERPRINT_SETTINGS", "COMPOSE_SNAPSHOT", "COMPOSE_ROOTS"}
+    )
+    effective_settings["COMPOSE_FINGERPRINT_SETTINGS"] = tuple(sorted(extras))
+    for key in sorted(extras):
+        effective_settings[key] = values.get(key, getattr(global_settings, key, None))
+    files: dict[str, str] = {}
+    for entry in normalized:
+        root = Path(entry.path)
+        paths = set(root.rglob("*.py"))
+        for pattern in globs:
+            paths.update(root.glob(pattern))
+        for path in sorted(paths):
+            relative = path.relative_to(root)
+            if path.is_file() and not any(relative.full_match(pattern) for pattern in excludes):
+                files[f"{entry.name}/{relative.as_posix()}"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    for dotted in integrations:
+        module = dotted.rpartition(".")[0]
+        location = resolver.resolve(module)
+        if location.path is None or not location.path.is_file():
+            raise ImproperlyConfigured(f"Cannot fingerprint module {module!r}")
+        files[f"integration:{module}"] = hashlib.sha256(location.path.read_bytes()).hexdigest()
+    return Snapshot(
+        normalized,
+        tuple(sorted(files.items())),
+        integrations,
+        _fingerprints(records, resolver),
+        records,
+        _freeze(authored),
+        _freeze(effective_settings),
+    )

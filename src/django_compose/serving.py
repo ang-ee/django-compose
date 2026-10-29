@@ -12,7 +12,7 @@ from types import MappingProxyType
 
 from django.core.exceptions import ImproperlyConfigured
 
-from django_compose.snapshot import Entry, Snapshot, enabled_apps
+from django_compose.snapshot import Entry, Snapshot, app_entries
 from django_compose.snapshot import mode as mode
 
 GENERATED_SENTINEL = "# django-compose generated output v1"
@@ -132,7 +132,7 @@ def verify(snap: Snapshot, output_module: str) -> Receipt:
 
 
 def installed_apps(entries: Iterable[str | Entry], receipt: Receipt, output_module: str) -> tuple[str, ...]:
-    selected = enabled_apps(entries)
+    selected = app_entries(entries)
     return tuple(
         f"{output_module}.{e.label}.apps.GeneratedConfig" if e.label in receipt.MODEL_LABELS else e.entry
         for e in selected
@@ -142,7 +142,7 @@ def installed_apps(entries: Iterable[str | Entry], receipt: Receipt, output_modu
 def tombstones(
     receipt: Receipt | None, entries: Iterable[str | Entry], output_module: str
 ) -> tuple[str, ...]:
-    active = {entry.label for entry in enabled_apps(entries)}
+    active = {entry.label for entry in app_entries(entries)}
     return (
         tuple(
             f"{output_module}.history.History_{label}"

@@ -12,7 +12,7 @@ from django_compose.serving import Receipt, installed_apps, migration_modules, r
 from django_compose.snapshot import Entry, snapshot, transition_declarations
 
 
-def test_snapshot_fingerprints_files_settings_and_caller(tmp_path):
+def test_snapshot_fingerprints_files_and_settings(tmp_path):
     app = tmp_path / "app"
     app.mkdir()
     (app / "models.py").write_text("source")
@@ -39,7 +39,6 @@ def test_snapshot_fingerprints_files_settings_and_caller(tmp_path):
     assert make().digest() == original
     (app / "rules.zed").write_text("new policy")
     assert make().digest() != original
-    assert make(caller={"feature": True}).digest() != make().digest()
 
 
 def test_receipt_verify_checks_content_and_interruption(tmp_path, monkeypatch):
@@ -228,3 +227,138 @@ def test_explicit_hook_key_cannot_bypass_compiler_path_normalization(tmp_path):
         snapshot((), namespace=values).digest()
         == snapshot((), namespace=values, settings_keys=("COMPOSE_OUTPUT_DIR",)).digest()
     )
+
+
+def test_resolved_entries_ignore_derived_roots_and_snapshot_namespace():
+    first = snapshot((), namespace={"COMPOSE_ROOTS": ["one"], "COMPOSE_SNAPSHOT": object()})
+    second = snapshot((), namespace={"COMPOSE_ROOTS": ["two"]})
+    assert first.digest() == second.digest() == snapshot(()).digest()
+    assert (
+        first.digest()
+        == snapshot(
+            (),
+            namespace={"COMPOSE_ROOTS": ["other"], "COMPOSE_SNAPSHOT": object()},
+            settings_keys=("COMPOSE_ROOTS", "COMPOSE_SNAPSHOT"),
+        ).digest()
+    )
+
+
+@pytest.mark.parametrize("key", ["AUTH_USER_MODEL", "COMPOSE_ADDON_GROUP", "COMPOSE_CUSTOM_INPUT"])
+def test_all_structural_inputs_are_mandatory(key):
+    assert snapshot(()).digest() != snapshot((), namespace={key: "changed"}).digest()
+
+
+def test_authored_migration_mapping_is_effective_and_immutable():
+    authored = {"app": None}
+    first = snapshot((), authored_migration_modules=authored)
+    assert first.digest() == snapshot((), namespace={"MIGRATION_MODULES": authored}).digest()
+    authored["app"] = "other.migrations"
+    assert first.authored_migration_modules["app"] is None
+    assert first.digest() != snapshot((), authored_migration_modules=authored).digest()
+    with pytest.raises(ImproperlyConfigured, match="MIGRATION_MODULES"):
+        snapshot((), authored_migration_modules=authored, namespace={"MIGRATION_MODULES": {}})
+
+
+def test_direct_and_namespace_settings_have_one_effective_fact(tmp_path):
+    package = tmp_path / "inputprobe"
+    package.mkdir()
+    (package / "hooks.py").write_text("raise AssertionError('must not execute')")
+    entries = (Entry("inputprobe", "probe", "django.apps.AppConfig", str(package), "inputprobe"),)
+    direct = snapshot(
+        entries,
+        integration_paths=("inputprobe.hooks.Hook",),
+        fingerprint_globs=("*.zed",),
+        settings_keys=("DEPTH",),
+        namespace={"DEPTH": 3},
+    )
+    namespace = snapshot(
+        entries,
+        namespace={
+            "COMPOSE_INTEGRATIONS": ["inputprobe.hooks.Hook"],
+            "COMPOSE_FINGERPRINT_GLOBS": ["*.zed"],
+            "COMPOSE_FINGERPRINT_SETTINGS": ["DEPTH"],
+            "DEPTH": 3,
+        },
+    )
+    assert direct.digest() == namespace.digest()
+    for key, argument in (
+        ("COMPOSE_INTEGRATIONS", "integration_paths"),
+        ("COMPOSE_FINGERPRINT_GLOBS", "fingerprint_globs"),
+        ("COMPOSE_FINGERPRINT_EXCLUDES", "fingerprint_excludes"),
+    ):
+        with pytest.raises(ImproperlyConfigured, match=key):
+            snapshot((), namespace={key: ["one"]}, **{argument: ("two",)})
+
+
+def test_generic_declared_excludes_replace_hardcoded_vocabulary(tmp_path):
+    app = tmp_path / "app"
+    for directory in ("web", "tests", "migrations", "private"):
+        path = app / directory / "source.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(directory)
+    entries = (Entry("app", "app", "django.apps.AppConfig", str(app), "app"),)
+    default = dict(snapshot(entries).files)
+    assert "app/web/source.py" in default
+    assert "app/tests/source.py" not in default
+    assert "app/migrations/source.py" not in default
+    explicit = dict(snapshot(entries, namespace={"COMPOSE_FINGERPRINT_EXCLUDES": ("private/**",)}).files)
+    assert "app/private/source.py" not in explicit
+    assert "app/tests/source.py" in explicit
+
+
+def test_default_transitions_freeze_records_order_and_bytes_without_imports(tmp_path):
+    entries = []
+    for name in ("second", "first"):
+        app = tmp_path / name
+        directory = app / "compose_migrations" / "target"
+        directory.mkdir(parents=True)
+        (directory / "__init__.py").write_text("raise AssertionError('never imported')")
+        (directory / "0001_initial.py").write_text("raise AssertionError('never executed')")
+        entries.append(Entry(name, name, "django.apps.AppConfig", str(app), name))
+    snap = snapshot(entries)
+    assert [record["declaring_app"] for record in snap.transition_records] == ["second", "first"]
+    assert snap.transition_records[0] == {
+        "declaring_app": "second",
+        "name": "0001_initial",
+        "app_label": "target",
+        "module": "second.compose_migrations.target.0001_initial",
+    }
+    with pytest.raises(TypeError):
+        snap.transition_records[0]["name"] = "changed"
+    assert snap.digest() == snapshot(entries, transitions=snap.transition_records).digest()
+    path = tmp_path / "second/compose_migrations/target/0001_initial.py"
+    path.write_text("changed")
+    assert snap.transitions != snapshot(entries).transitions
+    assert snapshot(entries, namespace={"COMPOSE_TRANSITION_SOURCE": ()}).transition_records == ()
+
+
+def test_transition_target_is_fingerprinted_even_when_module_bytes_are_identical(tmp_path):
+    app = tmp_path / "author"
+    app.mkdir()
+    (app / "transition.py").write_text("")
+    entries = (Entry("author", "author", "django.apps.AppConfig", str(app), "author"),)
+    record = {"declaring_app": "author", "name": "move", "app_label": "one", "module": "transition"}
+    first = snapshot(entries, transitions=(record,))
+    record["app_label"] = "two"
+    assert first.digest() != snapshot(entries, transitions=(record,)).digest()
+
+
+def test_matching_direct_and_namespace_transition_callable_runs_once(tmp_path, monkeypatch):
+    from types import ModuleType
+
+    module = ModuleType("source_declarations")
+    calls = []
+
+    def declarations():
+        calls.append(True)
+        return ()
+
+    module.declarations = declarations
+    monkeypatch.setitem(sys.modules, "source_declarations", module)
+    snap = snapshot(
+        (),
+        transitions="source_declarations.declarations",
+        namespace={"COMPOSE_TRANSITION_SOURCE": "source_declarations.declarations"},
+    )
+    assert snap.transition_records == ()
+    assert calls == [True]

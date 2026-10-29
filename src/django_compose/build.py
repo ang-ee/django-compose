@@ -16,7 +16,7 @@ from django_compose.artifacts import GeneratedTree, atomic_write, receipt_lock
 from django_compose.declarations import ArtifactHook, ModelDeclarationHook, model_declaration
 from django_compose.model_composition import ModelComposition
 from django_compose.rendering import render_models
-from django_compose.serving import Receipt, read_receipt
+from django_compose.serving import Receipt, read_receipt, verify
 from django_compose.snapshot import Snapshot
 
 
@@ -99,12 +99,25 @@ class BuildPlan:
         self._lock.__enter__()
         self._locked = True
         try:
+            if self.mode == "check":
+                self.previous = verify(self.snapshot, self.output_module)
             # Guard ownership before invalidation. A failed discovery remains invalid.
             self.previous = GeneratedTree(self.output_dir, {})._validate()
             if self.mode == "write":
                 receipt = self._receipt(progress=True)
                 atomic_write(self.output_dir / "__init__.py", receipt.source().encode())
             self.composition = discover(self.configs)
+            models = {model for config in self.configs for model in (config.models or {}).values()}
+            models.update(self.composition.ordered_models)
+            for source in self.composition.ordered_models:
+                models.update(self.composition.donors(source))
+            for model in sorted(models, key=lambda model: model._meta.label):
+                swappable = model._meta.swappable
+                if swappable and swappable not in self.snapshot.settings:
+                    raise ImproperlyConfigured(
+                        f"Swappable setting {swappable!r} for {model._meta.label} must be declared "
+                        "in COMPOSE_FINGERPRINT_SETTINGS"
+                    )
             declarations = {
                 source: model_declaration(
                     self.composition,
@@ -167,12 +180,6 @@ class BuildPlan:
                 if effective == f"{self.output_module}.{label}.migrations" and not migration_init.exists():
                     self.sources[Path(label) / "migrations" / "__init__.py"] = ""
             if self.mode == "check":
-                if (
-                    self.previous is None
-                    or self.previous.IN_PROGRESS
-                    or self.previous.DIGEST != self.snapshot.digest()
-                ):
-                    raise ImproperlyConfigured("Generated composition is stale; run compose")
                 changed = [
                     p
                     for p, value in self.sources.items()

@@ -30,7 +30,7 @@ class NativeConfig(AppConfig):
 """)
     (package / "models.py").write_text("""from django.db import models
 from django_compose.models import Composable
-class Record(Composable, materialize=True):
+class Record(Composable, concrete=True):
     title = models.CharField(max_length=30)
     class Meta:
         abstract = True
@@ -46,14 +46,14 @@ class Capability:
         return {Path("capability/ready.txt"): concrete._meta.label.encode()}
 """)
     (tmp_path / "settings.py").write_text("""from pathlib import Path
-from django_compose.snapshot import snapshot, enabled_apps
+from django_compose.snapshot import snapshot, app_entries
 from django_compose.serving import mode, verify, installed_apps, tombstones, migration_modules, read_receipt
 COMPOSE_OUTPUT_DIR = Path(__file__).parent / "runtime"
 COMPOSE_OUTPUT_MODULE = "runtime"
 COMPOSE_INTEGRATIONS = ("bootapp.integration.Capability",)
 COMPOSE_EXTERNAL_ARTIFACT_ROOTS = ("capability",)
 COMPOSE_OWNED_ARTIFACT_PATHS = ("capability/ready.txt",)
-entries = enabled_apps(("bootapp.apps.NativeConfig",))
+entries = app_entries(("bootapp.apps.NativeConfig",))
 COMPOSE_SNAPSHOT = snapshot(entries, integration_paths=COMPOSE_INTEGRATIONS, namespace=globals())
 receipt = read_receipt(COMPOSE_OUTPUT_DIR)
 if mode():
@@ -182,8 +182,8 @@ def test_appconfig_instances_rejected(tmp_path: Path) -> None:
     result = invoke(
         root,
         script=(
-            "from django.apps import AppConfig; from django_compose.snapshot import enabled_apps; "
-            "enabled_apps([AppConfig.create('bootapp')])"
+            "from django.apps import AppConfig; from django_compose.snapshot import app_entries; "
+            "app_entries([AppConfig.create('bootapp')])"
         ),
     )
     assert result.returncode != 0
@@ -195,7 +195,7 @@ def test_removed_source_uses_prebuilt_source_free_history_config(tmp_path: Path)
     successful(invoke(root, "compose"))
     settings = root / "settings.py"
     source = settings.read_text().replace(
-        'entries = enabled_apps(("bootapp.apps.NativeConfig",))', "entries = enabled_apps(())"
+        'entries = app_entries(("bootapp.apps.NativeConfig",))', "entries = app_entries(())"
     )
     source = source.replace(
         'COMPOSE_INTEGRATIONS = ("bootapp.integration.Capability",)', "COMPOSE_INTEGRATIONS = ()"
@@ -220,9 +220,9 @@ def test_native_auth_ready_observes_concrete_model(tmp_path: Path) -> None:
     root = host(tmp_path)
     settings = root / "settings.py"
     source = settings.read_text().replace(
-        'entries = enabled_apps(("bootapp.apps.NativeConfig",))',
+        'entries = app_entries(("bootapp.apps.NativeConfig",))',
         (
-            'entries = enabled_apps(("django.contrib.auth", "django.contrib.contenttypes", '
+            'entries = app_entries(("django.contrib.auth", "django.contrib.contenttypes", '
             '"bootapp.apps.NativeConfig"))'
         ),
     )
@@ -263,3 +263,71 @@ def test_rebuild_does_not_import_same_size_old_native_bytecode(tmp_path: Path) -
             ),
         )
     )
+
+
+def test_check_receipt_content_is_verified_before_discovery(tmp_path: Path) -> None:
+    root = host(tmp_path)
+    successful(invoke(root, "compose"))
+    (root / "runtime/capability/ready.txt").write_text("tampered")
+    before = files(root / "runtime")
+    result = invoke(
+        root,
+        DJANGO_COMPOSE_MODE="check",
+        script="""import sys
+def forbidden(frame, event, arg):
+    if (event == 'call' and frame.f_code.co_name == 'discover'
+        and frame.f_globals.get('__name__') == 'django_compose.build'):
+        raise AssertionError('discovery ran before receipt verification')
+sys.setprofile(forbidden)
+import django
+django.setup()
+""",
+    )
+    assert result.returncode != 0
+    assert "Generated file is missing or altered" in result.stderr
+    assert "discovery ran" not in result.stderr
+    assert files(root / "runtime") == before
+
+
+def test_custom_swappable_setting_requires_declared_fingerprint(tmp_path: Path) -> None:
+    root = host(tmp_path)
+    source = root / "bootapp/models.py"
+    source.write_text(
+        source.read_text().replace(
+            "        abstract = True", '        abstract = True\n        swappable = "CUSTOM_RECORD_MODEL"'
+        )
+    )
+    settings = root / "settings.py"
+    settings.write_text(
+        settings.read_text().replace(
+            'COMPOSE_OUTPUT_MODULE = "runtime"',
+            'COMPOSE_OUTPUT_MODULE = "runtime"\nCUSTOM_RECORD_MODEL = "custom_boot.Record"',
+        )
+    )
+    result = invoke(root, "compose")
+    assert result.returncode != 0
+    assert "CUSTOM_RECORD_MODEL" in result.stderr
+    assert "COMPOSE_FINGERPRINT_SETTINGS" in result.stderr
+    settings.write_text(
+        settings.read_text().replace(
+            'CUSTOM_RECORD_MODEL = "custom_boot.Record"',
+            (
+                'CUSTOM_RECORD_MODEL = "custom_boot.Record"\n'
+                'COMPOSE_FINGERPRINT_SETTINGS = ("CUSTOM_RECORD_MODEL",)'
+            ),
+        )
+    )
+    successful(invoke(root, "compose"))
+
+
+def test_default_transition_targets_feed_build_history_from_snapshot_records(tmp_path: Path) -> None:
+    root = host(tmp_path)
+    transition = root / "bootapp/compose_migrations/previous/0001_initial.py"
+    transition.parent.mkdir(parents=True)
+    transition.write_text("raise AssertionError('transition body executed during build')")
+    successful(invoke(root, "compose"))
+    from django_compose.serving import read_receipt
+
+    receipt = read_receipt(root / "runtime")
+    assert receipt is not None
+    assert "previous" in receipt.HISTORY_LABELS

@@ -10,7 +10,7 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
 from django_compose.serving import mode, verify
-from django_compose.snapshot import Snapshot, transition_declarations
+from django_compose.snapshot import Snapshot
 
 
 class ComposeConfig(AppConfig):
@@ -57,8 +57,8 @@ class BuildComposeConfig(AppConfig):
         if not isinstance(snap, Snapshot):
             raise ImproperlyConfigured("Settings must create COMPOSE_SNAPSHOT before population")
         snap.check_mode()
-        integrations = resolve_integrations(getattr(settings, "COMPOSE_INTEGRATIONS", ()))
-        transitions = transition_declarations(getattr(settings, "COMPOSE_TRANSITION_SOURCE", ()))
+        integrations = resolve_integrations(snap.integration_paths)
+        transitions = snap.transition_records
         output_dir = settings.COMPOSE_OUTPUT_DIR
         output_module = getattr(settings, "COMPOSE_OUTPUT_MODULE", "runtime")
         self.plan = emit(
