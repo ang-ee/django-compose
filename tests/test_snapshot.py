@@ -513,3 +513,43 @@ def test_invalid_transition_names_fail_at_normalization(name):
         transition_declarations(
             [{"declaring_app": "author", "name": name, "app_label": "alpha", "module": "transitions.rename"}]
         )
+
+
+def test_dependency_edges_are_detached_immutable_digest_inputs(tmp_path):
+    entries = tuple(
+        Entry(name, name, "django.apps.AppConfig", str(tmp_path), name) for name in ("base", "consumer")
+    )
+    edges = {"base": (), "consumer": ("base",)}
+    selected = snapshot(entries, dependencies=edges)
+    without_edge = snapshot(entries, dependencies={"base": (), "consumer": ()})
+    assert selected.entries == without_edge.entries
+    assert selected.digest() != without_edge.digest()
+    assert selected.dependencies == edges
+    digest = selected.digest()
+    edges["consumer"] = ()
+    assert selected.dependencies["consumer"] == ("base",)
+    assert selected.digest() == digest
+    with pytest.raises(TypeError):
+        selected.dependencies["consumer"] = ()
+    empty = snapshot(entries)
+    assert empty.dependencies == {}
+    with pytest.raises(TypeError):
+        empty.dependencies["base"] = ()
+
+
+@pytest.mark.parametrize(
+    "dependencies",
+    [
+        {"unknown": ()},
+        {"consumer": ("unknown",)},
+        {"base": ("consumer",)},
+        {"consumer": ("consumer",)},
+        {"consumer": "base"},
+    ],
+)
+def test_dependency_edges_must_match_selected_native_order(tmp_path, dependencies):
+    entries = tuple(
+        Entry(name, name, "django.apps.AppConfig", str(tmp_path), name) for name in ("base", "consumer")
+    )
+    with pytest.raises(ImproperlyConfigured, match="Snapshot dependenc"):
+        snapshot(entries, dependencies=dependencies)

@@ -521,3 +521,51 @@ def test_native_loader_adapter_preserves_opaque_values_and_template_containers()
     assert original == {"nested": ["{BASE_DIR}/data"]}
     assert attributes["CUSTOM_INPUT"]["evalue"] == {"nested": ["/project/data"]}
     assert attributes["LOGGING"]["evalue"]["stream"] is sys.stderr
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("VALUE", "VALUE"),
+        ("OPTIONS.child", "OPTIONS"),
+        ("ITEMS:append", "ITEMS"),
+        ("OPTIONS.child:default", "OPTIONS"),
+        ("OPTIONS:append.child", "OPTIONS"),
+    ],
+)
+def test_setting_name_projects_native_root(key, expected):
+    assert conf.setting_name(key) == expected
+
+
+def test_configure_retains_resolved_dependencies_without_reactivation(project, monkeypatch):
+    from pathlib import Path
+
+    app, ns = project
+    dependency = app()
+    consumer = app()
+    (Path(ns["COMPOSE_OUTPUT_DIR"]).parent / consumer / "apps.py").write_text(
+        "from django.apps import AppConfig\n"
+        f"class Config(AppConfig):\n    name = {consumer!r}\n    requires_apps = ({dependency!r},)\n"
+    )
+    ns["INSTALLED_APPS"] = [consumer]
+    native_enabled_apps = conf.enabled_apps
+    calls = []
+
+    def resolve(*args, **kwargs):
+        calls.append(args)
+        return native_enabled_apps(*args, **kwargs)
+
+    monkeypatch.setattr(conf, "enabled_apps", resolve)
+    conf.configure(ns)
+    assert len(calls) == 1
+    snap = ns["COMPOSE_SNAPSHOT"]
+    assert tuple(entry.name for entry in snap.entries) == (dependency, consumer)
+    assert snap.dependencies == {dependency: (), consumer: (dependency,)}
+
+    def refuse_reactivation(*args, **kwargs):
+        raise AssertionError("runtime reader reactivated app selection")
+
+    monkeypatch.setattr(conf, "enabled_apps", refuse_reactivation)
+    assert snap.dependencies[consumer] == (dependency,)
+    with pytest.raises(TypeError):
+        snap.dependencies[consumer] = ()

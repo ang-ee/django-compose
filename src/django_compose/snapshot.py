@@ -106,6 +106,8 @@ class Entry:
 
 @dataclass(frozen=True)
 class Snapshot:
+    """Frozen build inputs, retaining resolved direct dependencies by native app name."""
+
     entries: tuple[Entry, ...]
     files: tuple[tuple[str, str], ...]
     integration_paths: tuple[str, ...]
@@ -114,6 +116,9 @@ class Snapshot:
     authored_migration_modules: Mapping[str, str | None]
     settings: Mapping[str, Any]
     compiler: str = COMPILER
+    dependencies: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: MappingProxyType({}), kw_only=True
+    )
     _process_mode: Literal["write", "check"] | None = field(default_factory=mode, repr=False, compare=False)
 
     def check_mode(self) -> None:
@@ -123,6 +128,7 @@ class Snapshot:
     def digest(self) -> str:
         payload = {
             "entries": [(e.name, e.label, e.config, e.entry) for e in self.entries],
+            "dependencies": self.dependencies,
             "files": self.files,
             "integrations": self.integration_paths,
             "transitions": self.transitions,
@@ -265,14 +271,29 @@ def snapshot(
     namespace: Mapping[str, Any] | None = None,
     transitions: Any = None,
     authored_migration_modules: Mapping[str, str | None] | None = None,
+    dependencies: Mapping[str, tuple[str, ...]] | None = None,
 ) -> Snapshot:
     """Freeze effective compiler inputs once, without importing source models.
 
     Explicit integration/glob/exclusion arguments and namespace declarations must
     agree. Extra setting keys extend COMPOSE_FINGERPRINT_SETTINGS. An omitted
     transition source discovers compose_migrations/<label>/<name>.py in app order.
+    Dependencies retain already-resolved native app-name edges; targets must
+    precede their dependants in entries. This function never resolves app edges.
     """
     normalized = app_entries(entries)
+    positions = {entry.name: index for index, entry in enumerate(normalized)}
+    edges = {} if dependencies is None else dependencies
+    for name, targets in edges.items():
+        if name not in positions:
+            raise ImproperlyConfigured(f"Snapshot dependency owner is not selected: {name!r}")
+        if isinstance(targets, str) or not isinstance(targets, (tuple, list)):
+            raise ImproperlyConfigured(f"Snapshot dependencies for {name!r} must be a sequence of app names")
+        for target in targets:
+            if not isinstance(target, str) or target not in positions:
+                raise ImproperlyConfigured(f"Snapshot dependency target is not selected: {target!r}")
+            if positions[target] >= positions[name]:
+                raise ImproperlyConfigured(f"Snapshot dependency {target!r} must precede {name!r}")
     values = namespace if namespace is not None else {}
     integrations = _effective_sequence(values, "COMPOSE_INTEGRATIONS", integration_paths)
     globs = tuple(sorted(set(_effective_sequence(values, "COMPOSE_FINGERPRINT_GLOBS", fingerprint_globs))))
@@ -391,4 +412,5 @@ def snapshot(
         records,
         _freeze(authored),
         _freeze(effective_settings),
+        dependencies=_freeze(edges),
     )

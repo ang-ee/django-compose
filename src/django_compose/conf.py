@@ -26,7 +26,11 @@ _ATTRIBUTES = "_YAMLCONF_ATTRIBUTES"
 _ENVIRONMENT = "**ENVIRONMENT**"
 
 
-def _root(key: str) -> str:
+def setting_name(key: str) -> str:
+    """Project a native yamlconf key by removing colon, then dotted-key suffixes.
+
+    This literal root projection does not validate or normalize the setting name.
+    """
     return key.split(":", 1)[0].split(".", 1)[0]
 
 
@@ -123,12 +127,12 @@ class _Contributions:
         for key, value in values.items():
             if (
                 not isinstance(key, str)
-                or _root(key).startswith("_")
-                or not _root(key).isidentifier()
-                or not _root(key).isupper()
+                or setting_name(key).startswith("_")
+                or not setting_name(key).isidentifier()
+                or not setting_name(key).isupper()
             ):
                 raise ImproperlyConfigured(f"{owner} contributed invalid setting name {key!r}")
-            name = _root(key)
+            name = setting_name(key)
             if name in _PROTECTED or name.startswith("COMPOSE_OUTPUT_"):
                 raise ImproperlyConfigured(f"{owner} must not contribute {name}")
             declared.add(name)
@@ -158,7 +162,7 @@ class _Contributions:
         try:
             attributes = vars(self.module)[_ATTRIBUTES]
             for key, value in values.items():
-                name = _root(key)
+                name = setting_name(key)
                 if name in self.literal_inputs:
                     del attributes[f"{name}:raw"]
                     self.literal_inputs.remove(name)
@@ -213,11 +217,12 @@ class _Contributions:
             return None
 
         for key in attributes:
-            if _root(key) in structural:
+            if setting_name(key) in structural:
                 source = inspect(key, set())
                 if source is not None:
                     raise ImproperlyConfigured(
-                        f"Structural setting {_root(key)} must not come from the environment ({source})"
+                        f"Structural setting {setting_name(key)} must not come from "
+                        f"the environment ({source})"
                     )
 
     def app(self, entry: str) -> None:
@@ -277,7 +282,7 @@ def configure(namespace: MutableMapping[str, Any]) -> None:
     contributions.check_environment()
     report_watch_paths(namespace.get("COMPOSE_WATCH_PATHS", ()))
     namespace["COMPOSE_ROOTS"] = roots
-    snap = snapshot(closure.entries, namespace=namespace)
+    snap = snapshot(closure.entries, namespace=namespace, dependencies=closure.dependencies)
     namespace["COMPOSE_SNAPSHOT"] = snap
     output_module = snap.settings["COMPOSE_OUTPUT_MODULE"]
     namespace["COMPOSE_OUTPUT_MODULE"] = output_module
