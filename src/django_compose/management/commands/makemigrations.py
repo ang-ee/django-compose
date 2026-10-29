@@ -16,18 +16,22 @@ from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.writer import MigrationWriter
 from django.utils.module_loading import module_dir
 
-from django_compose.migrations import DropGuardAutodetector, RuntimeMigrations, _metadata
+from django_compose.migrations import (
+    DropGuardAutodetector,
+    TransitionBinding,
+    _metadata,
+    require_serving_mode,
+)
 
 
-def runtime_labels() -> tuple[str, ...]:
-    """Read the labels sealed by the compiler, without invoking a build."""
-    try:
-        runtime = importlib.import_module(getattr(settings, "COMPOSE_RUNTIME_MODULE", "runtime"))
-        return tuple(runtime.RUNTIME_APPS)
-    except (ImportError, AttributeError) as error:
-        raise CommandError(
-            "Migration authoring requires prebuilt app labels; build the project first"
-        ) from error
+def history_labels() -> tuple[str, ...]:
+    """Read the compiler receipt without invoking composition."""
+    from django_compose.serving import read_receipt
+
+    receipt = read_receipt(Path(settings.COMPOSE_OUTPUT_DIR))
+    if receipt is None:
+        raise CommandError("Migration authoring requires a receipt; run compose first")
+    return tuple(receipt.HISTORY_LABELS)
 
 
 class Command(NativeCommand):
@@ -36,6 +40,7 @@ class Command(NativeCommand):
     autodetector = DropGuardAutodetector
 
     def handle(self, *app_labels: str, **options: Any) -> str | None:
+        require_serving_mode()
         name = options.get("name")
         if options.get("merge") or (name and not name.isidentifier()):
             return super().handle(*app_labels, **options)
@@ -44,7 +49,7 @@ class Command(NativeCommand):
                 apps.get_app_config(label)
             except LookupError:
                 return super().handle(*app_labels, **options)
-        authored = RuntimeMigrations(apps.get_app_configs(), labels=runtime_labels())
+        authored = TransitionBinding(labels=history_labels())
         try:
             if options.get("dry_run") or options.get("check_changes"):
                 authored.check(app_labels=app_labels or None)

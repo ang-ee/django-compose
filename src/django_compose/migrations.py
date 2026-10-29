@@ -17,11 +17,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from django.apps import AppConfig
 from django.apps import apps as global_apps
 from django.apps.registry import Apps
+from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, router, transaction
 from django.db.migrations import Migration
@@ -37,12 +36,45 @@ from django.db.migrations.writer import MigrationWriter
 from django.db.models.expressions import DatabaseDefault
 from django.utils.module_loading import module_dir
 
-from django_compose.declarations import AppDeclarationSource, BuildIntegration
+from django_compose.declarations import MigrationPolicy, resolve_integrations
 
 Node = tuple[str, str]
 MATERIALIZED_FOOTER = "# DJANGO-COMPOSE MATERIALIZED MIGRATION - DO NOT EDIT"
 _LEGACY_FOOTER = b"# ANGEE MATERIALIZED MIGRATION - DO NOT EDIT"
 _SEAL_PREFIX = b"Migration.compose_materialization_sha256 = "
+
+
+def require_serving_mode() -> None:
+    """Migration commands cannot run in a process importing source declarations."""
+    if "DJANGO_COMPOSE_MODE" in os.environ:
+        raise CommandError("Migration commands require serving mode; unset DJANGO_COMPOSE_MODE")
+
+
+def _preserve_history(
+    before: ProjectState, after: ProjectState, registry: Apps, purge: frozenset[str] = frozenset()
+) -> ProjectState:
+    retained = {
+        config.label
+        for config in registry.get_app_configs()
+        if config.models_module is None and config.label not in purge
+    }
+    for key, model in before.models.items():
+        if key[0] in retained:
+            after.models[key] = model.clone()
+    return after
+
+
+def effective_states(
+    loader: MigrationLoader, registry: Apps, *, purge: frozenset[str] = frozenset()
+) -> tuple[ProjectState, ProjectState]:
+    """Compare active models while retaining disabled labels' historical state.
+
+    A history-only AppConfig has no models module. Only explicit purge is allowed
+    to compare its durable history with an empty target state.
+    """
+    before = loader.project_state()
+    after = _preserve_history(before, ProjectState.from_apps(registry), registry, purge)
+    return before, after
 
 
 def _atomic(path: Path, content: bytes, *, exclusive: bool = False) -> None:
@@ -104,7 +136,7 @@ def _metadata(migration: Migration, name: str) -> Any:
 
 
 @dataclass(frozen=True)
-class RuntimeMigrationPlan:
+class TransitionPlan:
     """A source snapshot with host-resolved native graph edges."""
 
     origin: str
@@ -168,7 +200,7 @@ class _BindingLoader(MigrationLoader):
         super().add_external_dependencies(key, migration)
 
 
-class RuntimeMigrations:
+class TransitionBinding:
     """Bind declared migrations to host leaves without connecting to a database.
 
     Origins and snapshots are immutable, including after declaration removal.
@@ -178,14 +210,16 @@ class RuntimeMigrations:
 
     def __init__(
         self,
-        addons: Iterable[AppConfig],
         *,
         labels: Iterable[str],
-        declarations: AppDeclarationSource | None = None,
+        declarations: Iterable[Mapping[str, str]] | None = None,
     ) -> None:
-        self.addons = tuple(addons)
+        from django_compose.snapshot import transition_declarations
+
         self.labels = frozenset(labels)
-        self.declarations = declarations if declarations is not None else AppDeclarationSource.configured()
+        self.declarations = transition_declarations(
+            getattr(settings, "COMPOSE_TRANSITION_SOURCE", ()) if declarations is None else declarations
+        )
 
     def _history(self, loader: MigrationLoader) -> dict[str, tuple[Node, Migration]]:
         history = {}
@@ -222,75 +256,60 @@ class RuntimeMigrations:
         origins: set[str] = set()
         pending: dict[Node, _Source] = {}
         replaced = {key for migration in loader.replacements.values() for key in migration.replaces}
-        for app in self.addons:
-            for declaration in self.declarations.migrations(app):
-                if not isinstance(declaration, Mapping) or any(
-                    not isinstance(declaration.get(key), str) or not declaration[key]
-                    for key in ("name", "app_label", "module")
-                ):
-                    raise RuntimeError(
-                        f"{app.name}: migration declaration requires string name, app_label and module"
-                    )
-                name, label = declaration["name"], declaration["app_label"]
-                origin = f"{app.name}:{name}"
-                if origin in origins:
-                    raise RuntimeError(f"duplicate declared origin {origin}")
-                origins.add(origin)
-                if label not in self.labels:
-                    raise RuntimeError(f"{origin}: unknown runtime migration target {label!r}")
-                if not name.isidentifier() or not name.islower() or name.startswith("_"):
-                    raise RuntimeError(f"{origin}: name must be a lower-case Python identifier")
-                module_name = declaration["module"]
-                if not module_name.startswith(app.name + "."):
-                    module_name = app.name + "." + module_name
-                conventional = app.name + ".migrations"
-                if module_name == conventional or module_name.startswith(conventional + "."):
-                    raise RuntimeError(
-                        f"{origin}: source must live outside the conventional migrations package"
-                    )
-                try:
-                    module = importlib.import_module(module_name)
-                except Exception as error:
-                    raise RuntimeError(f"{origin}: cannot import source migration {module_name!r}") from error
-                path = Path(module.__file__ or "")
-                if path.suffix != ".py":
-                    raise RuntimeError(f"{origin}: migration requires Python source")
-                data = path.read_bytes()
-                digest = hashlib.sha256(data).hexdigest()
-                if origin in history:
-                    key, migration = history[origin]
-                    if key[0] != label or _metadata(migration, "source_sha256") != digest:
-                        raise RuntimeError(f"{origin}: source digest or target changed after materialization")
-                    continue
-                key = label, name
-                if key in pending or key in loader.disk_migrations:
-                    raise RuntimeError(f"{origin}: duplicate native migration node {key!r}")
-                if key in replaced:
-                    raise RuntimeError(
-                        f"{origin}: replacement requires the complete immutable original chain"
-                    )
-                cls = getattr(module, "Migration", None)
-                guard = getattr(module, "applies", None)
-                if not isinstance(cls, type) or not issubclass(cls, Migration) or not callable(guard):
-                    raise RuntimeError(
-                        f"{origin}: source requires native Migration and applies(project_state)"
-                    )
-                migration = cls(name, label)
-                if migration.replaces:
-                    raise RuntimeError(f"{origin}: declare native replacements in the host migration package")
-                cast(list[Node], migration.dependencies)[:] = [
-                    _node(edge, origin, "dependency") for edge in migration.dependencies
-                ]
-                cast(list[Node], migration.run_before)[:] = [
-                    _node(edge, origin, "run_before") for edge in migration.run_before
-                ]
-                leaves = loader.graph.leaf_nodes(label)
-                if len(leaves) == 1 and leaves[0] not in migration.dependencies:
-                    cast(list[Node], migration.dependencies).append(leaves[0])
-                package = (module.__spec__.parent if module.__spec__ else None) or module_name.rpartition(
-                    "."
-                )[0]
-                pending[key] = _Source(origin, migration, guard, path, data.decode("utf-8"), digest, package)
+        for declaration in self.declarations:
+            name, label = declaration["name"], declaration["app_label"]
+            declaring_app = declaration["declaring_app"]
+            origin = f"{declaring_app}:{name}"
+            if origin in origins:
+                raise RuntimeError(f"duplicate declared origin {origin}")
+            origins.add(origin)
+            if label not in self.labels:
+                raise RuntimeError(f"{origin}: unknown runtime migration target {label!r}")
+            if not name.isidentifier() or not name.islower() or name.startswith("_"):
+                raise RuntimeError(f"{origin}: name must be a lower-case Python identifier")
+            module_name = declaration["module"]
+            if not module_name.startswith(declaring_app + "."):
+                module_name = declaring_app + "." + module_name
+            conventional = declaring_app + ".migrations"
+            if module_name == conventional or module_name.startswith(conventional + "."):
+                raise RuntimeError(f"{origin}: source must live outside the conventional migrations package")
+            try:
+                module = importlib.import_module(module_name)
+            except Exception as error:
+                raise RuntimeError(f"{origin}: cannot import source migration {module_name!r}") from error
+            path = Path(module.__file__ or "")
+            if path.suffix != ".py":
+                raise RuntimeError(f"{origin}: migration requires Python source")
+            data = path.read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+            if origin in history:
+                key, migration = history[origin]
+                if key[0] != label or _metadata(migration, "source_sha256") != digest:
+                    raise RuntimeError(f"{origin}: source digest or target changed after materialization")
+                continue
+            key = label, name
+            if key in pending or key in loader.disk_migrations:
+                raise RuntimeError(f"{origin}: duplicate native migration node {key!r}")
+            if key in replaced:
+                raise RuntimeError(f"{origin}: replacement requires the complete immutable original chain")
+            cls = getattr(module, "Migration", None)
+            guard = getattr(module, "applies", None)
+            if not isinstance(cls, type) or not issubclass(cls, Migration) or not callable(guard):
+                raise RuntimeError(f"{origin}: source requires native Migration and applies(project_state)")
+            migration = cls(name, label)
+            if migration.replaces:
+                raise RuntimeError(f"{origin}: declare native replacements in the host migration package")
+            cast(list[Node], migration.dependencies)[:] = [
+                _node(edge, origin, "dependency") for edge in migration.dependencies
+            ]
+            cast(list[Node], migration.run_before)[:] = [
+                _node(edge, origin, "run_before") for edge in migration.run_before
+            ]
+            leaves = loader.graph.leaf_nodes(label)
+            if len(leaves) == 1 and leaves[0] not in migration.dependencies:
+                cast(list[Node], migration.dependencies).append(leaves[0])
+            package = (module.__spec__.parent if module.__spec__ else None) or module_name.rpartition(".")[0]
+            pending[key] = _Source(origin, migration, guard, path, data.decode("utf-8"), digest, package)
         return pending
 
     def plan(
@@ -300,7 +319,7 @@ class RuntimeMigrations:
         defer_drop_check: bool = False,
         app_labels: Iterable[str] | None = None,
         allow_missing_packages: bool = False,
-    ) -> tuple[RuntimeMigrationPlan, ...]:
+    ) -> tuple[TransitionPlan, ...]:
         """Validate the complete graph and selected prerequisite closure, without writes."""
         existing = MigrationLoader(None, ignore_no_migrations=True)
         pending = self._pending(existing)
@@ -349,7 +368,7 @@ class RuntimeMigrations:
                 raise RuntimeError(f"{source.origin}: migration destination already exists: {path}")
             destinations.add(path.resolve())
             result.append(
-                RuntimeMigrationPlan(
+                TransitionPlan(
                     source.origin,
                     key[0],
                     key[1],
@@ -367,7 +386,7 @@ class RuntimeMigrations:
             # belong exclusively to explicit native authoring and migrate.
             if selected is not None:
                 loader = _BindingLoader({key: pending[key] for key in ordered if key in pending})
-            before, after = loader.project_state(), ProjectState.from_apps(apps)
+            before, after = effective_states(loader, apps)
             changes = MigrationAutodetector(before, after).changes(
                 graph=loader.graph, trim_to_apps=None if selected is None else selected | relevant
             )
@@ -391,7 +410,8 @@ class RuntimeMigrations:
         if not enabled:
             return
         loader = MigrationLoader(None, ignore_no_migrations=True)
-        changes = MigrationAutodetector(loader.project_state(), ProjectState.from_apps(apps)).changes(
+        before, after = effective_states(loader, apps)
+        changes = MigrationAutodetector(before, after).changes(
             graph=loader.graph,
             trim_to_apps=enabled,
             convert_apps=enabled,
@@ -406,7 +426,7 @@ class RuntimeMigrations:
             raise RuntimeError(f"native migration history does not match composed models: {operations}")
 
     @staticmethod
-    def _render(plan: RuntimeMigrationPlan) -> bytes:
+    def _render(plan: TransitionPlan) -> bytes:
         if not plan.source.endswith("\n"):
             raise RuntimeError(f"{plan.origin}: source migration must end with a newline")
         # Keep native relative imports anchored to the author package. Module
@@ -501,6 +521,10 @@ class DropGuardAutodetector(MigrationAutodetector):
     explicitly retire rows of a deleted table; other rows remain protected.
     """
 
+    def __init__(self, from_state: ProjectState, to_state: ProjectState, questioner: Any = None) -> None:
+        to_state = _preserve_history(from_state, to_state.clone(), global_apps)
+        super().__init__(from_state, to_state, questioner)
+
     def changes(
         self,
         graph: MigrationGraph,
@@ -548,12 +572,18 @@ class DropGuardAutodetector(MigrationAutodetector):
                         model = self.from_state.apps.get_model(label, operation.name)
                         if model._meta.proxy or not model._meta.managed or model._meta.swapped:
                             continue
-                        integrations = BuildIntegration.configured()
+                        integrations = tuple(
+                            integration
+                            for integration in resolve_integrations(
+                                getattr(settings, "COMPOSE_INTEGRATIONS", ())
+                            )
+                            if isinstance(integration, MigrationPolicy)
+                        )
 
                         def remaining_rows(
                             alias: str,
                             model: Any = model,
-                            integrations: tuple[BuildIntegration, ...] = integrations,
+                            integrations: tuple[MigrationPolicy, ...] = integrations,
                         ) -> Any:
                             retired = {
                                 pk
@@ -652,7 +682,8 @@ def reset_migration_history(
             raise RuntimeError(
                 f"history reset has cross-app dependent {key!r}; include its app in the selected scope"
             )
-    if MigrationAutodetector(loader.project_state(), ProjectState.from_apps(global_apps)).changes(
+    before, after = effective_states(loader, global_apps)
+    if MigrationAutodetector(before, after).changes(
         graph=loader.graph, trim_to_apps=set(labels), convert_apps=set(labels)
     ):
         raise RuntimeError("history reset requires a model-clean native graph")
@@ -669,7 +700,18 @@ def reset_migration_history(
         for path in original:
             path.unlink()
         _forget_history(labels)
-        call_command("makemigrations", *labels, interactive=False, include_header=False, verbosity=0)
+        fresh_loader = MigrationLoader(None, ignore_no_migrations=True)
+        fresh_before, fresh_after = effective_states(fresh_loader, global_apps)
+        for key, model in after.models.items():
+            if key[0] in labels:
+                fresh_after.models[key] = model.clone()
+        changes = MigrationAutodetector(fresh_before, fresh_after).changes(
+            graph=fresh_loader.graph, trim_to_apps=set(labels), convert_apps=set(labels)
+        )
+        for migrations in changes.values():
+            for migration in migrations:
+                writer = MigrationWriter(migration, include_header=False)
+                _atomic(Path(writer.path), writer.as_string().encode(), exclusive=True)
         _forget_history(labels)
         fresh = MigrationExecutor(connection).loader
         nodes = {key for key in fresh.graph.nodes if key[0] in labels}
@@ -693,3 +735,135 @@ def reset_migration_history(
         _forget_history(labels)
         raise
     return labels, len(original), count
+
+
+@dataclass(frozen=True)
+class HistoricalImport:
+    """A retained Python import and its installed distribution identities."""
+
+    path: Path
+    module: str
+    distributions: tuple[str, ...]
+
+
+def historical_imports(output_dir: Path) -> tuple[HistoricalImport, ...]:
+    """Report imports whose providers must survive retained native history.
+
+    A copied transition can still import custom fields, validators, or helpers.
+    Distribution ownership is metadata evidence, not proof of uninstall safety.
+    """
+    from importlib.metadata import packages_distributions
+
+    providers = packages_distributions()
+    result = []
+    for path in sorted(Path(output_dir).glob("*/migrations/*.py")):
+        package: str | None = None
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in tree.body:
+            if (
+                isinstance(node, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == "__package__" for target in node.targets
+                )
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                package = node.value.value
+        modules = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    if package is not None:
+                        modules.add(
+                            importlib.util.resolve_name("." * node.level + (node.module or ""), package)
+                        )
+                elif node.module:
+                    modules.add(node.module)
+        for module in sorted(modules):
+            result.append(
+                HistoricalImport(path, module, tuple(sorted(providers.get(module.split(".")[0], ()))))
+            )
+    return tuple(result)
+
+
+def _history_aliases(loader: MigrationLoader, labels: set[str]) -> tuple[str, ...]:
+    historical = loader.project_state().apps
+    models = [model for model in historical.get_models() if model._meta.app_label in labels]
+    return tuple(
+        alias
+        for alias in sorted(connections)
+        if any(router.allow_migrate_model(alias, model) for model in models)
+        or any(router.allow_migrate(alias, label) for label in labels)
+    )
+
+
+def _check_dependents(loader: MigrationLoader, labels: set[str]) -> None:
+    for key in sorted(loader.graph.nodes):
+        if key[0] not in labels and any(node[0] in labels for node in loader.graph.forwards_plan(key)):
+            raise RuntimeError(
+                f"retained migration {key!r} depends on retiring history; squash or rebase dependents first"
+            )
+
+
+def _fully_applied(labels: set[str], aliases: Iterable[str]) -> None:
+    for alias in aliases:
+        connection = connections[alias]
+        executor = MigrationExecutor(connection)
+        loader = executor.loader
+        loader.check_consistent_history(connection)
+        targets = [node for node in loader.graph.leaf_nodes() if node[0] in labels]
+        if executor.migration_plan(targets):
+            raise RuntimeError(f"history retirement requires fully applied history on database {alias!r}")
+
+
+def retire_history(label: str, *, purge: bool = False) -> None:
+    """Retire a disabled label only after all routed configured databases agree.
+
+    Purge authors a native final migration, applies it on every routed alias, and
+    then runs the same retirement proof. A failed application leaves durable
+    history for retry; it never records retirement prematurely.
+    """
+    from django_compose.artifacts import receipt_lock, update_receipt
+    from django_compose.serving import read_receipt
+
+    require_serving_mode()
+    output = Path(settings.COMPOSE_OUTPUT_DIR)
+    with receipt_lock(output):
+        receipt = read_receipt(output)
+        if receipt is None:
+            raise RuntimeError("History retirement requires a composed receipt")
+        if label in receipt.RETIRED_LABELS:
+            return
+        if label not in receipt.HISTORY_LABELS:
+            raise RuntimeError(f"Unknown history label {label!r}")
+        config = global_apps.get_app_config(label)
+        if config.models_module is not None:
+            raise RuntimeError(f"{label!r} must be history-only before retirement")
+        loader = MigrationLoader(None, ignore_no_migrations=True)
+        _check_dependents(loader, {label})
+        aliases = _history_aliases(loader, {label})
+        if purge:
+            before, after = effective_states(loader, global_apps, purge=frozenset({label}))
+            changes = MigrationAutodetector(before, after).changes(
+                graph=loader.graph, trim_to_apps={label}, migration_name="compose_purge"
+            )
+            for migration in changes.get(label, ()):
+                writer = MigrationWriter(migration, include_header=False)
+                path = Path(writer.path)
+                if path.exists():
+                    raise RuntimeError(f"Refusing to overwrite native purge migration {path}")
+                _atomic(path, writer.as_string().encode(), exclusive=True)
+            _forget_history({label})
+            for alias in aliases:
+                executor = MigrationExecutor(connections[alias])
+                executor.loader.check_consistent_history(connections[alias])
+                executor.migrate(executor.loader.graph.leaf_nodes(label))
+        _fully_applied({label}, aliases)
+        loader = MigrationLoader(None, ignore_no_migrations=True)
+        _check_dependents(loader, {label})
+        before, after = effective_states(loader, global_apps)
+        if MigrationAutodetector(before, after).changes(graph=loader.graph, trim_to_apps={label}):
+            raise RuntimeError("History retirement requires model-clean history")
+        update_receipt(output, retired_labels=tuple(sorted({*receipt.RETIRED_LABELS, label})), locked=True)

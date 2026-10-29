@@ -69,7 +69,7 @@ def host(tmp_path):
     write(tmp_path, "alpha/models.py", MODELS)
     write(tmp_path, "history/alpha/0001_origin.py", INITIAL)
     write(tmp_path, "author/transitions/rename.py", TRANSITION)
-    write(tmp_path, "runtime.py", "RUNTIME_APPS = ('alpha', 'beta')\n")
+    write(tmp_path, "runtime.py", "HISTORY_LABELS = ('alpha', 'beta')\nRETIRED_LABELS = ()\n")
     setup = """
 import importlib
 from pathlib import Path
@@ -85,7 +85,8 @@ settings.configure(
     DEFAULT_AUTO_FIELD="django.db.models.AutoField",
     DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": "database.sqlite3"}},
     MIGRATION_MODULES={"alpha": "history.alpha", "beta": "history.beta", "author": None},
-    COMPOSE_RUNTIME_MODULE="runtime",
+    COMPOSE_OUTPUT_DIR=Path("output"),
+    COMPOSE_OUTPUT_MODULE="runtime",
 )
 django.setup()
 from django.apps import apps
@@ -95,15 +96,25 @@ from django.db import connection, migrations, models
 from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.state import ProjectState, ModelState
-from django_compose.declarations import AppDeclarationSource, BuildIntegration
-from django_compose.migrations import RuntimeMigrations, DropGuardAutodetector, reset_migration_history
-class Declarations(AppDeclarationSource):
+from django_compose.declarations import MigrationPolicy
+from django_compose.migrations import TransitionBinding, DropGuardAutodetector, reset_migration_history
+class Declarations:
     entries = [{"name": "rename", "app_label": "alpha", "module": "transitions.rename"}]
-    def migrations(self, app):
-        return self.entries if app.name == "author" else ()
+
 declarations = Declarations()
+def transition_source():
+    return [{"declaring_app": "author", **entry} for entry in declarations.entries]
+settings.COMPOSE_TRANSITION_SOURCE = "__main__.transition_source"
+# These binding tests isolate native history from the compiler receipt writer.
+from contextlib import contextmanager
+@contextmanager
+def receipt_labels():
+    target = "django_compose.management.commands.makemigrations.history_labels"
+    with patch(target, return_value=("alpha", "beta")):
+        yield
+
 def owner():
-    return RuntimeMigrations(apps.get_app_configs(), labels=("alpha", "beta"), declarations=declarations)
+    return TransitionBinding(labels=("alpha", "beta"), declarations=transition_source())
 def files():
     return {str(p): p.read_bytes() for p in Path("history").rglob("*.py")}
 def refresh():

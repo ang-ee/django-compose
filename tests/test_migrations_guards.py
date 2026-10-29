@@ -61,11 +61,11 @@ model = before.apps.get_model("alpha", "Record")
 row = model._base_manager.create(old="seeded")
 after = before.clone()
 after.remove_model("alpha", "record")
-class Retirement(BuildIntegration):
+class Retirement:
     def retired_primary_keys(self, model, alias):
         assert alias == "default"
         return [row.pk] if {retire!r} else []
-with patch.object(BuildIntegration, "configured", return_value=(Retirement(),)):
+with patch("django_compose.migrations.resolve_integrations", return_value=(Retirement(),)):
     action = lambda: DropGuardAutodetector(before, after).changes(executor.loader.graph)
     if {retire!r}:
         assert action()["alpha"]
@@ -115,9 +115,8 @@ assert not [error for error in run_checks() if error.id == "commands.E001"]
 def test_native_readonly_authoring_does_not_materialize(host, readonly):
     _, run = host
     run(f"""
-from django_compose.declarations import AppDeclarationSource
 before = files()
-with patch.object(AppDeclarationSource, "configured", return_value=declarations):
+with receipt_labels():
     def action():
         call_command("makemigrations", "alpha", {readonly}=True, interactive=False, verbosity=0)
     expect(CommandError, "pending authored", action)
@@ -128,7 +127,7 @@ assert files() == before
 def test_native_authoring_binds_before_autodetection(host):
     _, run = host
     run("""
-with patch.object(AppDeclarationSource, "configured", return_value=declarations):
+with receipt_labels():
     call_command("makemigrations", "alpha", interactive=False, verbosity=0)
 assert Path("history/alpha/rename.py").exists()
 names = sorted(p.name for p in Path("history/alpha").glob("*.py"))
@@ -177,7 +176,7 @@ owner().materialize(apps)
 call_command("migrate", interactive=False, verbosity=0)
 apps.get_model("alpha", "Record")._base_manager.create(new="existing")
 declarations.entries = []
-with patch.object(AppDeclarationSource, "configured", return_value=declarations):
+with receipt_labels():
     labels, removed, count = reset_migration_history(("alpha",))
 assert labels == ("alpha",)
 assert removed == 2
@@ -201,11 +200,11 @@ if {failure!r} == "authoring":
     def fail(*args, **kwargs):
         Path("history/alpha/0001_half_written.py").write_text("# incomplete\\n")
         raise RuntimeError("injected failure")
-    target, effect = "django_compose.migrations.call_command", fail
+    target, effect = "django.db.migrations.writer.MigrationWriter.as_string", fail
 else:
     target = "django.db.migrations.recorder.MigrationRecorder.record_unapplied"
     effect = RuntimeError("injected failure")
-with patch.object(AppDeclarationSource, "configured", return_value=declarations):
+with receipt_labels():
     with patch(target, side_effect=effect):
         expect(RuntimeError, "injected failure", lambda: reset_migration_history(("alpha",)))
 assert before == files()
@@ -259,7 +258,7 @@ owner().materialize(apps)
 call_command("migrate", interactive=False, verbosity=0)
 Path("history/alpha/_helper.py").write_text("VALUE = 'durable helper'\\n")
 declarations.entries = []
-with patch.object(AppDeclarationSource, "configured", return_value=declarations):
+with receipt_labels():
     labels, removed, recorded = reset_migration_history(("alpha",))
 assert removed == 2
 assert Path("history/alpha/_helper.py").read_text() == "VALUE = 'durable helper'\\n"
@@ -283,7 +282,7 @@ owner().materialize(apps)
 call_command("migrate", interactive=False, verbosity=0)
 beta = Path("history/beta/0001_noop.py").read_bytes()
 declarations.entries = []
-with patch.object(AppDeclarationSource, "configured", return_value=declarations):
+with receipt_labels():
     reset_migration_history(("alpha",))
 assert Path("history/beta/0001_noop.py").read_bytes() == beta
 assert ("beta", "0001_noop") in MigrationExecutor(connection).loader.applied_migrations

@@ -5,8 +5,8 @@ from typing import Any
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import DEFAULT_DB_ALIAS, connections
 
-from django_compose.management.commands.makemigrations import runtime_labels
-from django_compose.migrations import reset_migration_history
+from django_compose.management.commands.makemigrations import history_labels
+from django_compose.migrations import require_serving_mode, reset_migration_history
 
 
 class Command(BaseCommand):
@@ -19,7 +19,8 @@ class Command(BaseCommand):
         parser.add_argument("--database", default=DEFAULT_DB_ALIAS, choices=tuple(connections))
 
     def handle(self, *args: Any, **options: Any) -> None:
-        allowed = set(runtime_labels())
+        require_serving_mode()
+        allowed = set(history_labels())
         selected = set(options["app_labels"]) or allowed
         if unknown := selected - allowed:
             raise CommandError(f"Unknown composed apps: {', '.join(sorted(unknown))}")
