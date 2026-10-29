@@ -331,3 +331,36 @@ def test_default_transition_targets_feed_build_history_from_snapshot_records(tmp
     receipt = read_receipt(root / "runtime")
     assert receipt is not None
     assert "previous" in receipt.HISTORY_LABELS
+
+
+def test_stale_check_verifies_before_integration_import_and_construction(tmp_path: Path) -> None:
+    root = host(tmp_path)
+    source = root / "bootapp/integration.py"
+    source.write_text(
+        source.read_text()
+        .replace(
+            "from pathlib import Path",
+            "from pathlib import Path\nPath(__file__).with_name('hook-imported').touch()",
+        )
+        .replace(
+            "class Capability:",
+            (
+                "class Capability:\n    def __init__(self):\n"
+                "        Path(__file__).with_name('hook-constructed').touch()"
+            ),
+        )
+    )
+    successful(invoke(root, "compose"))
+    imported = root / "bootapp/hook-imported"
+    constructed = root / "bootapp/hook-constructed"
+    assert imported.exists() and constructed.exists()
+    imported.unlink()
+    constructed.unlink()
+    (root / "runtime/capability/ready.txt").write_text("tampered")
+    before = files(root / "runtime")
+    result = invoke(root, "compose", "--check")
+    assert result.returncode != 0
+    assert "missing or altered" in result.stderr
+    assert not imported.exists()
+    assert not constructed.exists()
+    assert files(root / "runtime") == before

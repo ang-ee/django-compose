@@ -12,8 +12,10 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
+from django.apps import AppConfig
 from django.conf import global_settings
 from django.core.exceptions import ImproperlyConfigured
+from django.utils.module_loading import import_string
 
 from django_compose.sources import SourceResolver
 
@@ -95,8 +97,6 @@ class Snapshot:
 
 def app_entries(entries: Iterable[str | Entry]) -> tuple[Entry, ...]:
     """Resolve native app identities without importing any app models."""
-    from django.apps import AppConfig
-
     result = []
     names: set[str] = set()
     labels: set[str] = set()
@@ -302,12 +302,21 @@ def snapshot(
             relative = path.relative_to(root)
             if path.is_file() and not any(relative.full_match(pattern) for pattern in excludes):
                 files[f"{entry.name}/{relative.as_posix()}"] = hashlib.sha256(path.read_bytes()).hexdigest()
-    for dotted in integrations:
-        module = dotted.rpartition(".")[0]
+    modules = {
+        f"integration:{dotted.rpartition('.')[0]}": dotted.rpartition(".")[0] for dotted in integrations
+    }
+    for entry in normalized:
+        config_class = import_string(entry.config)
+        if not isinstance(config_class, type) or not issubclass(config_class, AppConfig):
+            raise ImproperlyConfigured(f"Selected config must be an AppConfig class: {entry.config!r}")
+        for owner in config_class.__mro__:
+            if owner is not object:
+                modules[f"config:{owner.__module__}"] = owner.__module__
+    for key, module in sorted(modules.items()):
         location = resolver.resolve(module)
         if location.path is None or not location.path.is_file():
             raise ImproperlyConfigured(f"Cannot fingerprint module {module!r}")
-        files[f"integration:{module}"] = hashlib.sha256(location.path.read_bytes()).hexdigest()
+        files[key] = hashlib.sha256(location.path.read_bytes()).hexdigest()
     return Snapshot(
         normalized,
         tuple(sorted(files.items())),

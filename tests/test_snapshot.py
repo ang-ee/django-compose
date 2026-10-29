@@ -1,6 +1,7 @@
 """Snapshot immutability, input coverage, receipt integrity and import boundaries."""
 
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -142,6 +143,7 @@ def test_nested_fingerprints_never_execute_model_importing_packages(tmp_path, ki
     leaf = nested / "hooks.py"
     leaf.write_text(model_source)
     script = f"""import hashlib
+import json
 import sys
 from django.conf import settings
 settings.configure(INSTALLED_APPS=[])
@@ -362,3 +364,65 @@ def test_matching_direct_and_namespace_transition_callable_runs_once(tmp_path, m
     )
     assert snap.transition_records == ()
     assert calls == [True]
+
+
+@pytest.mark.parametrize("inherited", [False, True])
+def test_external_config_hook_implementation_changes_fingerprint_and_discovery(tmp_path, inherited):
+    package = tmp_path / "inputprobe"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "declarations.py").write_text("""from django_compose.models import Composable
+class A(Composable, concrete=True):
+    class Meta:
+        abstract = True
+class B(Composable, concrete=True):
+    class Meta:
+        abstract = True
+""")
+    hook = """from django.apps import AppConfig
+from types import ModuleType
+class HookConfig(AppConfig):
+    name = 'inputprobe'
+    def import_models(self):
+        super().import_models()
+        from inputprobe import declarations
+        self.models_module = ModuleType('inputprobe.models')
+        self.models_module.selected = declarations.A
+"""
+    config = tmp_path / "external_config.py"
+    implementation = tmp_path / "external_base.py" if inherited else config
+    implementation.write_text(hook if inherited else hook.replace("HookConfig", "Config"))
+    if inherited:
+        config.write_text("from external_base import HookConfig\nclass Config(HookConfig):\n    pass\n")
+    script = """import json
+import sys
+from django.conf import settings
+settings.configure(INSTALLED_APPS=['external_config.Config'], SECRET_KEY='test')
+from django_compose.snapshot import snapshot
+snap = snapshot(settings.INSTALLED_APPS)
+assert 'inputprobe.declarations' not in sys.modules
+import django
+django.setup()
+from django.apps import apps
+from django_compose.build import discover
+composition = discover(apps.get_app_configs())
+print(json.dumps([snap.digest(), [model.__name__ for model in composition.ordered_models], dict(snap.files)]))
+"""
+    environment = dict(os.environ, PYTHONPATH=os.pathsep.join([str(tmp_path), *sys.path]))
+
+    def run():
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", script], env=environment, capture_output=True, text=True, check=False
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return json.loads(result.stdout)
+
+    before = run()
+    implementation.write_text(implementation.read_text().replace("declarations.A", "declarations.B"))
+    after = run()
+    assert before[1] == ["A"]
+    assert after[1] == ["B"]
+    assert before[0] != after[0]
+    assert "config:external_config" in before[2]
+    if inherited:
+        assert "config:external_base" in before[2]

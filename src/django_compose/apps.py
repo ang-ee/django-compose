@@ -57,10 +57,12 @@ class BuildComposeConfig(AppConfig):
         if not isinstance(snap, Snapshot):
             raise ImproperlyConfigured("Settings must create COMPOSE_SNAPSHOT before population")
         snap.check_mode()
-        integrations = resolve_integrations(snap.integration_paths)
-        transitions = snap.transition_records
         output_dir = settings.COMPOSE_OUTPUT_DIR
         output_module = getattr(settings, "COMPOSE_OUTPUT_MODULE", "runtime")
+        if selected_mode == "check":
+            verify(snap, output_module)
+        integrations = resolve_integrations(snap.integration_paths)
+        transitions = snap.transition_records
         self.plan = emit(
             snap,
             self.apps.get_app_configs(),
