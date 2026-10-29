@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import ast
+import fcntl
 import hashlib
 import importlib.util
-from collections.abc import Iterable, Mapping
+import os
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -16,6 +19,48 @@ from django_compose.snapshot import Entry, Snapshot, app_entries
 from django_compose.snapshot import mode as mode
 
 GENERATED_SENTINEL = "# django-compose generated output v1"
+
+
+def _validate_output_root(root: Path) -> None:
+    if any(parent.is_symlink() for parent in (root, *root.parents)):
+        raise ValueError(f"Generated root traverses a symlink: {root}")
+    if root.exists() and not root.is_dir():
+        raise ValueError(f"Generated root is not a directory: {root}")
+
+
+@contextmanager
+def receipt_lock(output_dir: Path | str, *, write: bool = True, required: bool = False) -> Iterator[None]:
+    """Serialize mutations; a check never creates a directory or lock file."""
+    root = Path(output_dir)
+    _validate_output_root(root)
+    if not write:
+        path = root / ".compose.lock"
+        if path.is_symlink():
+            raise ValueError("Generated lock is a symlink")
+        if path.exists():
+            with path.open("rb") as stream:
+                os.set_inheritable(stream.fileno(), False)
+                fcntl.flock(stream, fcntl.LOCK_SH)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(stream, fcntl.LOCK_UN)
+        else:
+            if required:
+                raise ImproperlyConfigured("Missing generated composition lock; run compose")
+            yield
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / ".compose.lock"
+    if path.is_symlink():
+        raise ValueError("Generated lock is a symlink")
+    with path.open("a+b") as stream:
+        os.set_inheritable(stream.fileno(), False)
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True)
@@ -109,9 +154,8 @@ def output_directory(output_module: str) -> Path:
     return Path(next(iter(spec.submodule_search_locations)))
 
 
-def verify(snap: Snapshot, output_module: str) -> Receipt:
+def _verify(snap: Snapshot, root: Path) -> Receipt:
     snap.check_mode()
-    root = output_directory(output_module)
     receipt = read_receipt(root)
     if (
         receipt is None
@@ -128,6 +172,58 @@ def verify(snap: Snapshot, output_module: str) -> Receipt:
             or hashlib.sha256(path.read_bytes()).hexdigest() != digest
         ):
             raise ImproperlyConfigured(f"Generated file is missing or altered: {relative}; run compose")
+    return receipt
+
+
+@dataclass
+class _StartupVerification:
+    root: Path
+    source: bytes
+    lock: AbstractContextManager[None]
+
+
+_startup_verification: _StartupVerification | None = None
+
+
+def _close_startup_verification() -> None:
+    global _startup_verification
+    session, _startup_verification = _startup_verification, None
+    if session is not None:
+        session.lock.__exit__(None, None, None)
+
+
+def _finish_startup_verification() -> None:
+    session = _startup_verification
+    try:
+        if session is not None and (session.root / "__init__.py").read_bytes() != session.source:
+            raise ImproperlyConfigured("Generated composition changed during population; run compose")
+    finally:
+        _close_startup_verification()
+
+
+def verify(snap: Snapshot, output_module: str, *, retain_startup: bool = False) -> Receipt:
+    """Verify under a shared lock, optionally retaining it through final ready.
+
+    Retained verification belongs to the single native Django startup. A failed
+    bare setup is unrecoverable; its process must exit to release resources.
+    """
+    global _startup_verification
+    if retain_startup and mode() == "write":
+        raise ImproperlyConfigured("Write composition cannot retain a startup reader lock")
+    if retain_startup and _startup_verification is not None:
+        raise ImproperlyConfigured("Composition startup verification is already active")
+    root = output_directory(output_module)
+    lock = receipt_lock(root, write=False, required=retain_startup)
+    lock.__enter__()
+    try:
+        receipt = _verify(snap, root)
+        if retain_startup:
+            _startup_verification = _StartupVerification(root, (root / "__init__.py").read_bytes(), lock)
+            return receipt
+    except BaseException:
+        lock.__exit__(None, None, None)
+        raise
+    lock.__exit__(None, None, None)
     return receipt
 
 

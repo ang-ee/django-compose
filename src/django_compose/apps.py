@@ -9,7 +9,7 @@ from django.apps import AppConfig
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
-from django_compose.serving import mode, verify
+from django_compose.serving import _close_startup_verification, _finish_startup_verification, mode, verify
 from django_compose.snapshot import Snapshot
 
 
@@ -20,20 +20,28 @@ class ComposeConfig(AppConfig):
     default = True
 
     def ready(self) -> None:
-        if mode() is not None:
-            raise ImproperlyConfigured("Compose mode requires BuildComposeConfig last in INSTALLED_APPS")
-        receipt = verify(settings.COMPOSE_SNAPSHOT, settings.COMPOSE_OUTPUT_MODULE)
-        root = import_module(settings.COMPOSE_OUTPUT_MODULE)
-        if root is None or getattr(root, "GENERATION", None) != receipt.GENERATION:
-            raise ImproperlyConfigured("Generated composition changed during population; run compose")
-        prefix = settings.COMPOSE_OUTPUT_MODULE + "."
-        for name, module in tuple(sys.modules.items()):
-            if (
-                name.startswith(prefix)
-                and hasattr(module, "__generation__")
-                and module.__generation__ != receipt.GENERATION
-            ):
-                raise ImproperlyConfigured("Generated modules belong to different generations; run compose")
+        try:
+            if self.apps is None or tuple(self.apps.get_app_configs())[-1] is not self:
+                raise ImproperlyConfigured("ComposeConfig must be last in INSTALLED_APPS")
+            if mode() is not None:
+                raise ImproperlyConfigured("Compose mode requires BuildComposeConfig last in INSTALLED_APPS")
+            receipt = verify(settings.COMPOSE_SNAPSHOT, settings.COMPOSE_OUTPUT_MODULE)
+            root = import_module(settings.COMPOSE_OUTPUT_MODULE)
+            if root is None or getattr(root, "GENERATION", None) != receipt.GENERATION:
+                raise ImproperlyConfigured("Generated composition changed during population; run compose")
+            prefix = settings.COMPOSE_OUTPUT_MODULE + "."
+            for name, module in tuple(sys.modules.items()):
+                if (
+                    name.startswith(prefix)
+                    and hasattr(module, "__generation__")
+                    and module.__generation__ != receipt.GENERATION
+                ):
+                    raise ImproperlyConfigured(
+                        "Generated modules belong to different generations; run compose"
+                    )
+            _finish_startup_verification()
+        finally:
+            _close_startup_verification()
 
 
 class BuildComposeConfig(AppConfig):
@@ -85,11 +93,15 @@ class BuildComposeConfig(AppConfig):
             raise
 
     def ready(self) -> None:
-        if mode() != self.compose_mode:
-            raise ImproperlyConfigured("DJANGO_COMPOSE_MODE changed after settings load")
-        if self.compose_mode == "check":
-            from django_compose.migrations import TransitionBinding
+        try:
+            if mode() != self.compose_mode:
+                raise ImproperlyConfigured("DJANGO_COMPOSE_MODE changed after settings load")
+            if self.compose_mode == "check":
+                from django_compose.migrations import TransitionBinding
 
-            binding = TransitionBinding(labels=self.plan.labels, declarations=self.plan.transitions)
-            assert self.apps is not None
-            binding.check_native_history(self.apps)
+                binding = TransitionBinding(labels=self.plan.labels, declarations=self.plan.transitions)
+                assert self.apps is not None
+                binding.check_native_history(self.apps)
+            _finish_startup_verification()
+        finally:
+            _close_startup_verification()

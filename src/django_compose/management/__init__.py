@@ -44,4 +44,9 @@ def execute(argv: list[str] | None = None) -> None:
         sys.dont_write_bytecode = True
     from django.core.management import execute_from_command_line
 
-    execute_from_command_line(arguments)
+    from django_compose.serving import _close_startup_verification
+
+    try:
+        execute_from_command_line(arguments)
+    finally:
+        _close_startup_verification()

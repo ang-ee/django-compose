@@ -2,49 +2,18 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import os
 import tempfile
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager, nullcontext
+from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
 
-from django_compose.serving import Receipt, read_receipt
-
-
-@contextmanager
-def receipt_lock(output_dir: Path | str, *, write: bool = True) -> Iterator[None]:
-    """Serialize mutations; a check never creates a directory or lock file."""
-    root = Path(output_dir)
-    GeneratedTree.validate_artifacts(root, {})
-    if not write:
-        path = root / ".compose.lock"
-        if path.is_symlink():
-            raise ValueError("Generated lock is a symlink")
-        if path.exists():
-            with path.open("rb") as stream:
-                fcntl.flock(stream, fcntl.LOCK_SH)
-                try:
-                    yield
-                finally:
-                    fcntl.flock(stream, fcntl.LOCK_UN)
-        else:
-            yield
-        return
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / ".compose.lock"
-    if path.is_symlink():
-        raise ValueError("Generated lock is a symlink")
-    with path.open("a+b") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(stream, fcntl.LOCK_UN)
+from django_compose.serving import Receipt, _validate_output_root, read_receipt
+from django_compose.serving import receipt_lock as receipt_lock
 
 
 def atomic_write(path: Path, content: bytes) -> None:
@@ -81,10 +50,7 @@ class GeneratedTree:
 
     @staticmethod
     def validate_artifacts(root: Path, artifacts: Mapping[Path, bytes | str]) -> None:
-        if any(parent.is_symlink() for parent in (root, *root.parents)):
-            raise ValueError(f"Generated root traverses a symlink: {root}")
-        if root.exists() and not root.is_dir():
-            raise ValueError(f"Generated root is not a directory: {root}")
+        _validate_output_root(root)
         paths = set(artifacts)
         for relative, source in artifacts.items():
             if (
