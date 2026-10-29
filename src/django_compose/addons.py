@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from graphlib import CycleError, TopologicalSorter
 from importlib import metadata
 from types import MappingProxyType
@@ -26,6 +26,8 @@ class Closure:
     Addons contains only selected members of the requested entry-point group.
     Dependencies maps selected native app names to their direct dependencies,
     also native app names, independent of the selected config entry strings.
+    App_configs retains the same selected native instances for app-owned behavior;
+    app_entries freezes their identity facts for composition inputs.
     """
 
     app_entries: tuple[Entry, ...]
@@ -33,6 +35,7 @@ class Closure:
     required: frozenset[str]
     addons: frozenset[str]
     dependencies: Mapping[str, tuple[str, ...]]
+    app_configs: tuple[AppConfig, ...] = field(compare=False, repr=False)
 
     @property
     def entries(self) -> tuple[str, ...]:
@@ -190,11 +193,13 @@ def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
         ordered = tuple(TopologicalSorter(graph).static_order())
     except CycleError as error:
         raise ImproperlyConfigured(f"App dependency cycle: {' -> '.join(error.args[1])}") from error
-    entries = app_entries(Entry.from_config(selected[name][1], selected[name][0]) for name in ordered)
+    configs = tuple(selected[name][1] for name in ordered)
+    entries = app_entries(Entry.from_config(config, selected[config.name][0]) for config in configs)
     return Closure(
         entries,
         root_names,
         frozenset(ordered) - root_set,
         frozenset(ordered).intersection(by_app),
         MappingProxyType(graph),
+        app_configs=configs,
     )

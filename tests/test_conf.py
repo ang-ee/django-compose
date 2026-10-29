@@ -617,3 +617,62 @@ def settings(namespace):
     with pytest.raises(TypeError):
         closure.dependencies[consumer] = ()
     assert "COMPOSE_CLOSURE" not in ns["COMPOSE_SNAPSHOT"].settings
+
+
+@pytest.mark.parametrize("selection", ["native", "default", "explicit"])
+def test_callback_reuses_selected_native_config_instance(project, monkeypatch, selection):
+    from pathlib import Path
+
+    from django.apps import AppConfig
+
+    app, ns = project
+    foreign = app()
+    consumer = app("""SEEN = []
+def settings(namespace):
+    config = namespace["COMPOSE_CLOSURE"].app_configs[0]
+    SEEN.append(config)
+    return {"SELECTED_OWNER": config.instance_value if hasattr(config, "instance_value") else config.name}
+""")
+    root = Path(ns["COMPOSE_OUTPUT_DIR"]).parent
+    if selection != "native":
+        (root / foreign / "apps.py").write_text(
+            "from django.apps import AppConfig\n"
+            "CREATED = []\n"
+            f"class DefaultConfig(AppConfig):\n    name = {foreign!r}\n    default = True\n"
+            "    def __init__(self, *args, **kwargs):\n"
+            "        super().__init__(*args, **kwargs)\n"
+            "        CREATED.append(self)\n"
+            "        self.instance_value = type(self).__name__ + str(len(CREATED))\n"
+            "class ExplicitConfig(DefaultConfig):\n    default = False\n"
+        )
+    selected = f"{foreign}.apps.ExplicitConfig" if selection == "explicit" else foreign
+    ns["INSTALLED_APPS"] = [selected, consumer]
+    native_create = AppConfig.create
+    created = []
+
+    def create(entry):
+        config = native_create(entry)
+        created.append(config)
+        return config
+
+    monkeypatch.setattr(AppConfig, "create", create)
+    conf.configure(ns)
+    closure = ns["COMPOSE_CLOSURE"]
+    assert closure.entries == (selected, consumer)
+    assert closure.app_configs == tuple(created)
+    assert tuple(config.name for config in closure.app_configs) == tuple(
+        entry.name for entry in closure.app_entries
+    )
+    config = closure.app_configs[0]
+    assert importlib.import_module(f"{consumer}.autoconfig").SEEN[0] is config
+    assert config is created[0]
+    if selection == "native":
+        assert type(config) is AppConfig
+        assert ns["SELECTED_OWNER"] == foreign
+    else:
+        module = importlib.import_module(f"{foreign}.apps")
+        assert module.CREATED == [config]
+        expected = "ExplicitConfig" if selection == "explicit" else "DefaultConfig"
+        assert type(config).__name__ == expected
+        assert ns["SELECTED_OWNER"] == expected + "1"
+    assert len(created) == 2

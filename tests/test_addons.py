@@ -465,3 +465,17 @@ def test_closure_app_identities_reuse_selected_configs_without_reactivation(inst
         identity.path = "changed"
     with pytest.raises(FrozenInstanceError):
         closure.app_entries = ()
+
+
+def test_closure_configs_keep_dependency_order_and_tuple_immutability(installed):
+    dependency = installed.app("native_owner_dependency")
+    root = installed.app("native_owner_root", requires=(dependency,))
+    closure = enabled_apps((root,))
+    assert tuple(config.name for config in closure.app_configs) == (dependency, root)
+    assert tuple(config.label for config in closure.app_configs) == tuple(
+        entry.label for entry in closure.app_entries
+    )
+    with pytest.raises(FrozenInstanceError):
+        closure.app_configs = ()
+    with pytest.raises(TypeError):
+        closure.app_configs[0] = closure.app_configs[1]
