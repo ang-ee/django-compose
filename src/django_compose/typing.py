@@ -36,7 +36,7 @@ from mypy.types import CallableType, Instance, Overloaded, TypeType, get_proper_
 from mypy.types import Type as MypyType
 from mypy.typevars import fill_typevars, fill_typevars_with_any
 from mypy_django_plugin.django.context import DjangoContext
-from mypy_django_plugin.lib import helpers
+from mypy_django_plugin.lib import fullnames, helpers
 from mypy_django_plugin.main import NewSemanalDjangoPlugin
 from mypy_django_plugin.transformers.fields import (
     get_field_descriptor_types,
@@ -328,9 +328,14 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
             for field in self.django_context.get_model_fields(model):
                 if field.name in info.names or isinstance(field, models.ManyToManyField):
                     continue
-                field_symbol = self.lookup_fully_qualified(helpers.get_class_fullname(type(field)))
-                if field_symbol is None or not isinstance(field_symbol.node, TypeInfo):
-                    raise helpers.IncompleteDefnException(helpers.get_class_fullname(type(field)))
+                field_fullname = helpers.get_class_fullname(type(field))
+                field_symbol = self.lookup_fully_qualified(field_fullname)
+                if (
+                    field_symbol is None
+                    or not isinstance(field_symbol.node, TypeInfo)
+                    or not field_symbol.node.has_base(fullnames.FIELD_FULLNAME)
+                ):
+                    raise helpers.IncompleteDefnException(f"{field_fullname}: native Field base unavailable")
                 field_type = fill_typevars_with_any(field_symbol.node)
                 assert isinstance(field_type, Instance)
                 descriptors = get_field_descriptor_types(

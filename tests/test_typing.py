@@ -59,15 +59,41 @@ def host(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     return config, env
 
 
-def check(config: Path, env: dict[str, str], source: Path) -> subprocess.CompletedProcess[str]:
+def check(
+    config: Path, env: dict[str, str], source: Path, *sources: Path
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "-m", "mypy", "--show-traceback", "--config-file", str(config), str(source)],
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--show-traceback",
+            "--config-file",
+            str(config),
+            str(source),
+            *(str(path) for path in sources),
+        ],
         cwd=config.parent,
         env=env,
         text=True,
         capture_output=True,
         timeout=90,
     )
+
+
+def runtime_host(tmp_path: Path, models_source: str, factory_source: str) -> tuple[Path, dict[str, str]]:
+    config, env = host(tmp_path)
+    (tmp_path / "modelapp/models.py").write_text(models_source)
+    (tmp_path / "modelapp/apps.py").write_text(
+        "from django.apps import AppConfig\n"
+        "class Config(AppConfig):\n"
+        "    name = 'modelapp'\n"
+        "    def ready(self):\n"
+        "        from modelapp.factory import install\n"
+        "        install()\n"
+    )
+    (tmp_path / "modelapp/factory.py").write_text(factory_source)
+    return config, env
 
 
 def test_native_fields_members_relations_managers_and_real_errors(tmp_path):
@@ -227,7 +253,6 @@ def test_runtime_model_projection_with_independent_descriptor_plugin(tmp_path, c
         RUNTIME_MODELS,
     )
 
-    config, env = host(tmp_path)
     models_source = RUNTIME_MODELS
     factory_source = RUNTIME_FACTORY
     consumer_source = RUNTIME_CONSUMER
@@ -258,17 +283,8 @@ def test_runtime_model_projection_with_independent_descriptor_plugin(tmp_path, c
             "from modelapp.models import Anchor, RuntimeRow",
             "from modelapp.models import Anchor\nfrom typed_runtime.modelapp.models import RuntimeRow",
         )
-    (tmp_path / "modelapp/models.py").write_text(models_source)
-    (tmp_path / "modelapp/apps.py").write_text(
-        "from django.apps import AppConfig\n"
-        "class Config(AppConfig):\n"
-        "    name = 'modelapp'\n"
-        "    def ready(self):\n"
-        "        from modelapp.factory import install\n"
-        "        install()\n"
-    )
+    config, env = runtime_host(tmp_path, models_source, factory_source)
     factory = tmp_path / "modelapp/factory.py"
-    factory.write_text(factory_source)
     (tmp_path / "adapter.py").write_text(adapter_source)
     config.write_text(
         config.read_text().replace(
@@ -324,3 +340,37 @@ def test_runtime_model_projection_with_independent_descriptor_plugin(tmp_path, c
     if composed:
         generated = tmp_path / "typed_runtime/modelapp/models.py"
         assert "RuntimeRow" not in generated.read_text()
+
+
+def test_runtime_field_requires_native_static_ancestry(tmp_path):
+    from typing_fixtures import RUNTIME_FACTORY, RUNTIME_MODELS
+
+    provider = tmp_path / "provider"
+    package = provider / "external_fields"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "from django.db import models\nclass ExternalField(models.CharField):\n    pass\n"
+    )
+    config, env = runtime_host(
+        tmp_path,
+        RUNTIME_MODELS
+        + "\nfrom external_fields import ExternalField\nclass CustomField(ExternalField):\n    pass\n",
+        RUNTIME_FACTORY.replace("models.CharField(max_length=50)", "declarations.CustomField(max_length=50)"),
+    )
+    env["PYTHONPATH"] += os.pathsep + str(provider)
+    config.write_text(config.read_text().replace("[mypy]\n", "[mypy]\nignore_missing_imports = True\n"))
+    source = tmp_path / "consumer.py"
+    source.write_text(
+        "from typing import assert_type\nfrom modelapp.models import RuntimeRow\n"
+        "assert_type(RuntimeRow.objects.get().label, str)\n"
+    )
+    unavailable = check(config, env, source, tmp_path / "modelapp/models.py")
+    assert unavailable.returncode == 1, unavailable.stdout + unavailable.stderr
+    assert "modelapp.models.CustomField: native Field base unavailable" in unavailable.stdout, (
+        unavailable.stdout + unavailable.stderr
+    )
+    assert "INTERNAL ERROR" not in unavailable.stdout + unavailable.stderr
+    config.write_text(config.read_text() + "\n[mypy-external_fields.*]\nfollow_untyped_imports = True\n")
+    for _ in range(2):
+        resolved = check(config, env, source, tmp_path / "modelapp/models.py")
+        assert resolved.returncode == 0, resolved.stdout + resolved.stderr
