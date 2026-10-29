@@ -121,14 +121,24 @@ python -m pip install -e ./shop-catalog -e ./shop-reviews
 
 ## Expand the project's root apps
 
-In [the configuration example](configuration.md#shopsettingspy), import the
-selector, change the authored `INSTALLED_APPS`, and replace the selection block
-from `COMPOSE_ROOTS` through `entries` with:
+In [the configuration example](configuration.md#shopsettingspy), add the selector
+import alongside the other imports:
 
 ```python
 from django_compose.addons import enabled_apps
+```
 
-INSTALLED_APPS = ["shop_reviews.apps.ReviewsConfig"]
+Replace the complete settings block from the original `INSTALLED_APPS`
+assignment through `entries = app_entries(COMPOSE_ROOTS)` with:
+
+```python
+INSTALLED_APPS = [
+    "catalog.apps.CatalogConfig",
+    "shop_reviews.apps.ReviewsConfig",
+]
+MIGRATION_MODULES = {}
+COMPOSE_OUTPUT_DIR = BASE_DIR / "runtime"
+COMPOSE_OUTPUT_MODULE = "runtime"
 COMPOSE_ADDON_GROUP = "example.shop.apps"
 COMPOSE_ROOTS = tuple(INSTALLED_APPS)
 authored_migrations = dict(MIGRATION_MODULES)
@@ -136,15 +146,21 @@ closure = enabled_apps(COMPOSE_ROOTS, group=COMPOSE_ADDON_GROUP)
 entries = app_entries(closure.entries)
 ```
 
-Keep the snapshot, migration mapping, build and serving projection from that
-guide. Set `COMPOSE_ADDON_GROUP` before the snapshot so it is included among
-composition settings. The explicit `group=` argument is required; the selector
-does not read Django settings.
+Keep the snapshot and the build, serving and migration projections below this
+block unchanged. The explicit `group=` argument is required; the selector does
+not read Django settings. Declaring `COMPOSE_ADDON_GROUP` before the snapshot
+also includes that choice among composition settings.
 
-Here `closure.entries` contains the catalog config before the reviews config.
-`closure.roots` contains the authored root app names; `closure.required` contains
-apps selected only as dependencies; `closure.addons` contains selected members of
-the requested group. The result is immutable.
+The original project app `catalog` remains enabled, preserving its generated
+`catalog.Product` and the existing `/products/` endpoint. The two sample packages
+have distinct app names, `shop_catalog` and `shop_reviews`, and their minimal
+configs declare no models.
+
+Here `closure.entries` retains `catalog.apps.CatalogConfig` and places
+`shop_catalog.apps.CatalogConfig` before `shop_reviews.apps.ReviewsConfig`.
+`closure.roots` contains `catalog` and `shop_reviews`; `closure.required` contains
+only `shop_catalog`; `closure.addons` contains `shop_catalog` and `shop_reviews`.
+The result is immutable.
 
 ## Dependency and configuration rules
 
