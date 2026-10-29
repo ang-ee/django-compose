@@ -76,15 +76,35 @@ class GeneratedTree:
             if (root / relative).is_dir() or any(parent in paths for parent in relative.parents):
                 raise ValueError(f"Competing file/directory artifact: {relative}")
 
+    def _validate_migration_scaffold(self) -> None:
+        """Admit durable native history only before the first receipt exists."""
+        if not self.root.exists():
+            return
+        for path in sorted(self.root.rglob("*")):
+            relative = path.relative_to(self.root)
+            parts = relative.parts
+            if path.is_symlink() or not (path.is_file() or path.is_dir()):
+                raise ValueError(f"Unsafe native migration scaffold: {relative}")
+            if relative == Path(".compose.lock") and path.is_file():
+                continue
+            if relative == Path("__init__.py") and path.is_file() and not path.read_bytes():
+                continue
+            label = self.root / parts[0]
+            if not parts[0].isidentifier() or not (label / "migrations").is_dir():
+                raise ValueError(f"{self.root} lacks the required generated-output marker: {relative}")
+            if len(parts) == 1 and path.is_dir():
+                continue
+            if len(parts) >= 2 and parts[1] == "migrations":
+                continue
+            if len(parts) == 2 and parts[1] == "__init__.py" and path.is_file() and not path.read_bytes():
+                continue
+            raise ValueError(f"{self.root} lacks the required generated-output marker: {relative}")
+
     def _validate(self) -> Receipt | None:
         self.validate_artifacts(self.root, self.artifacts)
         receipt = read_receipt(self.root)
-        if (
-            receipt is None
-            and self.root.exists()
-            and any(path.name != ".compose.lock" for path in self.root.iterdir())
-        ):
-            raise ValueError(f"{self.root} lacks the required generated-output marker")
+        if receipt is None:
+            self._validate_migration_scaffold()
         owned = receipt.OWNED_FILES if receipt else {}
         self.validate_artifacts(self.root, {Path(path): b"" for path in owned})
         for relative, source in self.artifacts.items():
