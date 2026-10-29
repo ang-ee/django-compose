@@ -83,6 +83,7 @@ composition = ModelComposition.discover(apps.get_app_configs())
 assert tuple(composition.models_by_label) == ("coreapp.parent",)
 """,
     )
+
     package = tmp_path / "packaged"
     package.mkdir()
     (package / "__init__.py").write_text("")
@@ -109,6 +110,90 @@ class Item(models.Model):
         abstract = True
 """,
         },
+    )
+
+
+def test_shared_abstract_constraint_is_one_native_declaration(tmp_path):
+    run_host(
+        tmp_path,
+        {
+            "coreapp": """
+class Shared(models.Model):
+    value = models.IntegerField()
+    class Meta:
+        abstract = True
+        constraints = [models.CheckConstraint(
+            condition=models.Q(value__gte=0), name="%(app_label)s_%(class)s_positive")]
+class Item(Shared):
+    runtime = True
+    class Meta(Shared.Meta):
+        abstract = True
+""",
+            "extraapp": """
+from coreapp.models import Shared
+class Extra(Shared):
+    extends = "coreapp.Item"
+    other = models.IntegerField(default=0)
+    class Meta(Shared.Meta):
+        abstract = True
+""",
+        },
+        """
+runtime = Runtime.discover(apps.get_app_configs(), runtime_dir=Path("runtime"))
+runtime.emit_sources()
+runtime.import_generated_models()
+Item = apps.get_model("coreapp", "Item")
+assert [constraint.name for constraint in Item._meta.constraints] == ["coreapp_item_positive"]
+from django.core.checks import run_checks
+assert not [error for error in run_checks() if error.id == "models.E031"]
+from django.db import connection, IntegrityError, transaction
+with connection.schema_editor() as schema:
+    schema.create_model(Item)
+Item.objects.create(value=1)
+try:
+    with transaction.atomic():
+        Item.objects.create(value=-1)
+except IntegrityError:
+    pass
+else:
+    raise AssertionError("Shared constraint was not enforced")
+""",
+    )
+
+
+@pytest.mark.parametrize("name", ["coreapp_item_positive", "%(app_label)s_%(class)s_positive"])
+def test_distinct_constraint_owners_fail_before_emission(tmp_path, name):
+    run_host(
+        tmp_path,
+        {
+            "coreapp": """
+class Item(models.Model):
+    runtime = True
+    value = models.IntegerField()
+    class Meta:
+        abstract = True
+        constraints = [models.CheckConstraint(condition=models.Q(value__gte=0),
+                       name="%(app_label)s_%(class)s_positive")]
+""",
+            "extraapp": f"""
+class Extra(models.Model):
+    extends = "coreapp.Item"
+    other = models.IntegerField(default=0)
+    class Meta:
+        abstract = True
+        constraints = [models.CheckConstraint(condition=models.Q(other__gte=0), name={name!r})]
+""",
+        },
+        """
+from django.core.exceptions import ImproperlyConfigured
+try:
+    Runtime.discover(apps.get_app_configs(), runtime_dir=Path("runtime"))
+except ImproperlyConfigured as error:
+    assert "composes constraint 'coreapp_item_positive' twice" in str(error)
+else:
+    raise AssertionError("Competing constraints were accepted")
+assert not Path("runtime").exists()
+""",
     )
 
 

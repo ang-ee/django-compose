@@ -199,9 +199,9 @@ removed. Both legacy `angee_origin`/`angee_source_sha256` and the package's
 canonical `compose_origin`/`compose_source_sha256` metadata are read for future
 adoption; new files write only the canonical spelling. This narrow historical
 reader is not a second active migration implementation.
-An `applies` result of False may skip an already-satisfied schema transition;
-it cannot prove data operations ran. Refuse a data-changing declaration with a
-false guard unless immutable materialization/native history supplies its path.
+A pending declaration whose `applies` guard returns False is refused. Matching
+schema alone cannot prove a transition ran. Completed transitions must remain in
+immutable materialization/native history, including original squash chains.
 
 Plan the whole graph before writing. Handle symbolic dependencies, cross-app
 ordering, data-only migrations, multiple leaves, complete squash chains, partial

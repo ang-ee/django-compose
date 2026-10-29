@@ -37,13 +37,12 @@ def render_models(
         abstract = alias(f"_Source{name}")
         imports.add(f"from {source.__module__} import {name} as {abstract}")
         bases = []
-        constraint_bases = []
+        contributor_aliases = {source: abstract}
         for index, donor in enumerate(composition.donors(source)):
             donor_alias = alias(f"_Donor{name}{index}")
             imports.add(f"from {donor.__module__} import {donor.__name__} as {donor_alias}")
             bases.append(donor_alias)
-            if donor._meta.constraints:
-                constraint_bases.append(donor_alias)
+            contributor_aliases[donor] = donor_alias
         bases.append(abstract)
         parent = composition.parent(source)
         if parent is not None:
@@ -73,11 +72,12 @@ def render_models(
                 f"        app_label = {label!r}",
             ]
         )
-        if constraint_bases:
-            constraints = ", ".join(f"*{alias}._meta.constraints" for alias in constraint_bases)
-            body.append(
-                f"        constraints = [*getattr({abstract}.Meta, 'constraints', []), {constraints}]"
+        if constraint_sources := composition.constraint_sources(source):
+            constraints = ", ".join(
+                f"{contributor_aliases[contributor]}._meta.constraints[{index}]"
+                for contributor, index in constraint_sources
             )
+            body.append(f"        constraints = [{constraints}]")
         body.extend(
             f"        {key} = {render_literal(value)}"
             for key, value in sorted(declaration.meta_options.items())

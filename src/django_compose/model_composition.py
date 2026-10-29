@@ -108,6 +108,7 @@ class ModelComposition:
             type[models.Model], tuple[tuple[models.Field[Any, Any], type[models.Model] | None], ...]
         ] = {}
         self._validate_additions()
+        self._constraints = {source: self._resolve_constraints(source) for source in self.ordered_models}
 
     @classmethod
     def discover(
@@ -181,6 +182,28 @@ class ModelComposition:
             for native, owner in self._contributions.get(source, ())
             if owner is not None
         )
+
+    def constraint_sources(self, source: type[models.Model]) -> tuple[tuple[type[models.Model], int], ...]:
+        """Return one native declaration per constraint, preserving shared ancestry."""
+        return self._constraints[source]
+
+    def _resolve_constraints(self, source: type[models.Model]) -> tuple[tuple[type[models.Model], int], ...]:
+        selected = []
+        seen: set[int] = set()
+        names: set[str] = set()
+        for contributor in (source, *self.donors(source)):
+            for index, constraint in enumerate(contributor._meta.constraints):
+                if id(constraint) in seen:
+                    continue
+                # Django clones constraints when interpolating native concrete
+                # names. Its private helper is not exposed by django-stubs.
+                name = source._meta._format_names([constraint])[0].name  # type: ignore[attr-defined]
+                if name in names:
+                    raise ImproperlyConfigured(f"{source._meta.label} composes constraint {name!r} twice")
+                seen.add(id(constraint))
+                names.add(name)
+                selected.append((contributor, index))
+        return tuple(selected)
 
     def _requirements(self) -> dict[type[models.Model], type[models.Model]]:
         required = {}

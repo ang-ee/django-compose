@@ -31,7 +31,9 @@ Refer to [ModelComposition](../src/django_compose/model_composition.py) and its
 tests for exact discovery, collision and native inheritance contracts.
 
 Settings contributions live in app `autoconfig.py`. `SETTINGS` provides defaults;
-`settings(mapping)` derives values from a read-only combined input view. Native
+`settings(mapping)` derives values from a shallow read-only combined input view:
+keys cannot be assigned or deleted, and nested objects retain native identity.
+Hooks return their contributions instead of mutating inputs. Native
 django-yamlconf merge operators, project overrides and declaration provenance are
 preserved. The serving loader replays the sealed module list without graph
 resolution. Contributors cannot redefine structural `INSTALLED_APPS` or runtime
