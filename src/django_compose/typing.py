@@ -18,6 +18,7 @@ from django.db import models
 from mypy.mro import calculate_mro
 from mypy.nodes import (
     MDEF,
+    ClassDef,
     Decorator,
     FuncDef,
     MypyFile,
@@ -28,16 +29,24 @@ from mypy.nodes import (
     Var,
 )
 from mypy.options import Options
-from mypy.plugin import ClassDefContext, DynamicClassDefContext
+from mypy.plugin import ClassDefContext, DynamicClassDefContext, ReportConfigContext
 from mypy.semanal_shared import PRIORITY_FALLBACKS, has_placeholder
 from mypy.server.trigger import make_trigger
 from mypy.types import CallableType, Instance, Overloaded, TypeType, get_proper_type
 from mypy.types import Type as MypyType
-from mypy.typevars import fill_typevars
+from mypy.typevars import fill_typevars, fill_typevars_with_any
 from mypy_django_plugin.django.context import DjangoContext
 from mypy_django_plugin.lib import helpers
 from mypy_django_plugin.main import NewSemanalDjangoPlugin
+from mypy_django_plugin.transformers.fields import (
+    get_field_descriptor_types,
+    reparametrize_field_type,
+    reparametrize_related_field_type,
+)
 from mypy_django_plugin.transformers.managers import create_new_manager_class_from_from_queryset_method
+from mypy_django_plugin.transformers.models import process_model_class
+
+from django_compose.snapshot import Snapshot
 
 if TYPE_CHECKING:
     from mypy.checker import TypeChecker
@@ -168,8 +177,36 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
             super().__init__(options)
             self.django_context = self.context_class(self.plugin_config.django_settings_module)
 
+    def report_config_data(self, ctx: ReportConfigContext) -> dict[str, object]:
+        """Use the composition input owner to invalidate in-memory model caches."""
+
+        snapshot = getattr(self.django_context.settings, "COMPOSE_SNAPSHOT", None)
+        return {
+            **super().report_config_data(ctx),
+            "compose_snapshot": snapshot.digest() if isinstance(snapshot, Snapshot) else None,
+        }
+
     def get_additional_deps(self, file: MypyFile) -> list[tuple[int, str, int]]:
         extra = set(self.django_context.dependencies.get(file.fullname, ()))
+        modules = {file.fullname}
+        modules.update(
+            model.__module__
+            for name, model in self.django_context.composed.items()
+            if name.rpartition(".")[0] == file.fullname
+        )
+        extra.update(
+            module_name
+            for module_name in modules
+            if any(
+                model not in self.django_context.static_names
+                for model in self.django_context.model_modules.get(module_name, {}).values()
+            )
+        )
+        for module_name in modules:
+            for model in self.django_context.model_modules.get(module_name, {}).values():
+                extra.update(base.__module__ for base in model.__bases__)
+                extra.update(type(field).__module__ for field in self.django_context.get_model_fields(model))
+                extra.update(type(manager).__module__ for manager in model._meta.managers)
         return super().get_additional_deps(file) + [
             self._new_dependency(module) for module in sorted(extra) if module != file.fullname
         ]
@@ -200,6 +237,14 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
             calculate_mro(ctx.cls.info)
             ctx.api.add_plugin_dependency(make_trigger(parent_name))
         native(ctx)
+        runtime = self.django_context.get_model_class_by_fullname(ctx.cls.fullname)
+        modules = {ctx.cls.info.module_name}
+        if runtime is not None:
+            modules.add(runtime.__module__)
+        for module_name in sorted(modules):
+            for _name, model in sorted(self.django_context.model_modules.get(module_name, {}).items()):
+                if model not in self.django_context.static_names:
+                    self.project_model(ctx, model)
         contribution = self.django_context.fields.get(ctx.cls.fullname)
         if contribution:
             target_name, fields = contribution
@@ -218,6 +263,104 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
             self._schedule_projection(ctx, target.node)
         if ctx.cls.fullname in self.django_context.members:
             self._schedule_projection(ctx, ctx.cls.info)
+
+    def project_model(self, ctx: ClassDefContext, model: type[models.Model]) -> TypeInfo | None:
+        """Project a supplied native model lacking a source declaration in memory.
+
+        Invoke during semantic analysis. Unavailable native base or field types
+        defer the calling class, as django-stubs' own model transformer does.
+        Authored TypeInfos remain authoritative; repeated calls reuse identity.
+        """
+
+        fullname = helpers.get_class_fullname(model)
+        symbol = self.lookup_fully_qualified(fullname)
+        info = symbol.node if symbol is not None and isinstance(symbol.node, TypeInfo) else None
+        if info is not None and "compose_runtime_model" not in info.metadata:
+            return info
+        if symbol is not None and isinstance(symbol.node, PlaceholderNode):
+            if not ctx.api.final_iteration:
+                ctx.api.defer()
+            return None
+        try:
+            api = helpers.get_semanal_api(ctx)
+            module = api.modules.get(model.__module__)
+            if module is None:
+                raise helpers.IncompleteDefnException(model.__module__)
+            if info is None and any(
+                isinstance(declaration, ClassDef) and declaration.name == model.__name__
+                for declaration in module.defs
+            ):
+                return None
+            bases = []
+            for base in model.__bases__:
+                base_name = (
+                    self.django_context.get_model_fullname(base)
+                    if issubclass(base, models.Model)
+                    else helpers.get_class_fullname(base)
+                )
+                base_symbol = self.lookup_fully_qualified(base_name)
+                if (
+                    base_symbol is None
+                    or not isinstance(base_symbol.node, TypeInfo)
+                    or not base_symbol.node.mro
+                ):
+                    raise helpers.IncompleteDefnException(base_name)
+                instance = fill_typevars_with_any(base_symbol.node)
+                assert isinstance(instance, Instance)
+                bases.append(instance)
+            self.django_context.composed[fullname] = model
+            if info is None:
+                info = helpers.add_new_class_for_module(module, name=model.__name__, bases=bases)
+                info.metadata["compose_runtime_model"] = {}
+                helpers.get_django_metadata(info)["is_abstract_model"] = model._meta.abstract
+            else:
+                info.bases = bases
+                info.mro = []
+                calculate_mro(info)
+            api.enter_class(info)
+            try:
+                api.setup_self_type()
+            finally:
+                api.leave_class()
+            for base_instance in bases:
+                ctx.api.add_plugin_dependency(make_trigger(base_instance.type.fullname), target=info.fullname)
+            for field in self.django_context.get_model_fields(model):
+                if field.name in info.names:
+                    continue
+                field_symbol = self.lookup_fully_qualified(helpers.get_class_fullname(type(field)))
+                if field_symbol is None or not isinstance(field_symbol.node, TypeInfo):
+                    raise helpers.IncompleteDefnException(helpers.get_class_fullname(type(field)))
+                field_type = fill_typevars_with_any(field_symbol.node)
+                assert isinstance(field_type, Instance)
+                descriptors = get_field_descriptor_types(
+                    field_symbol.node,
+                    is_set_nullable=field.null
+                    or isinstance(field, models.AutoField)
+                    or (field.primary_key and field.has_default()),
+                    is_get_nullable=field.null,
+                )
+                field_type = reparametrize_field_type(field_type, *descriptors)
+                if isinstance(field, models.ForeignKey):
+                    related_model = self.django_context.get_field_related_model_cls(field)
+                    related = self.django_context.lookup_model_typeinfo(api, related_model)
+                    if related is None:
+                        raise helpers.IncompleteDefnException(helpers.get_class_fullname(related_model))
+                    field_type = reparametrize_related_field_type(
+                        field_type,
+                        set_type=Instance(related, []),
+                        get_type=Instance(related, []),
+                    )
+                    ctx.api.add_plugin_dependency(make_trigger(related.fullname), target=info.fullname)
+                helpers.add_new_sym_for_info(info, name=field.name, sym_type=field_type)
+                ctx.api.add_plugin_dependency(make_trigger(field_symbol.node.fullname), target=info.fullname)
+            process_model_class(ClassDefContext(info.defn, ctx.reason, ctx.api), self.django_context)
+            return info
+        except helpers.IncompleteDefnException as error:
+            if ctx.api.final_iteration:
+                ctx.api.fail(f"Unresolved runtime model {fullname}: {error}", ctx.cls)
+            else:
+                ctx.api.defer()
+            return None
 
     def _schedule_projection(self, ctx: ClassDefContext, target: TypeInfo) -> None:
         for name, member in self.django_context.members.get(target.fullname, {}).items():

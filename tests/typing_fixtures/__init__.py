@@ -216,3 +216,86 @@ def check(entity: Entity, child: Child, link: Link, required: Required, grandchi
     Ordinary.objects.get().count = {}
     Grandchild()
 """
+
+RUNTIME_MODELS = """
+from __future__ import annotations
+from typing import Generic, TypeVar, overload
+from django.db import models
+T = TypeVar("T", bound=models.Model)
+class Rows(Generic[T]):
+    @overload
+    def __get__(self, instance: None, owner: type[models.Model]) -> models.Manager[T]: ...
+    @overload
+    def __get__(self, instance: models.Model, owner: type[models.Model]) -> models.Manager[T]: ...
+    def __get__(self, instance: models.Model | None, owner: type[models.Model]) -> models.Manager[T]:
+        raise NotImplementedError
+class Anchor(models.Model):
+    name = models.CharField(max_length=40)
+    rows: Rows[models.Model] = Rows()
+class RowBase(models.Model):
+    number = models.IntegerField()
+    class Meta:
+        abstract = True
+class RowManager(models.Manager[T]):
+    def selected(self) -> str:
+        return "selected"
+"""
+
+RUNTIME_FACTORY = """
+from django.db import models
+from modelapp import models as declarations
+
+def install():
+    setattr(declarations, "RuntimeRow", type("RuntimeRow", (declarations.RowBase,), {
+        "__module__": declarations.__name__,
+        "Meta": type("Meta", (), {"app_label": "modelapp"}),
+        "label": models.CharField(max_length=50),
+        "note": models.TextField(null=True),
+        "anchor": models.ForeignKey(declarations.Anchor, on_delete=models.CASCADE, related_name="records"),
+        "objects": declarations.RowManager(),
+    }))
+"""
+
+RUNTIME_ADAPTER = """
+from collections.abc import Callable
+from django.apps import apps
+from mypy.nodes import TypeInfo
+from mypy.plugin import AttributeContext, Plugin
+from mypy.types import Instance, Type, get_proper_type
+
+class Adapter(Plugin):
+    def get_class_attribute_hook(self, fullname: str) -> Callable[[AttributeContext], Type] | None:
+        return self.rows if fullname == "modelapp.models.Anchor.rows" else None
+
+    def rows(self, ctx: AttributeContext) -> Type:
+        model = apps.get_model("modelapp", "RuntimeRow")
+        symbol = self.lookup_fully_qualified(f"{model.__module__}.{model.__name__}")
+        assert symbol is not None and isinstance(symbol.node, TypeInfo)
+        descriptor = get_proper_type(ctx.default_attr_type)
+        assert isinstance(descriptor, Instance)
+        return descriptor.copy_modified(args=[Instance(symbol.node, [])])
+
+def plugin(version: str) -> type[Adapter]:
+    return Adapter
+"""
+
+RUNTIME_CONSUMER = """
+from typing import assert_type
+from django.db.models import QuerySet
+from modelapp.models import Anchor, RuntimeRow
+
+def consume(row: RuntimeRow, anchor: Anchor) -> None:
+    assert_type(row.label, str)
+    assert_type(row.number, int)
+    assert_type(row.note, str | None)
+    assert_type(row.anchor, Anchor)
+    assert_type(row.anchor_id, int)
+    assert_type(RuntimeRow.objects.selected(), str)
+    assert_type(RuntimeRow.objects.get(), RuntimeRow)
+    assert_type(Anchor.rows.get(), RuntimeRow)
+    assert_type(anchor.records.get(), RuntimeRow)
+    assert_type(RuntimeRow.objects.all(), QuerySet[RuntimeRow, RuntimeRow])
+    row.label = "text"
+    row.note = None
+    row.anchor = anchor
+"""

@@ -78,7 +78,7 @@ def test_settings_projection_keeps_authored_entries_and_none():
     assert installed_apps(entries, receipt, "generated") == (
         "generated.app.apps.GeneratedConfig",
         "plain",
-        "django_compose.history.old",
+        "django_compose.history.History_old",
     )
     assert migration_modules({"app": None}, receipt, "generated") == {
         "app": None,
