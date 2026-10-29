@@ -142,6 +142,11 @@ selected apps contribute `compose_migrations/<label>/<name>.py` files. An explic
 setting replaces that discovery. See the [specification](SPEC.md) for declaration
 records and the `TransitionBinding` API.
 
+On a fresh app, `makemigrations` authors native initial schema before evaluating
+and binding reusable transitions. This lets guards inspect the schema they need.
+The [initial-authoring contract](SPEC.md#native-history-and-transitions) defines
+read-only options, unsupported fresh-graph modes and dependency-expansion safety.
+
 Each source exports native `Migration` and a pure `applies(ProjectState)` guard.
 The project's snapshot freezes declarations once for build and migration binding.
 During explicit migration authoring, binding copies the source into durable

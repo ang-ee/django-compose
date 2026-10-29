@@ -359,6 +359,16 @@ record labels minus retired and snapshot-selected app labels. An enabled app
 that loses its last model remains active and yields a native model deletion.
 All package migration comparisons use this state calculation.
 
+For composed apps with migrations enabled, concrete models and no native disk history,
+`makemigrations` first authors the initial schema through Django's native command,
+then binds guarded reusable transitions and reconciles ordinary model changes.
+Selected-app authoring includes prerequisite apps initialized by native dependency
+expansion. Initial `--check` retains Django's exit status 1 for missing history;
+`--dry-run` previews without writing or binding. `--merge`, `--empty` and `--update`
+are refused before initial schema authoring. If native expansion requires changes
+to an app with existing history, the command refuses before writes and asks the
+caller to author that app's transitions first; existing history bytes remain intact.
+
 `TransitionBinding` uses frozen snapshot records by default, or explicit
 `declarations=`. It binds native migration origins `<declaring_app>:<name>` to
 the project's actual graph leaves. Each source provides a native `Migration`
