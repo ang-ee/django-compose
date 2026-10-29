@@ -97,8 +97,8 @@ class BuildPlan:
     def emit(self) -> BuildPlan:
         self._lock.__enter__()
         self._locked = True
-        serving._build_cleanup = self.close
         try:
+            serving._register_build(self.close)
             if self.mode == "check":
                 self.previous = verify(self.snapshot, self.output_module)
             # Guard ownership before invalidation. A failed discovery remains invalid.
@@ -224,7 +224,9 @@ class BuildPlan:
                 self._receipt(progress=True, hashes=provisional).source().encode(),
             )
             tree.reconcile(prune=False)
-        serving._pending_artifacts = (self.output_dir, self._receipt(progress=True, hashes=tree.hashes()))
+        serving._publish_build_artifacts(
+            self.close, self.output_dir, self._receipt(progress=True, hashes=tree.hashes())
+        )
 
     def finalize(self) -> Receipt:
         try:
@@ -242,9 +244,7 @@ class BuildPlan:
             self.close()
 
     def close(self) -> None:
-        serving._pending_artifacts = None
-        if serving._build_cleanup == self.close:
-            serving._build_cleanup = None
+        serving._clear_build(self.close)
         if self._locked:
             self._locked = False
             self._lock.__exit__(None, None, None)

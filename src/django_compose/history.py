@@ -2,32 +2,33 @@
 
 from __future__ import annotations
 
-from django.apps import AppConfig
-from django.conf import settings
-from django.core.exceptions import ImproperlyConfigured
+from django.apps import AppConfig as _AppConfig
+from django.conf import settings as _settings
+from django.core.exceptions import ImproperlyConfigured as _ImproperlyConfigured
 
-from django_compose.serving import read_receipt
+from django_compose.serving import read_receipt as _read_receipt
 
 
-def __getattr__(label: str) -> type[AppConfig]:
-    if label.startswith("_"):
-        raise AttributeError(label)
-    receipt = read_receipt(settings.COMPOSE_OUTPUT_MODULE)
+def __getattr__(attribute: str) -> type[_AppConfig]:
+    if not attribute.startswith("History_"):
+        raise AttributeError(attribute)
+    label = attribute.removeprefix("History_")
+    receipt = _read_receipt(_settings.COMPOSE_OUTPUT_MODULE)
     if receipt is None or label not in receipt.HISTORY_LABELS or label in receipt.RETIRED_LABELS:
-        raise AttributeError(label)
+        raise AttributeError(attribute)
 
-    def import_models(self: AppConfig) -> None:
+    def import_models(self: _AppConfig) -> None:
         if self.apps is None:
-            raise ImproperlyConfigured("History config requires an app registry")
+            raise _ImproperlyConfigured("History config requires an app registry")
         self.models = self.apps.all_models[self.label]
         self.models_module = None
 
     return type(
-        label,
-        (AppConfig,),
+        attribute,
+        (_AppConfig,),
         {
             "__module__": __name__,
-            "name": f"{settings.COMPOSE_OUTPUT_MODULE}.{label}",
+            "name": f"{_settings.COMPOSE_OUTPUT_MODULE}.{label}",
             "label": label,
             "default": False,
             "import_models": import_models,

@@ -339,3 +339,44 @@ assert binding.declarations == settings.COMPOSE_SNAPSHOT.transition_records
 expect(RuntimeError, "pending authored", binding.check)
 assert not TransitionBinding(labels=("alpha", "beta"), declarations=()).check()
 """)
+
+
+def test_dynamic_history_factory_preserves_native_labels_without_models(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from django.apps import AppConfig
+    from django.apps.registry import Apps
+
+    from django_compose import history
+    from django_compose.serving import Receipt, tombstones
+
+    labels = ("settings", "_archive", "__name__")
+    root = tmp_path / "history_factory_runtime"
+    root.mkdir()
+    receipt = Receipt(labels, (), "digest", {}, "compiler")
+    (root / "__init__.py").write_text(receipt.source())
+    for label in labels:
+        package = root / label
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        (package / "models.py").write_text("raise AssertionError('stale history models imported')")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(history, "_settings", SimpleNamespace(COMPOSE_OUTPUT_MODULE=root.name))
+    registry = Apps(installed_apps=[])
+    entries = tombstones(receipt, (), root.name)
+    assert entries == tuple(f"django_compose.history.History_{label}" for label in labels)
+    try:
+        for entry, label in zip(entries, labels, strict=True):
+            config = AppConfig.create(entry)
+            assert config.label == label
+            assert config.name == f"{root.name}.{label}"
+            config.apps = registry
+            config.import_models()
+            assert config.models_module is None
+            assert not list(config.get_models())
+            assert f"{root.name}.{label}.models" not in sys.modules
+    finally:
+        for name in tuple(sys.modules):
+            if name == root.name or name.startswith(root.name + "."):
+                sys.modules.pop(name)

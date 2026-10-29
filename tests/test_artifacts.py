@@ -89,7 +89,7 @@ def test_atomic_history_write_preserves_native_history_cache(tmp_path):
     assert bytecode.read_bytes() == b"native history"
 
 
-def test_artifact_accessor_checks_pending_ownership_hash_and_symlinks(tmp_path, monkeypatch):
+def test_artifact_accessor_checks_pending_ownership_hash_and_symlinks(tmp_path, monkeypatch, request):
     from types import SimpleNamespace
 
     import django.conf
@@ -103,7 +103,13 @@ def test_artifact_accessor_checks_pending_ownership_hash_and_symlinks(tmp_path, 
     receipt = Receipt((), (), "digest", tree.hashes(), "compiler", IN_PROGRESS=True)
     atomic_write(root / "__init__.py", receipt.source().encode())
     tree.reconcile()
-    monkeypatch.setattr(serving, "_pending_artifacts", (root, receipt))
+
+    def cleanup():
+        serving._clear_build(cleanup)
+
+    serving._register_build(cleanup)
+    request.addfinalizer(cleanup)
+    serving._publish_build_artifacts(cleanup, root, receipt)
     monkeypatch.setattr(
         django.conf,
         "settings",
@@ -112,6 +118,15 @@ def test_artifact_accessor_checks_pending_ownership_hash_and_symlinks(tmp_path, 
             COMPOSE_OWNED_ARTIFACT_PATHS=("capability/models.txt",),
         ),
     )
+
+    def other_cleanup():
+        pass
+
+    with pytest.raises(ImproperlyConfigured, match="already active"):
+        serving._register_build(other_cleanup)
+    with pytest.raises(ImproperlyConfigured, match="inactive build"):
+        serving._publish_build_artifacts(other_cleanup, root, receipt)
+    serving._clear_build(other_cleanup)
     target = serving.artifact_path("capability/models.txt")
     assert target.read_bytes() == b"models"
     for invalid in ("../escape", "capability/undeclared.txt", str(target)):

@@ -224,6 +224,30 @@ _lifetime_lock: AbstractContextManager[None] | None = None
 _build_cleanup: Callable[[], None] | None = None
 
 
+def _register_build(cleanup: Callable[[], None]) -> None:
+    """Register the one active build's cleanup at the process lifecycle owner."""
+    global _build_cleanup
+    if _build_cleanup is not None and _build_cleanup != cleanup:
+        raise ImproperlyConfigured("A composition build is already active")
+    _build_cleanup = cleanup
+
+
+def _publish_build_artifacts(cleanup: Callable[[], None], root: Path, receipt: Receipt) -> None:
+    """Expose the active build's published models artifacts to ready callbacks."""
+    global _pending_artifacts
+    if _build_cleanup != cleanup:
+        raise ImproperlyConfigured("Cannot publish artifacts for an inactive build")
+    _pending_artifacts = (root, receipt)
+
+
+def _clear_build(cleanup: Callable[[], None]) -> None:
+    """Clear process build state only when the closing build still owns it."""
+    global _build_cleanup, _pending_artifacts
+    if _build_cleanup == cleanup:
+        _pending_artifacts = None
+        _build_cleanup = None
+
+
 def _close_build() -> None:
     """Release the current failed native build at the launcher boundary."""
     if _build_cleanup is not None:
@@ -295,7 +319,7 @@ def tombstones(
     active = {entry.label for entry in app_entries(entries)}
     return (
         tuple(
-            f"django_compose.history.{label}"
+            f"django_compose.history.History_{label}"
             for label in receipt.HISTORY_LABELS
             if label not in active and label not in receipt.RETIRED_LABELS
         )
