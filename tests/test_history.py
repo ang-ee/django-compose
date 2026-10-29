@@ -19,7 +19,7 @@ settings.COMPOSE_SNAPSHOT = SimpleNamespace(
 )
 receipt = SimpleNamespace(HISTORY_LABELS=("alpha", "beta"), RETIRED_LABELS=())
 stack = ExitStack()
-stack.enter_context(patch("django_compose.serving.read_receipt", return_value=receipt))
+stack.enter_context(patch("django_compose.migrations.read_receipt", return_value=receipt))
 updated = stack.enter_context(patch("django_compose.artifacts.update_receipt"))
 """
 
@@ -321,7 +321,7 @@ config.models_module = None
 config.models.clear()
 apps.clear_cache()
 receipt = Receipt("g", ("alpha", "beta"), (), "d", {}, "c")
-with patch("django_compose.serving.read_receipt", return_value=receipt):
+with patch("django_compose.migrations.read_receipt", return_value=receipt):
     loader = MigrationLoader(None)
     before, after = effective_states(loader, apps)
     assert ("alpha", "record") not in after.models
