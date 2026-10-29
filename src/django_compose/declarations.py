@@ -6,8 +6,9 @@ import keyword
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
+from django.apps.registry import Apps
 from django.core.exceptions import ImproperlyConfigured
 from django.db.models.options import DEFAULT_NAMES
 from django.utils.module_loading import import_string
@@ -69,8 +70,9 @@ class ArtifactHook(Protocol):
     """Render capability files beneath one explicitly declared output subtree."""
 
     external_root: str
+    phase: Literal["models", "ready"]
 
-    def render(self, composition: ModelComposition, models: ModelsView) -> Mapping[Path, bytes]: ...
+    def render(self, composition: ModelComposition, models: ModelsView | Apps) -> Mapping[Path, bytes]: ...
 
 
 def resolve_integrations(paths: Iterable[str]) -> tuple[object, ...]:
@@ -95,6 +97,8 @@ def resolve_integrations(paths: Iterable[str]) -> tuple[object, ...]:
         instance = candidate()
         if not isinstance(instance, ModelDeclarationHook | MigrationPolicy | ArtifactHook):
             raise ImproperlyConfigured(f"{path} implements no composition integration protocol")
+        if isinstance(instance, ArtifactHook) and instance.phase not in ("models", "ready"):
+            raise ImproperlyConfigured(f"{path} has invalid artifact phase {instance.phase!r}")
         resolved.append(instance)
     return tuple(resolved)
 

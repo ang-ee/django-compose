@@ -59,7 +59,7 @@ def history_only_labels() -> frozenset[str]:
     snap = getattr(settings, "COMPOSE_SNAPSHOT", None)
     if snap is None:
         return frozenset()
-    receipt = read_receipt(settings.COMPOSE_OUTPUT_DIR)
+    receipt = read_receipt(Path(settings.COMPOSE_OUTPUT_DIR))
     if receipt is None:
         return frozenset()
     active = {entry.label for entry in snap.entries}

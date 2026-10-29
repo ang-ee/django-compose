@@ -38,6 +38,7 @@ class Record(Composable, concrete=True):
     (package / "integration.py").write_text("""from pathlib import Path
 from .models import Record
 class Capability:
+    phase = "models"
     external_root = "capability"
     def render(self, composition, models):
         assert models.composition is composition
@@ -458,3 +459,18 @@ with (settings.COMPOSE_OUTPUT_DIR / '.compose.lock').open('rb') as stream:
 """,
         )
     )
+
+
+def test_serving_requires_verification_before_population(tmp_path):
+    root = host(tmp_path)
+    successful(invoke(root, "compose"))
+    settings = root / "settings.py"
+    settings.write_text(
+        settings.read_text().replace(
+            'receipt = verify(COMPOSE_SNAPSHOT, "runtime", retain_startup=True)',
+            "receipt = read_receipt(COMPOSE_OUTPUT_DIR)",
+        )
+    )
+    result = invoke(root, script="import django; django.setup()")
+    assert result.returncode != 0
+    assert "verify composition before population" in result.stderr

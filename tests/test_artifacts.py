@@ -11,12 +11,12 @@ from django_compose.serving import Receipt, read_receipt
 def test_indexed_writes_and_clean_preserve_history(tmp_path):
     root = tmp_path / "runtime"
     with receipt_lock(root):
-        receipt = Receipt("generation", ("old",), (), "digest", {}, "compiler", ("old",), True)
+        receipt = Receipt(("old",), (), "digest", {}, "compiler", ("old",), True)
         atomic_write(root / "__init__.py", receipt.source().encode())
         sources = {Path("old/models.py"): b"# model", Path("old/migrations/__init__.py"): b""}
         tree = GeneratedTree(root, sources)
         assert tree.reconcile()
-        receipt = Receipt("generation", ("old",), (), "digest", tree.hashes(), "compiler", ("old",))
+        receipt = Receipt(("old",), (), "digest", tree.hashes(), "compiler", ("old",))
         atomic_write(root / "__init__.py", receipt.source().encode())
     (root / "old/migrations/0001.py").write_text("history")
     (root / "unknown.txt").write_text("unknown")
@@ -39,7 +39,7 @@ def test_unsafe_paths_refused_without_writes(tmp_path, bad):
 def test_unowned_file_and_symlink_refused(tmp_path):
     root = tmp_path / "runtime"
     root.mkdir()
-    atomic_write(root / "__init__.py", Receipt("g", (), (), "d", {}, "c").source().encode())
+    atomic_write(root / "__init__.py", Receipt((), (), "d", {}, "c").source().encode())
     (root / "unknown.py").write_text("unknown")
     with pytest.raises(ValueError, match="unowned"):
         GeneratedTree(root, {Path("unknown.py"): b"replacement"}).reconcile()
@@ -86,3 +86,42 @@ def test_atomic_history_write_preserves_native_history_cache(tmp_path):
     bytecode.write_bytes(b"native history")
     atomic_write(root / "0001.py", b"native migration")
     assert bytecode.read_bytes() == b"native history"
+
+
+def test_artifact_accessor_checks_pending_ownership_hash_and_symlinks(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import django.conf
+    from django.core.exceptions import ImproperlyConfigured
+
+    from django_compose import serving
+
+    root = tmp_path / "runtime"
+    tree = GeneratedTree(root, {Path("capability/models.txt"): b"models"})
+    root.mkdir()
+    receipt = Receipt((), (), "digest", tree.hashes(), "compiler", IN_PROGRESS=True)
+    atomic_write(root / "__init__.py", receipt.source().encode())
+    tree.reconcile()
+    monkeypatch.setattr(serving, "_pending_artifacts", (root, receipt))
+    monkeypatch.setattr(
+        django.conf,
+        "settings",
+        SimpleNamespace(
+            COMPOSE_EXTERNAL_ARTIFACT_ROOTS=("capability",),
+            COMPOSE_OWNED_ARTIFACT_PATHS=("capability/models.txt",),
+        ),
+    )
+    target = serving.artifact_path("capability/models.txt")
+    assert target.read_bytes() == b"models"
+    for invalid in ("../escape", "capability/undeclared.txt", str(target)):
+        with pytest.raises(ImproperlyConfigured, match="Undeclared"):
+            serving.artifact_path(invalid)
+    target.write_bytes(b"altered")
+    with pytest.raises(ImproperlyConfigured, match="altered"):
+        serving.artifact_path("capability/models.txt")
+    target.unlink()
+    original = tmp_path / "original"
+    original.write_bytes(b"models")
+    target.symlink_to(original)
+    with pytest.raises(ImproperlyConfigured, match="altered"):
+        serving.artifact_path("capability/models.txt")

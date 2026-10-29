@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import importlib
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from django.apps import AppConfig, apps
+from django.apps.registry import Apps
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
+from django_compose import serving
 from django_compose.artifacts import GeneratedTree, atomic_write, receipt_lock
-from django_compose.declarations import ArtifactHook, ModelDeclarationHook, model_declaration
+from django_compose.declarations import ArtifactHook, ModelDeclarationHook, ModelsView, model_declaration
 from django_compose.model_composition import ModelComposition
 from django_compose.rendering import render_models
 from django_compose.serving import Receipt, read_receipt, verify
@@ -62,9 +65,12 @@ class BuildPlan:
         self.output_dir = output_dir
         self.output_module = output_module
         self.previous = read_receipt(output_dir)
-        self.generation = snap.digest()
         self.sources: dict[Path, str | bytes] = {}
-        self._lock = receipt_lock(output_dir, write=mode == "write")
+        self._lock = receipt_lock(
+            output_dir,
+            write=mode == "write",
+            wait=float(os.environ["DJANGO_COMPOSE_WAIT"]) if "DJANGO_COMPOSE_WAIT" in os.environ else 5.0,
+        )
         self._locked = False
 
     @property
@@ -79,7 +85,6 @@ class BuildPlan:
         history.update(path.parent.name for path in self.output_dir.glob("*/migrations") if path.is_dir())
         history.update(transition["app_label"] for transition in self.transitions)
         return Receipt(
-            self.generation,
             tuple(sorted(history - set(retired))),
             retired,
             self.snapshot.digest(),
@@ -89,16 +94,10 @@ class BuildPlan:
             progress,
         )
 
-    def _header(self, source: str) -> str:
-        header = f"__generation__ = {self.generation!r}\n"
-        future = "from __future__ import annotations\n"
-        if future in source:
-            return source.replace(future, future + header, 1)
-        return header + source
-
     def emit(self) -> BuildPlan:
         self._lock.__enter__()
         self._locked = True
+        serving._build_cleanup = self.close
         try:
             if self.mode == "check":
                 self.previous = verify(self.snapshot, self.output_module)
@@ -128,23 +127,8 @@ class BuildPlan:
                 for source in self.composition.ordered_models
             }
             history_labels = self._receipt(progress=True).HISTORY_LABELS
-            history_source = (
-                "from django.apps import AppConfig\n\n"
-                "class HistoryConfig(AppConfig):\n"
-                "    default = False\n"
-                "    def import_models(self):\n"
-                "        self.models = self.apps.all_models[self.label]\n"
-                "        self.models_module = None\n\n"
-            )
             for label in history_labels:
-                history_source += (
-                    f"class History_{label}(HistoryConfig):\n"
-                    f"    name = {f'{self.output_module}.{label}'!r}\n"
-                    f"    label = {label!r}\n\n"
-                )
-            self.sources[Path("history.py")] = self._header(history_source)
-            for label in history_labels:
-                self.sources[Path(label) / "__init__.py"] = self._header("")
+                self.sources[Path(label) / "__init__.py"] = ""
                 config = next((c for c in self.configs if c.label == label), None)
                 if config:
                     config_path = f"{type(config).__module__}.{type(config).__qualname__}"
@@ -159,15 +143,13 @@ class BuildPlan:
                         "        from importlib import import_module\n"
                         f"        self.models_module = import_module({model_module!r})\n"
                     )
-                    self.sources[Path(label) / "apps.py"] = self._header(body)
+                    self.sources[Path(label) / "apps.py"] = body
                 if label in self.labels:
-                    self.sources[Path(label) / "models.py"] = self._header(
-                        render_models(
-                            self.composition,
-                            label,
-                            runtime_module=self.output_module,
-                            declarations=declarations,
-                        )
+                    self.sources[Path(label) / "models.py"] = render_models(
+                        self.composition,
+                        label,
+                        runtime_module=self.output_module,
+                        declarations=declarations,
                     )
                 migration_init = self.output_dir / label / "migrations" / "__init__.py"
                 effective = getattr(settings, "MIGRATION_MODULES", {}).get(
@@ -200,7 +182,7 @@ class BuildPlan:
             self.close()
             raise
 
-    def render_artifacts(self, models_view: ConcreteModels, hooks: Iterable[ArtifactHook]) -> None:
+    def render_artifacts(self, models_view: ModelsView | Apps, hooks: Iterable[ArtifactHook]) -> None:
         external = set(getattr(settings, "COMPOSE_EXTERNAL_ARTIFACT_ROOTS", ()))
         explicit = {Path(p) for p in getattr(settings, "COMPOSE_OWNED_ARTIFACT_PATHS", ())}
         for hook in hooks:
@@ -223,16 +205,15 @@ class BuildPlan:
                     raise ImproperlyConfigured(f"Competing or undeclared artifact: {path}")
                 if not isinstance(content, bytes):
                     raise ImproperlyConfigured(f"ArtifactHook must render bytes: {path}")
-                if path.suffix == ".py":
-                    content = self._header(content.decode("utf-8")).encode("utf-8")
                 self.sources[path] = content
         tree = GeneratedTree(self.output_dir, self.sources)
         if self.mode == "check":
-            if tree.drift():
+            if any(
+                not (self.output_dir / path).is_file()
+                or (self.output_dir / path).read_bytes() != tree._bytes(value)
+                for path, value in self.sources.items()
+            ):
                 raise ImproperlyConfigured("Generated artifacts are stale; run compose")
-            actual = tree.hashes()
-            if self.previous is None or dict(self.previous.OWNED_FILES) != actual:
-                raise ImproperlyConfigured("Generated receipt is stale; run compose")
         else:
             tree._validate()
             current = read_receipt(self.output_dir)
@@ -242,20 +223,28 @@ class BuildPlan:
                 self.output_dir / "__init__.py",
                 self._receipt(progress=True, hashes=provisional).source().encode(),
             )
-            tree.reconcile()
+            tree.reconcile(prune=False)
+        serving._pending_artifacts = (self.output_dir, self._receipt(progress=True, hashes=tree.hashes()))
 
     def finalize(self) -> Receipt:
         try:
             receipt = self._receipt(
                 progress=False, hashes=GeneratedTree(self.output_dir, self.sources).hashes()
             )
+            tree = GeneratedTree(self.output_dir, self.sources)
             if self.mode == "write":
+                tree.reconcile()
                 atomic_write(self.output_dir / "__init__.py", receipt.source().encode())
+            elif tree.drift() or self.previous != receipt:
+                raise ImproperlyConfigured("Generated receipt or artifacts are stale; run compose")
             return receipt
         finally:
             self.close()
 
     def close(self) -> None:
+        serving._pending_artifacts = None
+        if serving._build_cleanup == self.close:
+            serving._build_cleanup = None
         if self._locked:
             self._locked = False
             self._lock.__exit__(None, None, None)

@@ -6,6 +6,7 @@ import logging
 import os
 from collections.abc import Mapping, MutableMapping
 from importlib import import_module
+from pathlib import Path
 from types import MappingProxyType, ModuleType
 from typing import Any
 
@@ -16,6 +17,7 @@ from django.utils.module_loading import module_has_submodule
 
 from django_compose import serving
 from django_compose.addons import enabled_apps
+from django_compose.autoreload import report_inputs, report_watch_paths
 from django_compose.snapshot import mode, snapshot, structural_settings
 
 _DERIVED = frozenset({"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT"})
@@ -265,12 +267,15 @@ def configure(namespace: MutableMapping[str, Any]) -> None:
             raise ImproperlyConfigured(f"{name} is derived and must not be authored")
     if not namespace.get("COMPOSE_OUTPUT_DIR"):
         raise ImproperlyConfigured("COMPOSE_OUTPUT_DIR is required")
+    report_inputs(files=(Path(namespace["COMPOSE_OUTPUT_DIR"]) / "__init__.py",))
+    report_watch_paths(namespace.get("COMPOSE_WATCH_PATHS", ()))
     roots = tuple(namespace.get("INSTALLED_APPS", ()))
     closure = enabled_apps(roots, group=namespace.get("COMPOSE_ADDON_GROUP"))
     contributions = _Contributions(namespace)
     for entry in closure.entries:
         contributions.app(entry)
     contributions.check_environment()
+    report_watch_paths(namespace.get("COMPOSE_WATCH_PATHS", ()))
     namespace["COMPOSE_ROOTS"] = roots
     snap = snapshot(closure.entries, namespace=namespace)
     namespace["COMPOSE_SNAPSHOT"] = snap
@@ -278,7 +283,7 @@ def configure(namespace: MutableMapping[str, Any]) -> None:
     namespace["COMPOSE_OUTPUT_MODULE"] = output_module
     try:
         receipt = (
-            serving.read_receipt(namespace["COMPOSE_OUTPUT_DIR"])
+            serving.read_receipt(Path(namespace["COMPOSE_OUTPUT_DIR"]))
             if selected_mode == "write"
             else serving.verify(snap, output_module, retain_startup=True)
         )

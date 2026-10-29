@@ -148,7 +148,6 @@ class GeneratedTree:
             if receipt is None:
                 return ()
             invalid = Receipt(
-                receipt.GENERATION,
                 receipt.HISTORY_LABELS,
                 receipt.RETIRED_LABELS,
                 receipt.DIGEST,
@@ -176,7 +175,6 @@ def update_receipt(
             raise ImproperlyConfigured("History retirement requires a complete receipt; run compose")
         GeneratedTree(root, {}).validate_artifacts(root, {Path(p): b"" for p in previous.OWNED_FILES})
         invalid = Receipt(
-            previous.GENERATION,
             previous.HISTORY_LABELS,
             previous.RETIRED_LABELS,
             previous.DIGEST,
@@ -188,7 +186,6 @@ def update_receipt(
         atomic_write(root / "__init__.py", invalid.source().encode())
         retired = tuple(sorted(set(previous.RETIRED_LABELS) | set(retired_labels)))
         result = Receipt(
-            previous.GENERATION,
             tuple(label for label in previous.HISTORY_LABELS if label not in retired),
             retired,
             previous.DIGEST,

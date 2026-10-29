@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import sys
-from importlib import import_module
-
 from django.apps import AppConfig
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -25,21 +22,7 @@ class ComposeConfig(AppConfig):
                 raise ImproperlyConfigured("ComposeConfig must be last in INSTALLED_APPS")
             if mode() is not None:
                 raise ImproperlyConfigured("Compose mode requires BuildComposeConfig last in INSTALLED_APPS")
-            receipt = verify(settings.COMPOSE_SNAPSHOT, settings.COMPOSE_OUTPUT_MODULE)
-            root = import_module(settings.COMPOSE_OUTPUT_MODULE)
-            if root is None or getattr(root, "GENERATION", None) != receipt.GENERATION:
-                raise ImproperlyConfigured("Generated composition changed during population; run compose")
-            prefix = settings.COMPOSE_OUTPUT_MODULE + "."
-            for name, module in tuple(sys.modules.items()):
-                if (
-                    name.startswith(prefix)
-                    and hasattr(module, "__generation__")
-                    and module.__generation__ != receipt.GENERATION
-                ):
-                    raise ImproperlyConfigured(
-                        "Generated modules belong to different generations; run compose"
-                    )
-            _finish_startup_verification()
+            _finish_startup_verification(required=True)
         finally:
             _close_startup_verification()
 
@@ -83,9 +66,10 @@ class BuildComposeConfig(AppConfig):
         try:
             self.plan.render_artifacts(
                 ConcreteModels(self.plan.composition),
-                tuple(hook for hook in integrations if isinstance(hook, ArtifactHook)),
+                tuple(
+                    hook for hook in integrations if isinstance(hook, ArtifactHook) and hook.phase == "models"
+                ),
             )
-            self.receipt = self.plan.finalize()
         except BaseException:
             self.plan.close()
             raise
@@ -94,6 +78,18 @@ class BuildComposeConfig(AppConfig):
         try:
             if mode() != self.compose_mode:
                 raise ImproperlyConfigured("DJANGO_COMPOSE_MODE changed after settings load")
+            from django_compose.declarations import ArtifactHook
+
+            assert self.apps is not None
+            self.plan.render_artifacts(
+                self.apps,
+                tuple(
+                    hook
+                    for hook in self.plan.integrations
+                    if isinstance(hook, ArtifactHook) and hook.phase == "ready"
+                ),
+            )
+            self.receipt = self.plan.finalize()
             if self.compose_mode == "check":
                 from django_compose.migrations import TransitionBinding
 
@@ -102,4 +98,5 @@ class BuildComposeConfig(AppConfig):
                 binding.check_native_history(self.apps)
             _finish_startup_verification()
         finally:
+            self.plan.close()
             _close_startup_verification()

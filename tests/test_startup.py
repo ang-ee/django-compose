@@ -18,7 +18,7 @@ def generated(tmp_path, monkeypatch):
     root = tmp_path / "runtime"
     root.mkdir()
     (root / ".compose.lock").touch()
-    receipt = serving.Receipt("g", (), (), "digest", {}, "compiler")
+    receipt = serving.Receipt((), (), "digest", {}, "compiler")
     (root / "__init__.py").write_text(receipt.source())
     monkeypatch.setattr(serving, "output_directory", lambda module: root)
 
@@ -161,3 +161,135 @@ def test_write_mode_cannot_retain_reader(generated, monkeypatch):
     with pytest.raises(ImproperlyConfigured, match="Write composition"):
         serving.verify(snap, "runtime", retain_startup=True)
     assert serving._startup_verification is None
+
+
+def test_verified_receipt_survives_ready_and_lease_excludes_writer(generated):
+    root, snap = generated
+    receipt = serving.verify(snap, "runtime", retain_startup=True)
+    serving._finish_startup_verification()
+    assert serving.verified_receipt() is receipt
+    child = None
+    try:
+        with serving.receipt_lease() as leased:
+            assert leased is receipt
+            child = writer(root)
+            assert child.stdout.readline().strip() == "waiting"
+            assert not select.select([child.stdout], [], [], 0.1)[0]
+        assert child.communicate(timeout=5)[0].strip() == "acquired"
+    finally:
+        if child is not None:
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+    # Lease cleanup runs even when its consumer raises.
+    with pytest.raises(RuntimeError), serving.receipt_lease():
+        raise RuntimeError("consumer failed")
+    with serving.receipt_lock(root, wait=0):
+        pass
+
+
+def test_lease_refuses_exact_byte_change(generated):
+    root, snap = generated
+    serving.verify(snap, "runtime", retain_startup=True)
+    serving._finish_startup_verification()
+    with (root / "__init__.py").open("a") as stream:
+        stream.write("\n")
+    with pytest.raises(ImproperlyConfigured, match="changed since startup"), serving.receipt_lease():
+        pytest.fail("stale lease entered")
+    with serving.receipt_lock(root, wait=0):
+        pass
+
+
+def test_writer_wait_is_bounded_by_native_shared_lock(generated):
+    root, snap = generated
+    serving.verify(snap, "runtime", retain_startup=True)
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys, time
+from django_compose.serving import receipt_lock
+from django.core.exceptions import ImproperlyConfigured
+start = time.monotonic()
+try:
+    with receipt_lock(sys.argv[1], wait=0.15):
+        raise AssertionError('writer entered')
+except ImproperlyConfigured as error:
+    assert 'dev server holds this composition' in str(error)
+assert 0.1 <= time.monotonic() - start < 2
+""",
+            str(root),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert child.returncode == 0, child.stderr
+
+
+@pytest.mark.parametrize("wait", [-1, float("nan"), float("inf")])
+def test_invalid_writer_wait_refused(generated, wait):
+    root, _ = generated
+    with pytest.raises(ValueError), serving.receipt_lock(root, wait=wait):
+        pass
+
+
+def test_native_reloader_child_holds_lock_after_ready(generated):
+    root, _ = generated
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            """
+import os, sys
+from pathlib import Path
+from django_compose import serving
+os.environ['RUN_MAIN'] = 'true'
+serving.output_directory = lambda module: Path(sys.argv[1])
+class Snapshot:
+    compiler = 'compiler'
+    def check_mode(self): pass
+    def digest(self): return 'digest'
+serving.verify(Snapshot(), 'runtime', retain_startup=True)
+serving._finish_startup_verification()
+print('ready', flush=True)
+sys.stdin.readline()
+""",
+            str(root),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == "ready"
+        with pytest.raises(ImproperlyConfigured), serving.receipt_lock(root, wait=0):
+            pass
+    finally:
+        child.communicate("exit\n", timeout=5)
+    with serving.receipt_lock(root, wait=0):
+        pass
+
+
+def test_dotted_receipt_lookup_never_executes_parent(tmp_path, monkeypatch):
+    parent = tmp_path / "project"
+    parent.mkdir()
+    (parent / "__init__.py").write_text("raise AssertionError('parent executed')")
+    runtime = parent / "runtime"
+    runtime.mkdir()
+    receipt = serving.Receipt((), (), "digest", {}, "compiler")
+    (runtime / "__init__.py").write_text(receipt.source())
+    monkeypatch.syspath_prepend(str(tmp_path))
+    assert serving.read_receipt("project.runtime") == receipt
+    assert "project" not in sys.modules
+
+
+def test_old_receipt_format_can_be_rebuilt_without_losing_history(generated):
+    root, _ = generated
+    receipt = serving.read_receipt(root)
+    with (root / "__init__.py").open("a") as stream:
+        stream.write("GENERATION = 'legacy'\n")
+    previous = serving.read_receipt(root)
+    assert previous == receipt
+    assert "GENERATION" not in previous.source()

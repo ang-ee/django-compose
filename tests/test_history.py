@@ -320,7 +320,7 @@ config = apps.get_app_config("alpha")
 config.models_module = None
 config.models.clear()
 apps.clear_cache()
-receipt = Receipt("g", ("alpha", "beta"), (), "d", {}, "c")
+receipt = Receipt(("alpha", "beta"), (), "d", {}, "c")
 with patch("django_compose.migrations.read_receipt", return_value=receipt):
     loader = MigrationLoader(None)
     before, after = effective_states(loader, apps)
