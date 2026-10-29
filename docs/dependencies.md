@@ -41,6 +41,30 @@ and native `AppConfig` examples.
 
 The `typing` extra is unnecessary for building or running a project. It is loaded
 only when the project's mypy configuration selects the composition plugin.
+Select the plugin and your project's settings in `mypy.ini`:
+
+```ini
+[mypy]
+plugins = django_compose.typing
+
+[mypy.plugins.django-stubs]
+django_settings_module = project.settings
+```
+
+Runtime-projected bases still need analyzable native mypy TypeInfos. Dependencies
+without `py.typed` may be skipped by mypy's normal import policy, even when a
+plugin requests them. Enable native analysis for the specific untyped dependency;
+for example, when using django-simple-history:
+
+```ini
+[mypy-simple_history.*]
+follow_untyped_imports = True
+```
+
+This same import policy applies to ordinary authored Django models. Keep the
+exception scoped to the dependency; the composition plugin supplies no import-policy
+bypass.
+
 The exact compatible revisions are declared together in
 [`pyproject.toml`](../pyproject.toml) and resolved in [`uv.lock`](../uv.lock).
 These forks provide native field, manager and semantic-analysis hooks used by

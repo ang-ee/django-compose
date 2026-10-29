@@ -1,5 +1,6 @@
 """GeneratedTree preserves history and refuses unsafe or unowned paths."""
 
+import os
 import stat
 from pathlib import Path
 
@@ -22,6 +23,13 @@ def test_indexed_writes_and_clean_preserve_history(tmp_path):
     (root / "old/migrations/0001.py").write_text("history")
     (root / "unknown.txt").write_text("unknown")
     assert not tree.drift()
+    for relative in sources:
+        os.utime(root / relative, ns=(1_600_000_000_000_000_000, 1_600_000_000_000_000_000))
+    mtimes = {relative: (root / relative).stat().st_mtime_ns for relative in sources}
+    with receipt_lock(root):
+        assert not tree.reconcile()
+    assert {relative: (root / relative).stat().st_mtime_ns for relative in sources} == mtimes
+    assert not tuple(root.rglob(".compose-*"))
     tree.clean()
     assert read_receipt(root).IN_PROGRESS
     assert not (root / "old/models.py").exists()

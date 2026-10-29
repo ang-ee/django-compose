@@ -290,7 +290,10 @@ the hook's single output root in `COMPOSE_EXTERNAL_ARTIFACT_ROOTS`. Each hook's
 render mapping is its exact file-ownership declaration; filenames may be
 computed from populated model facts in the ready phase. The build records those
 paths and hashes in `Receipt.OWNED_FILES`, which owns serving lookup and cleanup.
-Roots cannot claim native app labels, retained history or core structure. Traversal, symlinks, file/directory collisions, overwriting unowned
+Roots cannot claim generated model packages, retained or retired history roots,
+or core structure. A selected model-free app may use its own label as an artifact
+root when that label owns no generated model or history package. Traversal,
+symlinks, file/directory collisions, overwriting unowned
 files, competing hooks across either phase and migration/history collisions fail.
 Models-phase hooks receive `ModelsView`; ready-phase hooks receive the native
 registry in the final ready callback, before publication. See [build integrations](extensions.md) for an example.
@@ -358,6 +361,16 @@ comparison state until explicit purge. History-only membership is retained
 record labels minus retired and snapshot-selected app labels. An enabled app
 that loses its last model remains active and yields a native model deletion.
 All package migration comparisons use this state calculation.
+
+For composed apps with migrations enabled, concrete models and no native disk history,
+`makemigrations` first authors the initial schema through Django's native command,
+then binds guarded reusable transitions and reconciles ordinary model changes.
+Selected-app authoring includes prerequisite apps initialized by native dependency
+expansion. Initial `--check` retains Django's exit status 1 for missing history;
+`--dry-run` previews without writing or binding. `--merge`, `--empty` and `--update`
+are refused before initial schema authoring. If native expansion requires changes
+to an app with existing history, the command refuses before writes and asks the
+caller to author that app's transitions first; existing history bytes remain intact.
 
 `TransitionBinding` uses frozen snapshot records by default, or explicit
 `declarations=`. It binds native migration origins `<declaring_app>:<name>` to
