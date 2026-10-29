@@ -28,10 +28,10 @@ def host(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     )
     (tmp_path / "typing_settings.py").write_text(
         "from authored import *\n"
-        "from django_compose.snapshot import enabled_apps, snapshot\n"
+        "from django_compose.snapshot import app_entries, snapshot\n"
         "from django_compose.serving import (installed_apps, migration_modules, mode,\n"
         "    read_receipt, tombstones, verify)\n"
-        "entries = enabled_apps(INSTALLED_APPS)\n"
+        "entries = app_entries(INSTALLED_APPS)\n"
         "COMPOSE_SNAPSHOT = snapshot(entries, namespace=globals(), authored_migration_modules={})\n"
         "previous = read_receipt(COMPOSE_OUTPUT_DIR)\n"
         "if mode():\n"

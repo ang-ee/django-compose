@@ -9,20 +9,23 @@ from django.core.exceptions import ImproperlyConfigured
 from django.db import models
 from django.db.models.utils import make_model_tuple
 
+_UNSET: Any = object()
+
 
 class Composable(models.Model):
     """Declare composition through class keywords, retaining Django's Meta rules.
 
-    ``materialize``, ``contributes_to`` and ``parent`` apply only to the class
-    declaring them. ``requires_ancestor`` applies through the complete MRO.
-    Every source and donor must explicitly remain abstract using native Meta.
-    Factories may pass the same keywords to ``type()``.
+    ``concrete``, ``mixin_for`` and ``inherits`` are mutually exclusive and
+    apply only to the class declaring them. ``inherits`` implies concrete.
+    ``must_inherit`` applies through the complete MRO and combines with any
+    declaration. Every source and mixin must explicitly remain abstract using
+    native Meta. Factories may pass the same keywords to ``type()``.
     """
 
-    compose_materialize: ClassVar[bool] = False
-    compose_contributes_to: ClassVar[str | None] = None
-    compose_parent: ClassVar[str | None] = None
-    compose_requires_ancestor: ClassVar[str | None] = None
+    compose_concrete: ClassVar[bool] = False
+    compose_mixin_for: ClassVar[str | None] = None
+    compose_inherits: ClassVar[str | None] = None
+    compose_must_inherit: ClassVar[str | None] = None
 
     class Meta:
         abstract = True
@@ -30,26 +33,24 @@ class Composable(models.Model):
     def __init_subclass__(
         cls,
         *,
-        materialize: bool = False,
-        contributes_to: str | None = None,
-        parent: str | None = None,
-        requires_ancestor: str | None = None,
+        concrete: bool = _UNSET,
+        mixin_for: str | None = None,
+        inherits: str | None = None,
+        must_inherit: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init_subclass__(**kwargs)
         identity = f"{cls.__module__}.{cls.__name__}"
-        if type(materialize) is not bool:
-            raise ImproperlyConfigured(f"{identity}: materialize must be a boolean")
-        if contributes_to is not None and (materialize or parent is not None):
-            raise ImproperlyConfigured(f"{identity}: contributes_to excludes materialize and parent")
-        if parent is not None and not materialize:
-            raise ImproperlyConfigured(f"{identity}: parent requires materialize=True")
-        if materialize:
-            cls.compose_materialize = True
+        if concrete is not _UNSET and type(concrete) is not bool:
+            raise ImproperlyConfigured(f"{identity}: concrete must be a boolean")
+        if sum((concrete is not _UNSET, mixin_for is not None, inherits is not None)) > 1:
+            raise ImproperlyConfigured(f"{identity}: concrete, mixin_for and inherits are mutually exclusive")
+        if concrete is True or inherits is not None:
+            cls.compose_concrete = True
         for name, value in (
-            ("contributes_to", contributes_to),
-            ("parent", parent),
-            ("requires_ancestor", requires_ancestor),
+            ("mixin_for", mixin_for),
+            ("inherits", inherits),
+            ("must_inherit", must_inherit),
         ):
             if value is None:
                 continue

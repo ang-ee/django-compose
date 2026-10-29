@@ -60,11 +60,11 @@ class ModelComposition:
                 raise ImproperlyConfigured("Addon ownership is required for extension donors")
         graph = {}
         for key, source in sorted(self.models_by_label.items()):
-            parent_ref = vars(source).get("compose_parent")
+            parent_ref = vars(source).get("compose_inherits")
             if parent_ref is not None and parent_ref not in self.models_by_label:
                 raise ImproperlyConfigured(f"{source._meta.label} extends unknown model {parent_ref!r}")
             graph[key] = () if parent_ref is None else (parent_ref,)
-        order = _ordered(graph, "materialized model parents")
+        order = _ordered(graph, "concrete model parents")
         modules: dict[str, set[str]] = {label: set() for label in self.sources_by_label}
         for key, dependencies in graph.items():
             own_label = self.models_by_label[key]._meta.app_label
@@ -123,15 +123,15 @@ class ModelComposition:
                             f"{model._meta.label}: composition markers require abstract models"
                         )
                     continue
-                materialize = own.get("compose_materialize", False)
-                if type(materialize) is not bool:
-                    raise ImproperlyConfigured(f"{model._meta.label}.compose_materialize must be a boolean")
-                target = own.get("compose_contributes_to")
-                if not materialize and target is None:
+                concrete = own.get("compose_concrete", False)
+                if type(concrete) is not bool:
+                    raise ImproperlyConfigured(f"{model._meta.label}.compose_concrete must be a boolean")
+                target = own.get("compose_mixin_for")
+                if not concrete and target is None:
                     continue
                 if model._meta.app_label != config.label:
                     raise ImproperlyConfigured(f"{model._meta.label}: expected app_label {config.label!r}")
-                if materialize:
+                if concrete:
                     sources.setdefault(config.label, []).append(model)
                 else:
                     assert target is not None
@@ -144,7 +144,7 @@ class ModelComposition:
         )
 
     def parent(self, source: type[models.Model]) -> type[models.Model] | None:
-        """Return the immediate materialized parent, or None for a root identity."""
+        """Return the immediate concrete parent, or None for a root identity."""
         return self._parents[source]
 
     def donors(self, source: type[models.Model]) -> tuple[type[models.Model], ...]:
@@ -197,7 +197,7 @@ class ModelComposition:
                 for declaration in contributor.__mro__:
                     if not issubclass(declaration, models.Model):
                         continue
-                    reference = vars(declaration).get("compose_requires_ancestor")
+                    reference = vars(declaration).get("compose_must_inherit")
                     if reference is None:
                         continue
                     target = self.models_by_label.get(reference)

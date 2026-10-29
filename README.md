@@ -32,29 +32,32 @@ item = Item.objects.create(title="A book", rating=5)
 assert item.is_recommended()
 ```
 
-The app owning an identity declares `materialize=True`. Other apps contribute
+The app owning an identity declares `concrete=True`. Other apps contribute
 native abstract bases:
 
 ```python
 from django.db import models
 from django_compose.models import Composable
 
-class Item(Composable, materialize=True):
+class Item(Composable, concrete=True):
     title = models.CharField(max_length=100)
 
     class Meta:
         abstract = True
 
-class Rating(Composable, contributes_to="catalog.Item"):
+class Rating(Composable, mixin_for="catalog.Item"):
     rating = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
         abstract = True
 ```
 
-`parent="label.Model"` selects a materialized multi-table parent and requires
-`materialize=True`. `requires_ancestor="label.Model"` declares an inherited
-ancestor requirement. Other declarations apply only to their declaring class.
+`inherits="label.Model"` declares a concrete child of that model through
+multi-table inheritance. It implies `concrete` and may not repeat it.
+`concrete`, `mixin_for` and `inherits` are mutually exclusive.
+`must_inherit="label.Model"` adds an ancestor requirement through the MRO and
+can combine with any declaration or none. Other declarations apply only to
+their declaring class.
 Factories can forward the same keywords to `type()`. Django's usual explicit
 `Meta.abstract = True` rule applies to each reusable declaration.
 
@@ -62,7 +65,7 @@ Factories can forward the same keywords to `type()`. Django's usual explicit
 
 Use one ordinary settings module. It owns enabled apps and any host-specific
 settings composition. Normalize those app entries with
-`django_compose.snapshot.enabled_apps`, create one `Snapshot`, and assign it to
+`django_compose.snapshot.app_entries`, create one `Snapshot`, and assign it to
 `COMPOSE_SNAPSHOT`. Set `COMPOSE_OUTPUT_DIR` and `COMPOSE_OUTPUT_MODULE`.
 [The example settings](examples/shop/settings.py) contain the complete wiring:
 

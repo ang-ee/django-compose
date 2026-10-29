@@ -11,7 +11,7 @@ class EntityQuerySet[T: models.Model](models.QuerySet[T]):
 class EntityManager[T: models.Model](models.Manager[T]):
     def label(self) -> str:
         return "entity"
-class Entity(Composable, materialize=True):
+class Entity(Composable, concrete=True):
     key = models.UUIDField(primary_key=True, default=uuid4)
     title = models.CharField(max_length=30)
     objects = EntityManager.from_queryset(EntityQuerySet)()
@@ -24,27 +24,27 @@ class Shared(Composable):
     shared = models.IntegerField()
     class Meta:
         abstract = True
-class Required(Composable, requires_ancestor="modelapp.Entity"):
+class Required(Composable, must_inherit="modelapp.Entity"):
     def parent_title(self) -> str:
         return self.title
     class Meta:
         abstract = True
-class Child(Required, materialize=True, parent="modelapp.Entity"):
+class Child(Required, inherits="modelapp.Entity"):
     active = models.BooleanField()
     class Meta:
         abstract = True
-class Grandchild(Required, materialize=True, parent="modelapp.Child"):
+class Grandchild(Required, inherits="modelapp.Child"):
     class Meta:
         abstract = True
 class ExplicitManager[T: models.Model](models.Manager[T]):
     def alternate(self) -> int:
         return 1
-class ExplicitChild(Required, materialize=True, parent="modelapp.Entity"):
+class ExplicitChild(Required, inherits="modelapp.Entity"):
     objects = ExplicitManager()
     class Meta:
         abstract = True
         base_manager_name = "objects"
-class Link(Composable, materialize=True):
+class Link(Composable, concrete=True):
     entity = models.ForeignKey("modelapp.Entity", on_delete=models.CASCADE)
     entities = models.ManyToManyField("modelapp.Entity", related_name="all_links")
     class Meta:
@@ -70,7 +70,7 @@ class Descriptor:
         return "description"
     def __set__(self, row: object, value: str) -> None:
         pass
-class Audit(Shared, GenericMethods[int], contributes_to="modelapp.Entity"):
+class Audit(Shared, GenericMethods[int], mixin_for="modelapp.Entity"):
     rank = models.IntegerField()
     description: Descriptor = Descriptor()
     def score(self) -> int:
@@ -105,13 +105,13 @@ class Audit(Shared, GenericMethods[int], contributes_to="modelapp.Entity"):
         return "audit"
     class Meta:
         abstract = True
-class ChildAddon(Composable, contributes_to="modelapp.Child"):
+class ChildAddon(Composable, mixin_for="modelapp.Child"):
     adopted = models.BooleanField()
     def ancestor_title(self) -> str:
         return self.title
     class Meta:
         abstract = True
-class Extra(Shared, contributes_to="modelapp.Entity"):
+class Extra(Shared, mixin_for="modelapp.Entity"):
     note = models.CharField(max_length=30)
     def extra(self) -> str:
         return self.note

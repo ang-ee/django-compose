@@ -19,3 +19,11 @@ The package does not migrate a live stack, change operator jobs, acquire sources
 replace marketplace policy or publish releases. Those remain explicit consumer
 and release operations. Supporting another Django series requires running the
 native lifecycle, migration and optional typing matrix for that series first.
+
+## Pending host integration
+
+The broader host contract remains staged. Settings contribution through
+`configure()` and django-yamlconf, URL and ASGI composition, artifact phases,
+the shared startup lock/reloader protocol and a revised tombstone module
+location require their own implementation and verification. Existing receipt
+and lifecycle behavior remains the supported contract until those changes land.

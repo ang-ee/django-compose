@@ -5,7 +5,7 @@ from django.db import models
 from django_compose.models import Composable
 
 
-class Item(Composable, materialize=True):
+class Item(Composable, concrete=True):
     title = models.CharField(max_length=100)
 
     class Meta:

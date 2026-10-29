@@ -4,14 +4,16 @@
 
 | Keyword | Meaning | Inherited declaration |
 | --- | --- | --- |
-| `materialize=True` | New concrete identity | No |
-| `contributes_to="label.Model"` | Add an abstract donor base to an identity | No |
-| `parent="label.Model"` | Immediate materialized multi-table parent | No |
-| `requires_ancestor="label.Model"` | Required materialized ancestor | Yes, through the MRO |
+| `concrete=True` | New concrete identity | No |
+| `mixin_for="label.Model"` | Add an abstract donor base to an identity | No |
+| `inherits="label.Model"` | Concrete child of this multi-table parent | No |
+| `must_inherit="label.Model"` | Required concrete ancestor | Yes, through the MRO |
 
-`parent` requires materialization. `contributes_to` excludes both. Every source
-and donor must be explicitly abstract using native `Meta`. A source app's native
-`models_module` exports declarations; foreign reexports do not declare them.
+`concrete`, `mixin_for` and `inherits` are mutually exclusive. `inherits`
+implies concrete and may not repeat `concrete`; `must_inherit` combines with
+any declaration or none. Targets use Django's lazy `app_label.Model` form.
+Every source and donor must be explicitly abstract using native `Meta`. A source
+app's native `models_module` exports declarations; foreign reexports do not declare them.
 
 The public `ModelComposition` facts API exposes `ordered_models`,
 `models_by_label`, `donors(source)`, `parent(source)`,

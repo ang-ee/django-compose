@@ -36,20 +36,23 @@ not configure Django. No source depends on a consumer framework.
 
 | Keyword | Fact | Inherited declaration |
 | --- | --- | --- |
-| `materialize=True` | A new concrete identity | No |
-| `contributes_to="label.Model"` | Add a donor base to that identity | No |
-| `parent="label.Model"` | Immediate materialized multi-table parent | No |
-| `requires_ancestor="label.Model"` | Every concrete descendant requires this ancestor | Yes, through the MRO |
+| `concrete=True` | A new concrete identity | No |
+| `mixin_for="label.Model"` | Add a donor base to that identity | No |
+| `inherits="label.Model"` | Concrete child of this multi-table parent | No |
+| `must_inherit="label.Model"` | Every concrete descendant requires this ancestor | Yes, through the MRO |
 
-Keywords store `compose_*` facts on the declaring class. `parent` requires
-`materialize=True`; `contributes_to` excludes materialization and parent. Invalid
+Keywords store `compose_concrete`, `compose_mixin_for`, `compose_inherits` and
+`compose_must_inherit` facts on the declaring class. `concrete`, `mixin_for` and
+`inherits` are mutually exclusive, including an explicit `concrete=False`.
+`inherits` implies concrete and may not repeat `concrete`; `must_inherit`
+combines with any declaration or none. Targets use Django's lazy `app_label.Model` form. Invalid
 combinations and references fail at native class creation. Factories may pass
 keywords to `type()`. Django's native explicit `Meta.abstract=True` requirement
 still applies; Composable does not infer abstractness or replace ModelBase.
 
 Discovery uses the selected app config's native `models_module` exports,
 including model packages and custom `import_models()` hooks. Foreign reexports,
-helpers with inherited materialization/donor keywords, and ordinary native models
+helpers with inherited concrete/mixin keywords, and ordinary native models
 do not become declarations. Concrete classes with own composition facts fail.
 
 Generated bases are donors in enabled-app/declaration order, source, then
@@ -81,7 +84,7 @@ Additional compiler inputs are `COMPOSE_INTEGRATIONS`,
 `COMPOSE_FINGERPRINT_SETTINGS`. Native `MIGRATION_MODULES` remains authoritative,
 including explicit `None` values.
 
-`snapshot.enabled_apps` normalizes the host's already resolved ordered app
+`snapshot.app_entries` normalizes the host's already resolved ordered app
 closure. Entries must be strings; explicit config classes are preserved. Instances
 are rejected because a generated subclass cannot preserve instance state and a
 snapshot cannot identify it. Native duplicate app identity/label rules remain.

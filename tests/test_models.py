@@ -6,7 +6,7 @@ import pytest
 from core_fixtures import run_host
 
 BASE = """
-class Parent(Composable, materialize=True):
+class Parent(Composable, concrete=True):
     title = models.CharField(max_length=30)
     class Meta:
         abstract = True
@@ -20,13 +20,13 @@ def test_native_donors_managers_constraints_relations_and_parent(tmp_path):
         {
             "coreapp": BASE
             + """
-class Child(Composable, materialize=True, parent="coreapp.Parent", requires_ancestor="coreapp.Parent"):
+class Child(Composable, inherits="coreapp.Parent", must_inherit="coreapp.Parent"):
     detail = models.CharField(max_length=20)
     class Meta:
         abstract = True
 """,
             "extraapp": """
-class Tagged(Composable, contributes_to="coreapp.Parent"):
+class Tagged(Composable, mixin_for="coreapp.Parent"):
     code = models.IntegerField(default=0)
     tags = models.ManyToManyField("coreapp.Parent", related_name="tagged")
     custom = models.Manager()
@@ -97,7 +97,7 @@ class NativeConfig(AppConfig):
 """,
             "packaged/pieces.py": """from django.db import models
 from django_compose.models import Composable
-class Item(Composable, materialize=True):
+class Item(Composable, concrete=True):
     class Meta:
         abstract = True
 """,
@@ -116,13 +116,13 @@ class Shared(Composable):
         abstract = True
         constraints = [models.CheckConstraint(
             condition=models.Q(value__gte=0), name="%(app_label)s_%(class)s_positive")]
-class Item(Shared, materialize=True):
+class Item(Shared, concrete=True):
     class Meta(Shared.Meta):
         abstract = True
 """,
             "extraapp": """
 from coreapp.models import Shared
-class Extra(Shared, contributes_to="coreapp.Item"):
+class Extra(Shared, mixin_for="coreapp.Item"):
     other = models.IntegerField(default=0)
     class Meta(Shared.Meta):
         abstract = True
@@ -156,7 +156,7 @@ def test_distinct_constraint_owners_fail_before_emission(tmp_path, name):
         tmp_path,
         {
             "coreapp": """
-class Item(Composable, materialize=True):
+class Item(Composable, concrete=True):
     value = models.IntegerField()
     class Meta:
         abstract = True
@@ -164,7 +164,7 @@ class Item(Composable, materialize=True):
                        name="%(app_label)s_%(class)s_positive")]
 """,
             "extraapp": f"""
-class Extra(Composable, contributes_to="coreapp.Item"):
+class Extra(Composable, mixin_for="coreapp.Item"):
     other = models.IntegerField(default=0)
     class Meta:
         abstract = True
@@ -191,7 +191,7 @@ assert not Path("runtime").exists()
             {
                 "coreapp": BASE,
                 "extraapp": """
-class Conflicting(Composable, contributes_to="coreapp.Parent"):
+class Conflicting(Composable, mixin_for="coreapp.Parent"):
     title = models.CharField(max_length=4)
     class Meta:
         abstract = True
@@ -203,7 +203,7 @@ class Conflicting(Composable, contributes_to="coreapp.Parent"):
             {
                 "coreapp": BASE
                 + """
-class Child(Composable, materialize=True, parent="coreapp.Parent"):
+class Child(Composable, inherits="coreapp.Parent"):
     title = models.CharField(max_length=4)
     class Meta:
         abstract = True
@@ -214,7 +214,7 @@ class Child(Composable, materialize=True, parent="coreapp.Parent"):
         (
             {
                 "coreapp": """
-class Item(Composable, materialize=True, parent="missing.Unknown"):
+class Item(Composable, inherits="missing.Unknown"):
     class Meta:
         abstract = True
 """
@@ -224,7 +224,7 @@ class Item(Composable, materialize=True, parent="missing.Unknown"):
         (
             {
                 "coreapp": """
-class Item(Composable, materialize=True, requires_ancestor="coreapp.Item"):
+class Item(Composable, concrete=True, must_inherit="coreapp.Item"):
     class Meta:
         abstract = True
 """
@@ -234,17 +234,17 @@ class Item(Composable, materialize=True, requires_ancestor="coreapp.Item"):
         (
             {
                 "coreapp": """
-class Item(Composable, materialize=True, parent="coreapp.Item"):
+class Item(Composable, inherits="coreapp.Item"):
     class Meta:
         abstract = True
 """
             },
-            "Cyclic materialized",
+            "Cyclic concrete",
         ),
         (
             {
                 "coreapp": """
-class Item(Composable, materialize=True):
+class Item(Composable, concrete=True):
     pass
 """
             },
@@ -253,12 +253,12 @@ class Item(Composable, materialize=True):
         (
             {
                 "coreapp": """
-class Item(Composable, materialize="yes"):
+class Item(Composable, concrete="yes"):
     class Meta:
         abstract = True
 """
             },
-            "materialize must be a boolean",
+            "concrete must be a boolean",
         ),
     ],
 )
@@ -280,7 +280,7 @@ def test_manager_source_override_and_duplicate_donor_rejection(tmp_path):
     sources = {
         "coreapp": BASE.replace("    title =", "    selected = models.Manager()\n    title ="),
         "extraapp": """
-class Donor(Composable, contributes_to="coreapp.Parent"):
+class Donor(Composable, mixin_for="coreapp.Parent"):
     selected = models.Manager()
     class Meta:
         abstract = True
@@ -311,13 +311,13 @@ class Shared(Composable):
     value = models.IntegerField()
     class Meta:
         abstract = True
-class Item(Shared, materialize=True):
+class Item(Shared, concrete=True):
     class Meta:
         abstract = True
 """,
             "extraapp": """
 from coreapp.models import Shared
-class Donor(Shared, contributes_to="coreapp.Item"):
+class Donor(Shared, mixin_for="coreapp.Item"):
     other = models.IntegerField()
     class Meta:
         abstract = True
@@ -339,15 +339,15 @@ def test_generated_module_cycle_even_when_model_graph_is_acyclic(tmp_path):
         {
             "coreapp": BASE
             + """
-class Other(Composable, materialize=True, parent="extraapp.Other"):
+class Other(Composable, inherits="extraapp.Other"):
     class Meta:
         abstract = True
 """,
             "extraapp": """
-class Other(Composable, materialize=True):
+class Other(Composable, concrete=True):
     class Meta:
         abstract = True
-class Child(Composable, materialize=True, parent="coreapp.Parent"):
+class Child(Composable, inherits="coreapp.Parent"):
     class Meta:
         abstract = True
 """,
@@ -363,13 +363,13 @@ def test_import_aliases_cannot_shadow_concrete_class_names(tmp_path):
         tmp_path,
         {
             "coreapp": """
-class _SourceZed(Composable, materialize=True):
+class _SourceZed(Composable, concrete=True):
     class Meta:
         abstract = True
-class Zed(Composable, materialize=True):
+class Zed(Composable, concrete=True):
     class Meta:
         abstract = True
-class _ComposeClassVar(Composable, materialize=True):
+class _ComposeClassVar(Composable, concrete=True):
     class Meta:
         abstract = True
 """
@@ -390,7 +390,7 @@ def test_foreign_key_attribute_and_column_collisions_are_refused(tmp_path):
         {
             "coreapp": BASE,
             "extraapp": """
-class Donor(Composable, contributes_to="coreapp.Parent"):
+class Donor(Composable, mixin_for="coreapp.Parent"):
     owner = models.ForeignKey("coreapp.Parent", on_delete=models.CASCADE)
     owner_id = models.IntegerField()
     class Meta:
@@ -406,7 +406,7 @@ class Donor(Composable, contributes_to="coreapp.Parent"):
         {
             "coreapp": BASE,
             "extraapp": """
-class Donor(Composable, contributes_to="coreapp.Parent"):
+class Donor(Composable, mixin_for="coreapp.Parent"):
     alias = models.CharField(max_length=10, db_column="title")
     class Meta:
         abstract = True
@@ -444,16 +444,25 @@ def test_keywords_factories_and_inherited_requirement(tmp_path):
         {
             "coreapp": BASE
             + """
-class Required(Composable, requires_ancestor="coreapp.Parent"):
+class Required(Composable, must_inherit="coreapp.Parent"):
     class Meta:
         abstract = True
-class Child(Required, materialize=True, parent="coreapp.Parent"):
+class Child(Required, inherits="coreapp.Parent"):
     class Meta:
         abstract = True
 Factory = type("Factory", (Required,), {
     "__module__": __name__, "Meta": type("Meta", (), {"abstract": True}),
-}, materialize=True, parent="coreapp.Parent")
+}, inherits="coreapp.Parent")
+class Grandchild(Required, inherits="coreapp.Child"):
+    class Meta:
+        abstract = True
+RootFactory = type("RootFactory", (Composable,), {
+    "__module__": __name__, "Meta": type("Meta", (), {"abstract": True}),
+}, concrete=True)
 class Helper(Factory):
+    class Meta:
+        abstract = True
+class Disabled(Composable, concrete=False):
     class Meta:
         abstract = True
 """,
@@ -461,12 +470,33 @@ class Helper(Factory):
         """
 from coreapp.models import Required, Factory, Helper, Parent
 composition = ModelComposition.discover(apps.get_app_configs())
-assert tuple(composition.models_by_label) == ("coreapp.child", "coreapp.factory", "coreapp.parent")
+assert tuple(composition.models_by_label) == (
+    "coreapp.child", "coreapp.factory", "coreapp.grandchild", "coreapp.parent", "coreapp.rootfactory",
+)
 assert composition.required_ancestors[Required] is Parent
-assert "compose_materialize" not in vars(Helper)
+assert "compose_concrete" not in vars(Helper)
+assert "compose_inherits" not in vars(Helper)
+assert vars(Factory)["compose_concrete"] is True
 assert composition.parent(Factory) is Parent
 emit_models(composition)
-assert set(apps.get_model("coreapp", "Factory")._meta.parents) == {apps.get_model("coreapp", "Parent")}
+concrete_parent = apps.get_model("coreapp", "Parent")
+concrete_child = apps.get_model("coreapp", "Child")
+assert set(apps.get_model("coreapp", "Factory")._meta.parents) == {concrete_parent}
+assert set(apps.get_model("coreapp", "Grandchild")._meta.parents) == {concrete_child}
+assert apps.get_model("coreapp", "RootFactory")._meta.parents == {}
+from django.db import models
+from django.db.migrations.state import ProjectState
+state = ProjectState.from_apps(apps)
+assert "coreapp.parent" in state.models["coreapp", "factory"].bases
+assert "coreapp.child" in state.models["coreapp", "grandchild"].bases
+assert set(state.apps.get_model("coreapp", "Factory")._meta.parents) == {
+    state.apps.get_model("coreapp", "Parent"),
+}
+assert set(state.apps.get_model("coreapp", "Grandchild")._meta.parents) == {
+    state.apps.get_model("coreapp", "Child"),
+}
+assert state.models["coreapp", "rootfactory"].bases == (models.Model,)
+assert ("coreapp", "helper") not in state.models
 """,
     )
 
@@ -474,10 +504,17 @@ assert set(apps.get_model("coreapp", "Factory")._meta.parents) == {apps.get_mode
 @pytest.mark.parametrize(
     "keywords,message",
     [
-        ('materialize=True, contributes_to="coreapp.Parent"', "contributes_to excludes"),
-        ('parent="coreapp.Parent"', "parent requires materialize"),
-        ('materialize=True, parent="invalid"', "requires an 'app_label.Model'"),
-        ("requires_ancestor=7", "requires an 'app_label.Model'"),
+        ('concrete=True, mixin_for="coreapp.Parent"', "mutually exclusive"),
+        ('concrete=False, mixin_for="coreapp.Parent"', "mutually exclusive"),
+        ('concrete=True, inherits="coreapp.Parent"', "mutually exclusive"),
+        ('concrete=False, inherits="coreapp.Parent"', "mutually exclusive"),
+        ('mixin_for="coreapp.Parent", inherits="coreapp.Parent"', "mutually exclusive"),
+        ('inherits="invalid"', "requires an 'app_label.Model'"),
+        ("must_inherit=7", "requires an 'app_label.Model'"),
+        ("materialize=True", "takes no keyword arguments"),
+        ('contributes_to="coreapp.Parent"', "takes no keyword arguments"),
+        ('parent="coreapp.Parent"', "takes no keyword arguments"),
+        ('requires_ancestor="coreapp.Parent"', "takes no keyword arguments"),
     ],
 )
 def test_invalid_keywords_fail_during_native_class_creation(tmp_path, keywords, message):
@@ -502,7 +539,7 @@ def test_donor_authored_meta_is_refused_with_owner(tmp_path):
         {
             "coreapp": BASE,
             "extraapp": """
-class Extra(Composable, contributes_to="coreapp.Parent"):
+class Extra(Composable, mixin_for="coreapp.Parent"):
     class Meta:
         abstract = True
         ordering = ["title"]
@@ -528,7 +565,7 @@ class Hook:
     def model_declaration(self, composition, source):
         return ModelDeclaration({self.name: "literal"})
 composition = ModelComposition.discover(apps.get_app_configs())
-for name in ("title", "save", "get_title_display", "compose_parent"):
+for name in ("title", "save", "get_title_display", "compose_inherits"):
     # Dynamic methods contributed by a field or host extension are reserved too.
     if name == "get_title_display":
         Parent.get_title_display = lambda self: self.title
@@ -538,7 +575,10 @@ for name in ("title", "save", "get_title_display", "compose_parent"):
         pass
     else:
         raise AssertionError(name)
-for name in ("runtime", "extends", "requires_parent"):
+for name in (
+    "runtime", "extends", "requires_parent", "compose_materialize",
+    "compose_contributes_to", "compose_parent", "compose_requires_ancestor",
+):
     assert model_declaration(composition, Parent, (Hook(name),)).attributes == {name: "literal"}
 """,
     )
@@ -549,10 +589,10 @@ def test_native_reference_normalization_accepts_class_named_class(tmp_path):
         tmp_path,
         {
             "coreapp": """
-class Class(Composable, materialize=True):
+class Class(Composable, concrete=True):
     class Meta:
         abstract = True
-class Child(Composable, materialize=True, parent="coreapp.Class"):
+class Child(Composable, inherits="coreapp.Class"):
     class Meta:
         abstract = True
 """
@@ -606,3 +646,48 @@ class Unrelated:
 """
         },
     )
+
+
+@pytest.mark.parametrize("parent,valid", [("Child", True), ("Other", False)])
+def test_mixin_requirement_uses_complete_mro_and_concrete_parent_chain(tmp_path, parent, valid):
+    result = run_host(
+        tmp_path,
+        {
+            "coreapp": BASE
+            + f"""
+class Other(Composable, concrete=True):
+    class Meta:
+        abstract = True
+class Child(Composable, inherits="coreapp.Parent"):
+    class Meta:
+        abstract = True
+class Leaf(Composable, inherits="coreapp.{parent}"):
+    class Meta:
+        abstract = True
+""",
+            "extraapp": """
+class Required(Composable, must_inherit="coreapp.Parent"):
+    class Meta:
+        abstract = True
+class Mixin(Required, mixin_for="coreapp.Leaf"):
+    extra = models.IntegerField(default=1)
+    class Meta:
+        abstract = True
+class Helper(Mixin):
+    class Meta:
+        abstract = True
+""",
+        },
+        """
+from extraapp.models import Mixin, Required
+composition = ModelComposition.discover(apps.get_app_configs())
+leaf = composition.models_by_label["coreapp.leaf"]
+assert composition.donors(leaf) == (Mixin,)
+assert composition.required_ancestors[Required] is composition.models_by_label["coreapp.parent"]
+emit_models(composition)
+assert apps.get_model("coreapp", "Leaf")._meta.get_field("extra").default == 1
+""",
+        success=valid,
+    )
+    if not valid:
+        assert "coreapp.Leaf requires ancestor 'coreapp.parent' through extraapp.Required" in result.stderr
