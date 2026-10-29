@@ -7,7 +7,7 @@ import importlib
 import os
 from collections import ChainMap
 from collections.abc import Mapping, MutableMapping, Sequence
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import Any
 
 import django_yamlconf
@@ -31,8 +31,10 @@ class AutoConfig:
 
     Plain static defaults respect project overrides. Native merge operations
     remain additive. A derived ``settings(mapping)`` hook receives environment
-    values first, and explicit COMPOSE_ENV_PREFIXES opt declared names into raw
-    environment overrides. No graph resolution or model imports happen here.
+    values first through a shallow read-only combined view. Nested values retain
+    their native identity; hooks return contributions rather than mutate inputs.
+    Explicit COMPOSE_ENV_PREFIXES opt declared names into raw environment
+    overrides. No graph resolution or model imports happen here.
     """
 
     def __init__(self, namespace: MutableMapping[str, Any], *, environment: bool = True) -> None:
@@ -78,7 +80,7 @@ class AutoConfig:
         if derive is not None:
             if not callable(derive):
                 raise ImproperlyConfigured(f"{owner}.autoconfig.settings must be callable")
-            derived = derive(ChainMap(self.environment, self.namespace))
+            derived = derive(MappingProxyType(ChainMap(self.environment, self.namespace)))
             if not isinstance(derived, Mapping):
                 raise ImproperlyConfigured(f"{owner}.autoconfig.settings() must return a mapping")
         declarations = {**defaults, **derived}

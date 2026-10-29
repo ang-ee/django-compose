@@ -1,5 +1,6 @@
 """Native YAML settings operations, provenance and explicit failures."""
 
+import os
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -58,3 +59,22 @@ def test_logged_merge_failure_is_an_error():
 def test_structural_settings_cannot_be_overridden_by_an_app(name):
     with pytest.raises(ImproperlyConfigured, match="must not define"):
         AutoConfig({}).update_module(contribution(**{name: "bad"}), "app")
+
+
+@pytest.mark.parametrize("environment", [True, False])
+def test_derived_input_rejects_assignment_without_mutating_environment_or_namespace(monkeypatch, environment):
+    monkeypatch.setenv("VALUE", "environment")
+    namespace = {"VALUE": "project"}
+    before_environment = dict(os.environ)
+    module = contribution()
+
+    def settings(values):
+        assert values["VALUE"] == ("environment" if environment else "project")
+        values["VALUE"] = "mutated"
+        return {}
+
+    module.settings = settings
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        AutoConfig(namespace, environment=environment).update_module(module, "app")
+    assert namespace == {"VALUE": "project"}
+    assert dict(os.environ) == before_environment

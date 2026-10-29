@@ -16,6 +16,8 @@ class AppGraph:
 
     Django owns config discovery, names and labels. The published manifest
     library owns traversal and cycle detection; this class supplies its graph.
+    Names and labels retain Django's separate uniqueness namespaces. Dependency
+    entries are native app/config paths; labels are never entry aliases.
     ``compose_root``, ``compose_root_declaration`` and ``compose_required`` are
     recorded on returned configs for consumers that need those authored facts.
     """
@@ -31,6 +33,7 @@ class AppGraph:
     ) -> tuple[AppConfig, ...]:
         configs: dict[str, AppConfig] = {}
         aliases: dict[str, str] = {}
+        labels: set[str] = set()
         edges: dict[str, tuple[str, ...]] = {}
         authored = (
             None
@@ -41,11 +44,10 @@ class AppGraph:
         root_declarations = {}
 
         def include(config: AppConfig) -> None:
+            if config.label in labels:
+                raise ImproperlyConfigured(f"Duplicate Django app label {config.label!r}")
             configs[config.name] = config
-            for alias in (config.name, config.label):
-                previous = aliases.setdefault(alias, config.name)
-                if previous != config.name:
-                    raise ImproperlyConfigured(f"Duplicate Django app alias {alias!r}")
+            labels.add(config.label)
             dependencies = self.declarations.dependencies(config, refresh=True)
             if isinstance(dependencies, str) or not all(isinstance(value, str) for value in dependencies):
                 raise ImproperlyConfigured(f"{config.name}: dependencies must contain app entry strings")
@@ -65,7 +67,7 @@ class AppGraph:
         pending = list(root_names)
         for name in pending:
             for entry in sorted(edges[name]):
-                if entry in aliases:
+                if entry in configs or entry in aliases:
                     continue
                 try:
                     config = AppConfig.create(entry)
