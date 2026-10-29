@@ -21,4 +21,5 @@ build:
 	$(UV) build
 
 dist-check: build
+	$(RUN) twine check dist/*
 	$(RUN) python scripts/check_distribution.py
