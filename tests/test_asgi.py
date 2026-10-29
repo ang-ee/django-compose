@@ -87,6 +87,26 @@ async def main():
     comm = ApplicationCommunicator(app, dict(scope, path="/base/apix"))
     assert (await comm.receive_output())["status"] == 299
     await comm.wait()
+    one.value = AsgiContribution({"/": mounted, "/api": mounted, "/api/deep": mounted})
+    root_app = _Application()
+    async def unexpected_fallback(scope, receive, send):
+        raise AssertionError("root mount did not handle unmatched path")
+    root_app.http = unexpected_fallback
+    for path, expected_root in (
+        ("/base/api/deep/item", "/base/api/deep"),
+        ("/base/api/item", "/base/api"),
+        ("/base/api", "/base/api"),
+        ("/base/apix", "/base"),
+        ("/base/other", "/base"),
+        ("/base/", "/base"),
+    ):
+        original = dict(scope, path=path, raw_path=path.encode(), query_string=b"a=1&x=%2F")
+        comm = ApplicationCommunicator(root_app, original)
+        assert (await comm.receive_output())["status"] == 204
+        await comm.receive_output()
+        await comm.wait()
+        assert seen.pop() == dict(original, root_path=expected_root)
+        assert original["root_path"] == "/base"
     comm = ApplicationCommunicator(app, {"type": "lifespan"})
     await comm.send_input({"type": "lifespan.startup"})
     assert (await comm.receive_output())["type"] == "lifespan.startup.complete"
@@ -137,6 +157,40 @@ two.value = AsgiContribution(protocols={"http": mounted})
 try: _Application()
 except ImproperlyConfigured as error: assert "Django HTTP fallback" in str(error) and "two" in str(error)
 else: raise AssertionError("reserved protocol accepted")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env=dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path)),
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("prefix", ["", "mcp", "/mcp/", 1])
+def test_asgi_invalid_mount_prefix_has_configuration_diagnostic(prefix):
+    script = f"""
+from types import ModuleType
+from django.conf import settings
+settings.configure(INSTALLED_APPS=[])
+import django
+django.setup()
+from django.apps import apps, AppConfig
+from django.core.exceptions import ImproperlyConfigured
+from django_compose.asgi import AsgiContribution, _Application
+class Config(AppConfig):
+    name = "mount_owner"
+    path = "/tmp"
+    def compose_asgi(self):
+        return AsgiContribution(http_mounts={{{prefix!r}: object()}})
+config = Config("mount_owner", ModuleType("mount_owner"))
+apps.get_app_configs = lambda: [config]
+try:
+    _Application()
+except ImproperlyConfigured as error:
+    assert str(error) == "mount_owner: invalid HTTP mount " + repr({prefix!r}), str(error)
+else:
+    raise AssertionError("noncanonical mount accepted")
 """
     result = subprocess.run(
         [sys.executable, "-c", script],

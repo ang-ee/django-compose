@@ -47,7 +47,11 @@ class _Application:
             if not isinstance(contribution, AsgiContribution):
                 raise ImproperlyConfigured(f"{config.name}.compose_asgi() must return AsgiContribution")
             for prefix, handler in contribution.http_mounts.items():
-                if not prefix.startswith("/") or (prefix != "/" and prefix.endswith("/")):
+                if (
+                    not isinstance(prefix, str)
+                    or not prefix.startswith("/")
+                    or (prefix != "/" and prefix.endswith("/"))
+                ):
                     raise ImproperlyConfigured(f"{config.name}: invalid HTTP mount {prefix!r}")
                 self._claim(mount_owners, prefix, config.name)
                 self.mounts[prefix] = handler
