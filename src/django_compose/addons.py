@@ -51,12 +51,22 @@ class InstalledAddons:
         Requested extras never activate optional requirements. Missing installed
         dependencies are checked during activation, keeping disabled metadata inert.
         """
-        requirements = (Requirement(value) for value in sorted(self.distributions[provider].requires or ()))
-        return tuple(
-            requirement
-            for requirement in requirements
-            if requirement.marker is None or requirement.marker.evaluate({"extra": ""})
-        )
+        return active_requirements(self.distributions[provider].requires or ())
+
+
+def active_requirements(requirements: Iterable[str]) -> tuple[Requirement, ...]:
+    """Project sorted native requirements active on this platform with extra=''.
+
+    Accept installed or source metadata without requiring installed providers.
+    Requested extras do not activate optional requirements; installation checks
+    remain with the caller that activates dependencies.
+    """
+    parsed = (Requirement(value) for value in sorted(requirements))
+    return tuple(
+        requirement
+        for requirement in parsed
+        if requirement.marker is None or requirement.marker.evaluate({"extra": ""})
+    )
 
 
 def installed_addons(group: str) -> InstalledAddons:

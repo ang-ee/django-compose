@@ -13,7 +13,7 @@ from django.apps import AppConfig
 from django.core.exceptions import ImproperlyConfigured
 from packaging.requirements import Requirement
 
-from django_compose.addons import enabled_apps, installed_addons
+from django_compose.addons import active_requirements, enabled_apps, installed_addons
 
 GROUP = "testsite.addons"
 
@@ -249,7 +249,7 @@ def test_closure_runs_without_configuring_settings_in_fresh_process():
     script = (
         "import sys\n"
         "from django.conf import settings\n"
-        "from django_compose.addons import enabled_apps, installed_addons\n"
+        "from django_compose.addons import active_requirements, enabled_apps, installed_addons\n"
         "assert not settings.configured\n"
         "assert 'django.db.models' not in sys.modules\n"
         "result = enabled_apps(('django.contrib.contenttypes',), group='independent.addons')\n"
@@ -397,3 +397,24 @@ def test_installed_index_defers_native_app_identity_validation(installed):
     assert wrong not in sys.modules
     with pytest.raises(ImproperlyConfigured, match="Entry point .* selects app"):
         enabled_apps((root,), group=GROUP)
+
+
+def test_raw_requirements_project_without_installed_providers(monkeypatch):
+    def forbidden():
+        raise AssertionError("raw requirements must not inspect installed metadata")
+
+    monkeypatch.setattr(metadata, "distributions", forbidden)
+    requirements = (
+        "zeta[requested]>=2",
+        'optional; extra == "feature"',
+        f'platform; sys_platform == "{sys.platform}"',
+        f'inactive; sys_platform != "{sys.platform}"',
+        'alpha; extra != "feature"',
+    )
+    projected = active_requirements(iter(requirements))
+    assert tuple(requirement.name for requirement in projected) == ("alpha", "platform", "zeta")
+    assert all(isinstance(requirement, Requirement) for requirement in projected)
+    assert projected[-1].extras == {"requested"}
+    assert str(projected[-1].specifier) == ">=2"
+    assert active_requirements(reversed(requirements)) == projected
+    assert active_requirements(()) == ()
