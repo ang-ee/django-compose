@@ -18,7 +18,7 @@ from django.conf import global_settings
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.module_loading import import_string
 
-from django_compose.autoreload import report_inputs
+from django_compose.autoreload import report_inputs, report_watch_paths
 from django_compose.sources import SourceResolver
 
 COMPILER = "django-compose:1"
@@ -320,6 +320,7 @@ def snapshot(
             "COMPOSE_INTEGRATIONS": integrations,
             "COMPOSE_FINGERPRINT_GLOBS": globs,
             "COMPOSE_FINGERPRINT_EXCLUDES": excludes,
+            "COMPOSE_WATCH_PATHS": report_watch_paths(values.get("COMPOSE_WATCH_PATHS", ())),
             "COMPOSE_TRANSITION_SOURCE": records,
             "COMPOSE_EXTERNAL_ARTIFACT_ROOTS": tuple(
                 sorted(set(values.get("COMPOSE_EXTERNAL_ARTIFACT_ROOTS", ())))

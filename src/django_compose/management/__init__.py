@@ -119,6 +119,7 @@ def _parent(arguments: list[str]) -> None:
         if result.returncode:
             reloader = autoreload.get_reloader()
             inputs.attach(reloader)
+            print("Composition failed; waiting for input changes.", file=sys.stderr, flush=True)
             try:
                 reloader.run_loop()
             except SystemExit as exc:

@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from django.core.exceptions import ImproperlyConfigured
 from django.utils import autoreload
 
 
@@ -68,6 +69,31 @@ inputs = InputReport()
 def report_inputs(*, files: Iterable[str | Path] = (), globs: Iterable[tuple[str | Path, str]] = ()) -> None:
     """Publish settings-reader candidates BEFORE reading, even when absent."""
     inputs.add(files=files, globs=globs)
+
+
+def report_watch_paths(paths: Iterable[str | Path | tuple[str | Path, str]]) -> tuple[Any, ...]:
+    """Validate/report the mixed COMPOSE_WATCH_PATHS setting once at its owner."""
+    if isinstance(paths, (str, Path)):
+        raise ImproperlyConfigured(
+            "COMPOSE_WATCH_PATHS must be a sequence of files or (directory, glob) pairs"
+        )
+    normalized: list[Any] = []
+    for item in paths:
+        if isinstance(item, (str, Path)):
+            report_inputs(files=[item])
+            normalized.append(str(item))
+        elif (
+            isinstance(item, (tuple, list))
+            and len(item) == 2
+            and isinstance(item[0], (str, Path))
+            and isinstance(item[1], str)
+            and item[1]
+        ):
+            report_inputs(globs=[(item[0], item[1])])
+            normalized.append((str(item[0]), item[1]))
+        else:
+            raise ImproperlyConfigured("COMPOSE_WATCH_PATHS requires files or (directory, glob) pairs")
+    return tuple(normalized)
 
 
 def write_report(fd: int) -> None:

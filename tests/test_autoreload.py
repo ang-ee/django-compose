@@ -17,10 +17,12 @@ def test_creation_deletion_empty_glob_adapter(tmp_path: Path, backend: type) -> 
     candidate = tmp_path / ".env"
     report.add(files=[candidate], globs=[(tmp_path, "*.zed")])
     reloader = backend()
+
     # Faithful tick seam: backend content polling/subscriptions stay native.
     def native_tick():
         while True:
             yield
+
     reloader.tick = native_tick
     reloader.notify_file_changed = Mock()
     report.attach(reloader)
@@ -56,6 +58,7 @@ def test_native_stat_content_edit_is_not_reimplemented(tmp_path: Path) -> None:
     next(ticker)
     candidate.write_text("two")
     import os
+
     stat = candidate.stat()
     os.utime(candidate, (stat.st_atime + 2, stat.st_mtime + 2))
     next(ticker)
