@@ -35,7 +35,6 @@ from mypy.options import Options
 from mypy.plugin import AttributeContext, ClassDefContext, DynamicClassDefContext
 from mypy.semanal_shared import PRIORITY_FALLBACKS, has_placeholder
 from mypy.server.trigger import make_trigger
-from mypy.typeops import expand_type, expand_type_by_instance
 from mypy.types import AnyType, CallableType, Instance, Overloaded, TypedDictType, TypeType, get_proper_type
 from mypy.types import Type as MypyType
 from mypy.typevars import fill_typevars
@@ -79,9 +78,16 @@ class CompositionContext(DjangoContext):
         from django_compose.model_composition import ModelComposition
 
         configs = tuple(self.apps_registry.get_app_configs())
-        if not any(isinstance(config, ComposeConfig | BuildComposeConfig) for config in configs):
+        lifecycle = next(
+            (config for config in configs if isinstance(config, ComposeConfig | BuildComposeConfig)), None
+        )
+        if lifecycle is None:
             return
-        composition = ModelComposition.discover(configs)
+        composition = (
+            lifecycle.runtime.composition
+            if isinstance(lifecycle, BuildComposeConfig)
+            else ModelComposition.discover(configs)
+        )
         self.required_parents = composition.required_parents
         for source in composition.ordered_models:
             name = helpers.get_class_fullname(source)
@@ -102,7 +108,8 @@ class CompositionContext(DjangoContext):
                         field.name for field in composition.contributed_fields(source) if field.model is donor
                     ),
                 )
-            self.members[name] = selected = {}
+            selected: dict[str, _Member] = {}
+            self.members[name] = selected
             donor_ancestors = {base for donor in donors for base in donor.__mro__}
             for owner in concrete.__mro__:
                 if owner in source.__mro__ or owner not in donor_ancestors:
@@ -333,6 +340,10 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
         receiver: TypeInfo,
         function_type: Instance,
     ) -> Var:
+        # Load this native owner after mypy.types: its standalone import cycle
+        # otherwise prevents importing CompositionContext outside mypy's CLI.
+        from mypy.expandtype import expand_type, expand_type_by_instance
+
         assert declaration.type is not None
         instance = fill_typevars(receiver)
         assert isinstance(instance, Instance)
