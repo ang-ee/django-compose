@@ -45,14 +45,13 @@ class ProductExport:
         return {Path("exports/catalog.json"): content.encode("utf-8")}
 ```
 
-Declare both the integration and its file ownership before creating the snapshot
+Declare the integration and its permitted output root before creating the snapshot
 in settings:
 
 ```python
 # shop/settings.py, before configure(globals())
 COMPOSE_INTEGRATIONS = ("catalog.integrations.ProductExport",)
 COMPOSE_EXTERNAL_ARTIFACT_ROOTS = ("exports",)
-COMPOSE_OWNED_ARTIFACT_PATHS = ("exports/catalog.json",)
 ```
 
 Run `python manage.py compose` again. The file appears at
@@ -105,18 +104,18 @@ lookup; do not require the full registry or run database queries in the hook.
 The generated files exist before native `ready()` callbacks execute. A `models` hook receives the restricted view. A `ready` hook receives the native
 Django app registry after earlier ready callbacks; publication finalizes only after
 ready artifacts succeed. Earlier callbacks can read models-phase files through
-`serving.artifact_path(relative)`, which verifies declared ownership and bytes.
+`serving.artifact_path(relative)`, which verifies receipt ownership and bytes.
 Serving readers use the same API; wrap longer work in `serving.receipt_lease()`.
 
 ## Output and input ownership
 
-`external_root` must be one directory name beneath the generated package, such
-as `exports`. The paths returned by `render` are relative to the generated
-package, so include that directory in every key. Every root must appear in
-`COMPOSE_EXTERNAL_ARTIFACT_ROOTS`, and every individual file must appear in
-`COMPOSE_OWNED_ARTIFACT_PATHS`. Content must be bytes. Hooks cannot overwrite
-another hook's files, generated model structure or migrations. Traversal,
-symlinks and file/directory collisions are refused.
+`render` declares exact output ownership through its returned mapping; filenames
+can be discovered from native model facts during the ready phase. Only the root
+needs advance configuration. The [artifact contract](SPEC.md#integration-protocols)
+defines root reservation, path safety, collision checks and receipt ownership.
+The [plain Django example](../examples/shop/catalog/integrations.py) computes its
+ready artifact's filename from the populated model label, then
+[reads it through the receipt](../examples/shop/verify.py) during serving.
 
 File and settings inputs also belong in the snapshot. Declare non-Python source
 files with `COMPOSE_FINGERPRINT_GLOBS` and additional settings with

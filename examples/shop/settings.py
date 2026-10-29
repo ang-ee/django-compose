@@ -19,7 +19,6 @@ COMPOSE_ENV_PREFIXES = ("CATALOG_",)
 COMPOSE_COMMAND_CONTEXT = ("contexts.command_context",)
 COMPOSE_INTEGRATIONS = ("catalog.integrations.ModelSchema", "catalog.integrations.ReadySchema")
 COMPOSE_EXTERNAL_ARTIFACT_ROOTS = ("exports",)
-COMPOSE_OWNED_ARTIFACT_PATHS = ("exports/models.graphql", "exports/ready.graphql")
 ROOT_URLCONF = "urls"
 ALLOWED_HOSTS = ["testserver", "localhost", "127.0.0.1"]
 

@@ -56,7 +56,9 @@ with receipt_lease() as receipt:
     assert receipt is verified_receipt()
     expected = schema(Item)
     assert artifact_path("exports/models.graphql").read_bytes() == expected
-    assert artifact_path("exports/ready.graphql").read_bytes() == expected
+    ready_paths = tuple(path for path in receipt.OWNED_FILES if path.startswith("exports/ready/"))
+    assert len(ready_paths) == 1
+    assert artifact_path(ready_paths[0]).read_bytes() == expected
     assert apps.get_app_config("catalog").schema == expected
 assert Client().get("/catalog/items/").status_code == 200
 asyncio.run(transports())

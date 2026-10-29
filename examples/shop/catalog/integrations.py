@@ -24,4 +24,5 @@ class ReadySchema:
     phase = "ready"
 
     def render(self, composition, models):
-        return {Path("exports/ready.graphql"): schema(models.get_model("catalog", "Item"))}
+        model = models.get_model("catalog", "Item")
+        return {Path(f"exports/ready/{model._meta.label_lower}.graphql"): schema(model)}

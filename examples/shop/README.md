@@ -23,7 +23,9 @@ reviews callback reads the same derived selected closure exposed after configure
 [Catalog's native config](catalog/apps.py) calls `get_user_model()` in ready,
 reads a models-phase artifact, and opts into URL and ASGI contributions.
 [Integrations](catalog/integrations.py) render the same deterministic schema
-from the models-phase view and ready-phase native registry. [verify.py](verify.py)
+from the models-phase view and ready-phase native registry. The ready hook derives
+its filename from the populated model label; serving discovers that path from
+the receipt, with no exact-path configuration. [verify.py](verify.py)
 compares those files with serving bytes under a receipt lease, exercises
 `/catalog/items/`, the `/status` ASGI mount and lifespan startup/shutdown.
 The schema is plain SDL-like text; it needs no GraphQL dependency.

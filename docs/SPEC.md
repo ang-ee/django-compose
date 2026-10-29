@@ -170,7 +170,6 @@ keep ordering and input ownership in one place. See the
 | `COMPOSE_FINGERPRINT_EXCLUDES` | Source exclusion patterns; defaults to `**/tests/**`, `**/migrations/**`, `**/__pycache__/**` |
 | `COMPOSE_FINGERPRINT_SETTINGS` | Additional setting names affecting the build; empty by default |
 | `COMPOSE_EXTERNAL_ARTIFACT_ROOTS` | Permitted integration output directories; empty by default |
-| `COMPOSE_OWNED_ARTIFACT_PATHS` | Explicit integration output files; empty by default |
 | `COMPOSE_TRANSITION_SOURCE` | Explicit transition declarations or dotted pre-setup-safe callable; omission selects default discovery |
 | `COMPOSE_CLOSURE` | Derived selected Closure, available to contribution callbacks |
 | `COMPOSE_SNAPSHOT` | Derived Snapshot used by lifecycle configurations |
@@ -286,10 +285,14 @@ competing output names are refused.
 
 Artifact hooks receive `ModelsView.composition` and `get_model(label, name)`,
 backed by native lookup with `require_ready=False`; full registry readiness
-belongs to `ready()` callbacks. Each file must be bytes, lie beneath the hook's
-single declared output root, and appear in `COMPOSE_OWNED_ARTIFACT_PATHS`.
-Traversal, symlinks, competing ownership and generated structure/history
-collisions fail. Models-phase hooks receive `ModelsView`; ready-phase hooks receive the native
+belongs to `ready()` callbacks. Each file must be bytes and lie strictly beneath
+the hook's single output root in `COMPOSE_EXTERNAL_ARTIFACT_ROOTS`. Each hook's
+render mapping is its exact file-ownership declaration; filenames may be
+computed from populated model facts in the ready phase. The build records those
+paths and hashes in `Receipt.OWNED_FILES`, which owns serving lookup and cleanup.
+Roots cannot claim native app labels, retained history or core structure. Traversal, symlinks, file/directory collisions, overwriting unowned
+files, competing hooks across either phase and migration/history collisions fail.
+Models-phase hooks receive `ModelsView`; ready-phase hooks receive the native
 registry in the final ready callback, before publication. See [build integrations](extensions.md) for an example.
 
 ## Generated output and freshness
@@ -430,7 +433,7 @@ native owner. `active_requirements(iterable_of_strings)` and the index method
 `extra=""`. Metadata inspection does not activate apps.
 
 `serving.verified_receipt()` returns the process startup receipt;
-`serving.artifact_path(relative)` validates declaration, receipt ownership, safe
+`serving.artifact_path(relative)` validates receipt ownership, safe
 path and current hash before returning a Path. During build-ready callbacks it
 supports models-phase artifacts before final publication. Disabled history uses
 `django_compose.history.History_<label>` native configs, generated dynamically from
