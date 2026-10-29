@@ -13,6 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
+from django.conf import global_settings
 from django.core.exceptions import ImproperlyConfigured
 
 COMPILER = "django-compose:1"
@@ -158,7 +159,11 @@ def snapshot(
     authored_migration_modules: Mapping[str, str | None] | None = None,
     caller: Mapping[str, Any] | None = None,
 ) -> Snapshot:
-    """Hash source bytes and declared settings, without importing integrations."""
+    """Hash sources, compiler settings and explicit hook settings without model imports.
+
+    Compiler inputs always participate with their effective defaults. Hook settings
+    are the union of settings_keys and COMPOSE_FINGERPRINT_SETTINGS in namespace.
+    """
     selected = tuple(entries)
     normalized = enabled_apps(selected)
     files: dict[str, str] = {}
@@ -180,13 +185,26 @@ def snapshot(
         source = _module_source(module)
         files[f"integration:{module}"] = hashlib.sha256(source.read_bytes()).hexdigest()
     values = namespace or {}
+    output_dir = values.get("COMPOSE_OUTPUT_DIR")
+    effective_settings = {
+        "COMPOSE_OUTPUT_DIR": Path(output_dir).as_posix() if output_dir is not None else None,
+        "COMPOSE_OUTPUT_MODULE": values.get("COMPOSE_OUTPUT_MODULE", "runtime"),
+        "COMPOSE_EXTERNAL_ARTIFACT_ROOTS": tuple(
+            sorted(set(values.get("COMPOSE_EXTERNAL_ARTIFACT_ROOTS", ())))
+        ),
+        "COMPOSE_OWNED_ARTIFACT_PATHS": tuple(sorted(set(values.get("COMPOSE_OWNED_ARTIFACT_PATHS", ())))),
+        "DEFAULT_AUTO_FIELD": values.get("DEFAULT_AUTO_FIELD", global_settings.DEFAULT_AUTO_FIELD),
+    }
+    hook_settings = set(settings_keys) | set(values.get("COMPOSE_FINGERPRINT_SETTINGS", ()))
+    for key in sorted(hook_settings):
+        effective_settings.setdefault(key, values.get(key))
     return Snapshot(
         tuple(normalized),
         tuple(sorted(files.items())),
         integrations,
         tuple(sorted(transitions)),
         _freeze(authored_migration_modules or {}),
-        _freeze({key: values.get(key) for key in sorted(settings_keys)}),
+        _freeze(effective_settings),
         _freeze(caller or {}),
     )
 

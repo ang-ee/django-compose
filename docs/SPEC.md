@@ -90,7 +90,13 @@ Create one immutable `Snapshot` after host settings composition and before
 finalizing `INSTALLED_APPS`. It records selected app identities/configs/paths;
 sorted source Python and declared glob digests; dotted integration paths and
 module-byte digests; transition origins/digests; authored migration mappings;
-declared effective fingerprint settings; caller facts; and compiler identity.
+effective compiler settings; declared hook settings; caller facts; and compiler identity.
+Compiler settings always include `COMPOSE_OUTPUT_DIR`, `COMPOSE_OUTPUT_MODULE`,
+`COMPOSE_EXTERNAL_ARTIFACT_ROOTS`, `COMPOSE_OWNED_ARTIFACT_PATHS` and
+`DEFAULT_AUTO_FIELD`, using native/compiler defaults when omitted. Output paths
+accept `Path` or string values with the same normalized fingerprint. Hook extras
+are explicit: the union of `snapshot(settings_keys=...)` and the namespace's
+`COMPOSE_FINGERPRINT_SETTINGS`. Deployment settings are otherwise excluded.
 Source scanning excludes web, tests, migrations and bytecode caches. It imports
 no model, integration or build module. Integration classes may therefore import
 models when later loaded in phase 2. Pre-setup declarations are ordinary settings,

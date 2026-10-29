@@ -162,3 +162,69 @@ assert not any(name == "probeapp" or name.startswith("probeapp.") for name in sy
         [sys.executable, "-B", "-c", script], env=environment, capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("key", "first", "changed"),
+    [
+        ("DEFAULT_AUTO_FIELD", "django.db.models.BigAutoField", "django.db.models.AutoField"),
+        ("COMPOSE_OUTPUT_MODULE", "runtime", "other_runtime"),
+        ("COMPOSE_OUTPUT_DIR", "runtime", "other_runtime"),
+        ("COMPOSE_EXTERNAL_ARTIFACT_ROOTS", (), ("permissions",)),
+        ("COMPOSE_OWNED_ARTIFACT_PATHS", (), ("permissions/schema.zed",)),
+    ],
+)
+def test_compiler_settings_always_change_snapshot_digest(key, first, changed):
+    before = snapshot((), namespace={key: first})
+    after = snapshot((), namespace={key: changed})
+    assert before.digest() != after.digest()
+    assert key in before.settings
+
+
+def test_compiler_defaults_and_normalized_paths_produce_identical_build_serve_inputs(tmp_path):
+    from django.conf import global_settings
+
+    explicit_defaults = {
+        "DEFAULT_AUTO_FIELD": global_settings.DEFAULT_AUTO_FIELD,
+        "COMPOSE_OUTPUT_MODULE": "runtime",
+        "COMPOSE_OUTPUT_DIR": None,
+        "COMPOSE_EXTERNAL_ARTIFACT_ROOTS": [],
+        "COMPOSE_OWNED_ARTIFACT_PATHS": [],
+    }
+    assert snapshot(()).digest() == snapshot((), namespace=explicit_defaults).digest()
+    build = snapshot(
+        (),
+        namespace={
+            "COMPOSE_OUTPUT_DIR": tmp_path / "runtime",
+            "COMPOSE_EXTERNAL_ARTIFACT_ROOTS": ["permissions", "resources"],
+        },
+    )
+    serve = snapshot(
+        (),
+        namespace={
+            "COMPOSE_OUTPUT_DIR": str(tmp_path / "runtime"),
+            "COMPOSE_EXTERNAL_ARTIFACT_ROOTS": ["resources", "permissions"],
+        },
+    )
+    assert build.digest() == serve.digest()
+    assert build.settings["COMPOSE_OUTPUT_DIR"] == (tmp_path / "runtime").as_posix()
+
+
+def test_hook_settings_union_explicit_keys_and_namespace_declarations():
+    namespace = {"COMPOSE_FINGERPRINT_SETTINGS": ["HOOK_DEPTH"], "HOOK_DEPTH": 3, "OTHER": 1}
+    original = snapshot((), namespace=namespace, settings_keys=("OTHER",))
+    assert original.settings["HOOK_DEPTH"] == 3
+    assert original.settings["OTHER"] == 1
+    namespace["HOOK_DEPTH"] = 4
+    assert original.digest() != snapshot((), namespace=namespace, settings_keys=("OTHER",)).digest()
+    namespace["HOOK_DEPTH"] = 3
+    namespace["OTHER"] = 2
+    assert original.digest() != snapshot((), namespace=namespace, settings_keys=("OTHER",)).digest()
+
+
+def test_explicit_hook_key_cannot_bypass_compiler_path_normalization(tmp_path):
+    values = {"COMPOSE_OUTPUT_DIR": tmp_path / "runtime"}
+    assert (
+        snapshot((), namespace=values).digest()
+        == snapshot((), namespace=values, settings_keys=("COMPOSE_OUTPUT_DIR",)).digest()
+    )
