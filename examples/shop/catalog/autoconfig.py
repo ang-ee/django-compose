@@ -1,3 +1,6 @@
-"""Defaults contributed by the reusable catalog app before Django setup."""
+"""Static defaults, additive configuration and a declared environment overlay."""
 
-SETTINGS = {"CATALOG_PAGE_SIZE": 20}
+SETTINGS = {
+    "CATALOG_PAGE_SIZE": 20,
+    "SHOP_CONTRIBUTORS:append": ["catalog"],
+}

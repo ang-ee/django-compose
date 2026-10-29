@@ -27,6 +27,7 @@ from django_compose.declarations import ModelDeclaration
 
 class ProductExport:
     external_root = "exports"
+    phase = "models"
 
     def model_declaration(self, composition, source):
         if source._meta.label_lower != "catalog.product":
@@ -65,7 +66,7 @@ locates integration module files without importing them.
 | Protocol in `django_compose.declarations` | Required interface | When it runs |
 | --- | --- | --- |
 | `ModelDeclarationHook` | `model_declaration(composition, source) -> ModelDeclaration` | Before rendering each generated model |
-| `ArtifactHook` | `external_root: str`; `render(composition, models) -> Mapping[Path, bytes]` | After concrete model registration, before `ready()` callbacks |
+| `ArtifactHook` | `external_root: str`; `phase: Literal["models", "ready"]`; `render(composition, models) -> Mapping[Path, bytes]` | Models phase after concrete registration; ready phase in the final ready callback |
 | `MigrationPolicy` | `retired_primary_keys(model, alias) -> Iterable[Any]` | Destructive migration checks |
 
 A class can implement any combination. Duplicate integration classes, classes
@@ -101,9 +102,11 @@ Artifact rendering receives a restricted `ModelsView` with `composition` and
 `get_model(label, name)`. Generated concrete classes are registered, but Django
 has not yet marked the complete model registry ready. Use this view for model
 lookup; do not require the full registry or run database queries in the hook.
-The generated files exist before native `ready()` callbacks execute. There is
-one artifact-rendering stage; a separate `ready` artifact phase is not currently
-implemented.
+The generated files exist before native `ready()` callbacks execute. A `models` hook receives the restricted view. A `ready` hook receives the native
+Django app registry after earlier ready callbacks; publication finalizes only after
+ready artifacts succeed. Earlier callbacks can read models-phase files through
+`serving.artifact_path(relative)`, which verifies declared ownership and bytes.
+Serving readers use the same API; wrap longer work in `serving.receipt_lease()`.
 
 ## Output and input ownership
 

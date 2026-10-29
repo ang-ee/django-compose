@@ -35,7 +35,7 @@ project/
 └── runtime/                 # created by compose; importable as runtime
 ```
 
-Both `__init__.py` files start empty. Keep the generated `runtime` package on the
+The authored `__init__.py` files start empty. Keep the generated `runtime` package on the
 Python import path in every process. Placing it beside `manage.py` does that for
 these commands; deployment must preserve the same importable package.
 
@@ -230,10 +230,10 @@ daily workflow and which files must be preserved.
 
 ## Serve the project
 
-Start Django's development server normally, with automatic reload disabled:
+Start Django's development server through the package launcher:
 
 ```sh
-python manage.py runserver --noreload
+python manage.py runserver
 ```
 
 Open [the products endpoint](http://127.0.0.1:8000/products/). After the example's
@@ -243,11 +243,28 @@ first insert into a fresh database, it returns:
 {"products": [{"id": 1, "title": "Notebook"}]}
 ```
 
-This is ordinary Django URL routing and serving. The current package does not
-recompose automatically when Django reloads. After changing declarations, stop
-the server, run `compose`, author/apply migrations if the model state changed,
-then restart it. Run `compose --check` before restarting when validating that
-both generated output and migration history match the sources.
+The launcher recomposes before each reloader child starts. On composition failure
+it watches the reported inputs and retries after repair. Schema changes still need
+reviewed native migrations. `compose --if-stale` skips setup when output is fresh;
+`compose --wait 5` bounds the writer's wait for an existing reader or writer.
+
+Loaders reading YAML or environment files should report candidates **before**
+reading, including missing files, so cold-start failures can recover:
+
+```python
+from django_compose.autoreload import report_inputs
+report_inputs(files=(BASE_DIR / "settings.yaml", BASE_DIR / ".env"))
+```
+
+`COMPOSE_WATCH_PATHS` accepts file paths and `(directory, glob)` pairs. Those
+normalized declarations feed native Django reloaders, including creation/deletion
+tracking for initially absent files and empty globs. `compose --report-inputs FD`
+writes a JSON input report to an already-open file descriptor even on failure.
+
+`COMPOSE_COMMAND_CONTEXT` is an ordered sequence of dotted context-manager
+factories accepting `(command, argv)`. The launcher enters them after successful
+Django setup, around command execution; help/version and settings-free paths do
+not enter them. See the [example context](../examples/shop/contexts.py).
 
 ## Choose fingerprint inputs
 
@@ -290,7 +307,10 @@ missing lock. Configuration failures and errors through the package launcher
 release startup ownership. If bare `django.setup()` fails, terminate that process;
 retrying a partially populated native registry is unsupported.
 
-The lock ends after startup; it does not protect the full serving-child lifetime.
+Ordinary startup ownership ends after the final ready callback; reloader children
+hold the shared lock for their lifetime. `serving.receipt_lease()` holds it around
+a longer operation and yields the exact startup-verified `Receipt`. It refuses a
+receipt changed since startup.
 It coordinates processes sharing the same filesystem lock domain, not separate
 hosts with unrelated copies. Deploy immutable application artifacts accordingly.
 

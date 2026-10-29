@@ -52,3 +52,8 @@ updating it; ordinary package-index releases require replacing the direct
 references with verified published versions. The [quick start](quickstart.md)
 uses only the base installation. Contributor tooling and checks are documented in
 [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+The published django-stubs release does not yet expose all native extension APIs
+used by the verified forks. Removing direct Git references is a release blocker;
+no compatible published-only set has been verified. The package remains local and
+unreleased. Do not replace these pins by copying dependency internals locally.
