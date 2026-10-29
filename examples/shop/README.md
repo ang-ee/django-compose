@@ -12,10 +12,14 @@ both local app distributions before composing. Then, from this directory:
 
 ```sh
 uv run --project ../.. --no-sync python verify.py
+uv run --project ../.. --no-sync python manage.py verify_context
+uv run --project ../.. --no-sync python manage.py verify_context --database reporting
 ```
 
 [settings.py](settings.py) composes app selection, additive defaults, a declared
-`CATALOG_` environment overlay and [post-setup command contexts](contexts.py).
+`CATALOG_` environment overlay and [post-parse command contexts](contexts.py).
+The context command checks default and selected native database options; the
+reviews callback reads the same derived selected closure exposed after configure.
 [Catalog's native config](catalog/apps.py) calls `get_user_model()` in ready,
 reads a models-phase artifact, and opts into URL and ASGI contributions.
 [Integrations](catalog/integrations.py) render the same deterministic schema

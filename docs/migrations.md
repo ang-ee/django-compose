@@ -184,3 +184,8 @@ if authoring or recording fails. Remove completed transition declarations first;
 a declaration that would rebind is refused. Read the command's `--help` and
 review its scope before use. Neither operation is part of ordinary development,
 build cleanup or deployment.
+
+A fresh clone may retain only the generated package's durable migration history.
+The [first-compose scaffold contract](SPEC.md#generated-output-and-freshness)
+defines the accepted layout and preserves history bytes and modes, including
+history for disabled apps. No adoption command or foreign generated marker is needed.

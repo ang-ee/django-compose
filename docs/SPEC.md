@@ -110,8 +110,16 @@ project settings, normally with `globals()`. It resolves authored
 `INSTALLED_APPS` through `enabled_apps`, applies app contributions, creates one
 immutable snapshot and projects native app configurations and migration modules.
 Authored migration overrides, including `None`, apply after generated defaults.
-`COMPOSE_ROOTS` and `COMPOSE_SNAPSHOT` are derived and refused on entry.
+`COMPOSE_ROOTS`, `COMPOSE_SNAPSHOT` and `COMPOSE_CLOSURE` are derived and refused on entry.
 `COMPOSE_ROOTS` preserves the authored app/config strings and their order.
+`COMPOSE_CLOSURE` is the same selected Closure available before app contribution
+callbacks and after configuration. `app_entries` is a tuple of immutable native
+identity descriptors (`name`, `label`, `path`, `config`, `entry`); `app_configs`
+retains selection-time native AppConfig instances for app-owned behavior. They
+are not the later populated registry's config objects. `dependencies` is the
+selected direct graph, also frozen in `Snapshot.dependencies` and fingerprinted.
+`conf.setting_name(key)` projects a native yamlconf key's root by removing colon,
+then dotted suffixes; it does not normalize or validate names.
 
 Enabled apps' optional `autoconfig.py` modules declare `SETTINGS` mappings and
 `settings(namespace)` callbacks returning mappings. Dependency order determines
@@ -156,7 +164,7 @@ keep ordering and input ownership in one place. See the
 | `COMPOSE_OUTPUT_DIR` | Project-selected generated package directory; required for building |
 | `COMPOSE_OUTPUT_MODULE` | Import path for that directory; defaults to `"runtime"` |
 | `COMPOSE_WATCH_PATHS` | Files and `(directory, glob)` pairs additionally watched by native reloaders |
-| `COMPOSE_COMMAND_CONTEXT` | Ordered dotted post-setup `(command, argv)` context-manager factories; empty by default |
+| `COMPOSE_COMMAND_CONTEXT` | Ordered dotted post-setup/post-parse `(command, argv, options)` context-manager factories; empty by default |
 | `COMPOSE_INTEGRATIONS` | Ordered dotted integration class paths; empty by default |
 | `COMPOSE_FINGERPRINT_GLOBS` | Additional per-app source globs; empty by default |
 | `COMPOSE_FINGERPRINT_EXCLUDES` | Source exclusion patterns; defaults to `**/tests/**`, `**/migrations/**`, `**/__pycache__/**` |
@@ -164,13 +172,14 @@ keep ordering and input ownership in one place. See the
 | `COMPOSE_EXTERNAL_ARTIFACT_ROOTS` | Permitted integration output directories; empty by default |
 | `COMPOSE_OWNED_ARTIFACT_PATHS` | Explicit integration output files; empty by default |
 | `COMPOSE_TRANSITION_SOURCE` | Explicit transition declarations or dotted pre-setup-safe callable; omission selects default discovery |
+| `COMPOSE_CLOSURE` | Derived selected Closure, available to contribution callbacks |
 | `COMPOSE_SNAPSHOT` | Derived Snapshot used by lifecycle configurations |
 
 Mandatory inputs include resolved app/config identities, source Python and
 extra-glob bytes, selected config MRO implementation modules, integration modules,
 transition records/bytes, `DEFAULT_AUTO_FIELD`, `AUTH_USER_MODEL`, authored
 migration mappings, every `COMPOSE_*` value except derived `COMPOSE_ROOTS`,
-`COMPOSE_SNAPSHOT` and execution-only `COMPOSE_COMMAND_CONTEXT`, and compiler identity. Built-in/frozen config owners use a
+`COMPOSE_SNAPSHOT`, `COMPOSE_CLOSURE` and execution-only `COMPOSE_COMMAND_CONTEXT`, and compiler identity. Built-in/frozen config owners use a
 deterministic interpreter implementation/version identity instead of file bytes.
 A redundant root list cannot alter the digest of an unchanged resolved selection.
 
@@ -215,8 +224,13 @@ launcher is the native reloader parent: compose first, then start the serving ch
 on failure watch reported candidates and retry after changes. Settings loaders
 call `autoreload.report_inputs(files=(), globs=())` before reads. Files may be
 absent and globs initially empty. `COMPOSE_WATCH_PATHS` extends the same owner.
-`COMPOSE_COMMAND_CONTEXT` factories receive `(command, tuple(argv))` after native
-setup around command dispatch; settings-free/help/version paths skip them.
+`COMPOSE_COMMAND_CONTEXT` factories receive `(command, tuple(argv), options)`
+after successful native setup and parsing, around `execute`. `options` is a
+read-only shallow copy of native parsed options, including default or explicitly
+selected `database` where that command declares it. Native dispatch owns parser
+errors and connection cleanup. Settings-free/help/version paths skip contexts.
+A custom `run_from_argv` participates by calling `self.execute`; bypassing execute
+also bypasses these contexts.
 Direct Django launchers must set composition mode themselves before settings
 load; migration commands require it to be absent.
 
@@ -317,8 +331,13 @@ Every record mutation uses the common output lock. Writers invalidate first,
 write guarded files atomically through `GeneratedTree`, then finalize last.
 A failed build remains `IN_PROGRESS`; reverting source bytes does not revive it.
 Stale cleanup removes only previously recorded generated paths. Normal build
-and clean preserve migration directories and unowned files, and refuse foreign,
-unmarked or symlinked trees. Check mode neither creates output nor changes
+and clean preserve migration directories and unowned files, and refuse foreign
+or symlinked trees. First composition also admits a migration-only scaffold:
+label directories containing native `migrations/` subtrees, with optional zero-byte
+root/label `__init__.py` files. It preserves every history byte and file mode,
+including disabled history graphs. Unknown files, symlinks and special files fail;
+no foreign marker knowledge is required. This permits a fresh clone containing
+only durable reviewed migration history to compose before serving. Check mode neither creates output nor changes
 existing bytes. Preserve native history as explained in [packaging](packaging.md).
 
 ## Native history and transitions

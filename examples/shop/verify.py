@@ -47,6 +47,10 @@ assert any(
     value.name == "compose-example-catalog" for value in index.active_requirements("compose-example-reviews")
 )
 assert settings.SHOP_CONTRIBUTORS == ["catalog", "reviews"]
+closure = settings.COMPOSE_CLOSURE
+assert tuple(entry.name for entry in closure.app_entries) == settings.SHOP_SELECTED_APPS
+assert closure.dependencies == settings.COMPOSE_SNAPSHOT.dependencies
+assert all(config is not apps.get_app_config(config.label) for config in closure.app_configs)
 assert "catalog" in {entry.name for entry in settings.COMPOSE_SNAPSHOT.entries}
 with receipt_lease() as receipt:
     assert receipt is verified_receipt()

@@ -95,7 +95,7 @@ native app strings or explicit AppConfig paths. Optional
 [addon selection](addons.md) uses `COMPOSE_ADDON_GROUP`; without it, native
 `requires_apps` dependencies still apply. Installation alone enables no apps.
 
-The function owns derived `COMPOSE_ROOTS` and `COMPOSE_SNAPSHOT`; projects and
+The function owns derived `COMPOSE_ROOTS`, `COMPOSE_SNAPSHOT` and `COMPOSE_CLOSURE`; projects and
 contributions must not set them. `COMPOSE_ROOTS` preserves the authored app strings
 and explicit AppConfig paths in their original order. It snapshots the authored
 migration mapping, then projects retained generated history with authored overrides last. Set
@@ -262,9 +262,10 @@ tracking for initially absent files and empty globs. `compose --report-inputs FD
 writes a JSON input report to an already-open file descriptor even on failure.
 
 `COMPOSE_COMMAND_CONTEXT` is an ordered sequence of dotted context-manager
-factories accepting `(command, argv)`. The launcher enters them after successful
-Django setup, around command execution; help/version and settings-free paths do
-not enter them. See the [example context](../examples/shop/contexts.py).
+factories accepting `(command, argv, options)`. The launcher enters them after
+successful Django setup and native parsing. The read-only native options include
+default and selected database choices. See the [dispatch contract](SPEC.md#setup-lifecycle)
+for custom command cooperation and native error/cleanup ownership. See the [example context](../examples/shop/contexts.py).
 
 ## Choose fingerprint inputs
 
@@ -272,7 +273,7 @@ The snapshot is immutable and `configure` creates it once after all contribution
 Author additional inputs before calling `configure`. It includes resolved app/config
 identities, source and configuration implementation bytes, integration and transition inputs, `DEFAULT_AUTO_FIELD`,
 `AUTH_USER_MODEL`, authored migration mappings, and `COMPOSE_*` values. Derived
-`COMPOSE_ROOTS`, `COMPOSE_SNAPSHOT` and execution-only `COMPOSE_COMMAND_CONTEXT`
+`COMPOSE_ROOTS`, `COMPOSE_SNAPSHOT`, `COMPOSE_CLOSURE` and execution-only `COMPOSE_COMMAND_CONTEXT`
 are excluded.
 
 Deployment secrets such as `SECRET_KEY` and database credentials do not affect

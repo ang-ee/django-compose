@@ -1,12 +1,19 @@
-"""The launcher enters this only after native setup, around command execution."""
+"""Parsed native command options are available after successful Django setup."""
 
 from contextlib import contextmanager
 
 from django.apps import apps
 
+ACTIVE_OPTIONS = None
+
 
 @contextmanager
-def command_context(command, argv):
+def command_context(command, argv, options):
+    global ACTIVE_OPTIONS
     assert apps.get_model("catalog", "Item")._meta.abstract is False
     assert command == argv[1]
-    yield
+    ACTIVE_OPTIONS = options
+    try:
+        yield
+    finally:
+        ACTIVE_OPTIONS = None
