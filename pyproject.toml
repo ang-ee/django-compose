@@ -14,6 +14,7 @@ authors = [{name = "Angee, Inc.", email = "hi@angee.ai"}]
 dependencies = ["django>=6.1.2,<6.2"]
 
 [project.optional-dependencies]
+addons = ["packaging>=26"]
 typing = [
     "django-stubs[compatible-mypy] @ git+https://github.com/ang-ee/django-stubs.git@423ed850e5f2d7ea9e67f3e0f9e8bee4be215988",
     "django-stubs-ext @ git+https://github.com/ang-ee/django-stubs.git@423ed850e5f2d7ea9e67f3e0f9e8bee4be215988#subdirectory=ext",
