@@ -150,7 +150,7 @@ def execute(argv: list[str] | None = None) -> None:
         return
     report_fd = None
     old_wait = os.environ.get("DJANGO_COMPOSE_WAIT")
-    from django_compose.serving import _close_startup_verification
+    from django_compose.serving import _close_build, _close_startup_verification
 
     try:
         if command == "compose":
@@ -185,11 +185,14 @@ def execute(argv: list[str] | None = None) -> None:
                     return
         _Utility(arguments).execute()
     finally:
-        _fallback_inputs()
-        if report_fd is not None:
-            write_report(report_fd)
-        _close_startup_verification()
-        if old_wait is None:
-            os.environ.pop("DJANGO_COMPOSE_WAIT", None)
-        else:
-            os.environ["DJANGO_COMPOSE_WAIT"] = old_wait
+        try:
+            _fallback_inputs()
+            if report_fd is not None:
+                write_report(report_fd)
+        finally:
+            _close_build()
+            _close_startup_verification()
+            if old_wait is None:
+                os.environ.pop("DJANGO_COMPOSE_WAIT", None)
+            else:
+                os.environ["DJANGO_COMPOSE_WAIT"] = old_wait

@@ -75,3 +75,41 @@ def test_native_watchman_glob_subscription_for_empty_pattern(tmp_path: Path) -> 
     reloader._subscribe.assert_called_once_with(
         tmp_path, f"glob:{tmp_path}", ["anyof", ["match", "*.zed", "wholename"]]
     )
+
+
+def test_large_input_report_uses_regular_descriptor_without_pipe_backpressure(tmp_path: Path) -> None:
+    import json
+    import subprocess
+    import sys
+
+    target = tmp_path / "report.json"
+    script = """import sys
+from django_compose.autoreload import report_inputs, write_report
+report_inputs(files=["/inputs/" + str(index) + ".yaml" for index in range(20000)])
+write_report(int(sys.argv[1]))
+"""
+    with target.open("w+") as stream:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(stream.fileno())],
+            pass_fds=(stream.fileno(),),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    assert result.returncode == 0, result.stderr
+    assert len(json.loads(target.read_text())["files"]) == 20000
+    assert target.stat().st_size > 65536
+
+
+@pytest.mark.parametrize("exists", [True, False])
+def test_native_watchman_subscription_delivers_creation_and_deletion(tmp_path: Path, exists: bool) -> None:
+    candidate = tmp_path / "permission.zed"
+    if exists:
+        candidate.touch()
+    reloader = WatchmanReloader()
+    reloader.client = Mock()
+    subscription = f"glob:{tmp_path}"
+    reloader.client.getSubscription.return_value = [{"subscription": subscription, "files": [candidate.name]}]
+    reloader.notify_file_changed = Mock()
+    reloader._check_subscription(subscription)
+    reloader.notify_file_changed.assert_called_once_with(candidate)

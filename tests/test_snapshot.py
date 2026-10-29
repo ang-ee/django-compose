@@ -45,11 +45,11 @@ def test_snapshot_fingerprints_files_and_settings(tmp_path):
 def test_receipt_verify_checks_content_and_interruption(tmp_path, monkeypatch):
     root = tmp_path / "generated"
     root.mkdir()
+    (root / ".compose.lock").touch()
     snap = snapshot(())
     path = root / "content.txt"
     path.write_bytes(b"content")
     receipt = Receipt(
-        snap.digest(),
         ("app",),
         (),
         snap.digest(),
@@ -63,9 +63,7 @@ def test_receipt_verify_checks_content_and_interruption(tmp_path, monkeypatch):
     path.write_bytes(b"changed")
     with pytest.raises(ImproperlyConfigured, match="altered"):
         verify(snap, "generated")
-    (root / "__init__.py").write_text(
-        Receipt("g", (), (), snap.digest(), {}, snap.compiler, (), True).source()
-    )
+    (root / "__init__.py").write_text(Receipt((), (), snap.digest(), {}, snap.compiler, (), True).source())
     with pytest.raises(ImproperlyConfigured, match="interrupted"):
         verify(snap, "generated")
     sys.modules.pop("generated", None)
@@ -76,11 +74,11 @@ def test_settings_projection_keeps_authored_entries_and_none():
         Entry("app", "app", "app.apps.Config", "/app", "app.apps.Config"),
         Entry("plain", "plain", "django.apps.AppConfig", "/plain", "plain"),
     )
-    receipt = Receipt("g", ("app", "old"), (), "d", {}, "c", ("app",))
+    receipt = Receipt(("app", "old"), (), "d", {}, "c", ("app",))
     assert installed_apps(entries, receipt, "generated") == (
         "generated.app.apps.GeneratedConfig",
         "plain",
-        "generated.history.History_old",
+        "django_compose.history.old",
     )
     assert migration_modules({"app": None}, receipt, "generated") == {
         "app": None,

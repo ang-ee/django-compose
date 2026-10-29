@@ -262,7 +262,7 @@ configure(globals())
             time.sleep(1.2)
             (tmp_path / "project.yaml").write_text("broken: [")
             wait_for(
-                lambda: log_path.read_text().count("malformed YAML") >= 2,
+                lambda: log_path.read_text().count("waiting for input changes") >= 2,
                 "subsequent compose failure not reported",
             )
             time.sleep(1.2)
@@ -302,7 +302,9 @@ def test_contexts_unwind_after_native_command_failure_and_logging_runs_once(tmp_
     print("logging-configured")
 """)
     settings = tmp_path / "alternate.py"
-    settings.write_text(settings.read_text() + '\nLOGGING_CONFIG = "plain.logging.configure"\n')
+    settings.write_text(
+        settings.read_text() + '\nLOGGING_CONFIG = "plain.logging.configure"\nLOGGING = {"version": 1}\n'
+    )
     command = tmp_path / "plain" / "management" / "commands" / "probe.py"
     command.write_text(
         command.read_text().replace('print("dispatched")', 'raise RuntimeError("command failed")')
@@ -323,4 +325,44 @@ def test_invalid_wait_refused_before_settings(tmp_path: Path, seconds: str) -> N
     result = invoke(tmp_path, "compose", f"--wait={seconds}", "--settings=does_not_exist")
     assert result.returncode != 0
     assert "wait must be finite and nonnegative" in result.stderr
+    assert "No module named" not in result.stderr
+
+
+def test_if_stale_fresh_skips_native_setup(tmp_path: Path) -> None:
+    project(tmp_path)
+    (tmp_path / "plain" / "apps.py").write_text("""import os
+from django.apps import AppConfig
+class Config(AppConfig):
+    name = "plain"
+    def ready(self):
+        if os.environ.get("FAIL_SETUP"): raise RuntimeError("setup was called")
+""")
+    (tmp_path / "composition.py").write_text("""from pathlib import Path
+SECRET_KEY = "test"
+INSTALLED_APPS = ["plain.apps.Config"]
+COMPOSE_OUTPUT_DIR = Path(__file__).parent / "runtime"
+from django_compose.conf import configure
+configure(globals())
+""")
+    arguments = ("compose", "--settings=composition", f"--pythonpath={tmp_path}")
+    first = invoke(tmp_path, *arguments)
+    assert first.returncode == 0, first.stderr
+    fresh = invoke(tmp_path, *arguments, "--if-stale", env={"FAIL_SETUP": "1"})
+    assert fresh.returncode == 0, fresh.stderr
+    assert "Composition is current" in fresh.stdout
+    assert "Composition lock:" in fresh.stdout
+
+
+def test_native_settings_free_command_stays_settings_free(tmp_path: Path) -> None:
+    destination = tmp_path / "project"
+    destination.mkdir()
+    result = invoke(tmp_path, "startproject", "demo", str(destination))
+    assert result.returncode == 0, result.stderr
+    assert (destination / "manage.py").is_file()
+
+
+def test_migration_mode_refused_before_settings(tmp_path: Path) -> None:
+    result = invoke(tmp_path, "migrate", "--settings=does_not_exist", env={"DJANGO_COMPOSE_MODE": "write"})
+    assert result.returncode != 0
+    assert "Migration commands require serving mode" in result.stderr
     assert "No module named" not in result.stderr
