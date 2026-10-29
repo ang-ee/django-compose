@@ -474,3 +474,50 @@ def settings(namespace):
     assert ns["LOGGING"]["handlers"]["console"]["class"] == "logging.StreamHandler"
     assert ns["CALLBACK_OPTIONS"] == {"nested": [{"project"}]}
     assert ns["ADDON_VALUE"] == 1
+
+
+@pytest.mark.parametrize("template", ["{TASK_INPUT}", ["{TASK_INPUT}"], {"nested": ["{TASK_INPUT}"]}])
+@pytest.mark.parametrize("retained_history", [False, True])
+def test_native_loader_handoff_preserves_environment_reference_evidence(project, template, retained_history):
+    from types import ModuleType
+
+    import django_yamlconf
+
+    app, ns = project
+    ns["INSTALLED_APPS"] = [app()]
+    ns["COMPOSE_FINGERPRINT_SETTINGS"] = ["CUSTOM_INPUT"]
+    settings = ModuleType("loader.settings")
+    settings.__dict__.update(ns)
+    attributes = {}
+    django_yamlconf.set_attr_value(attributes, settings, "loader", "TASK_INPUT", "default")
+    django_yamlconf.set_attr_value(attributes, settings, "**ENVIRONMENT**", "TASK_INPUT", "environment")
+    django_yamlconf.set_attr_value(attributes, settings, "loader", "CUSTOM_INPUT", template)
+    if retained_history:
+        django_yamlconf.set_attr_value(attributes, settings, "later-loader", "CUSTOM_INPUT", "constant")
+    conf.expand_attribute_refs(attributes)
+    django_yamlconf.inject_attr(attributes, settings)
+    evidence = (
+        attributes["CUSTOM_INPUT"]["history"][0][0]
+        if retained_history
+        else attributes["CUSTOM_INPUT"]["value"]
+    )
+    assert evidence == template
+    ns.update(vars(settings))
+    assert ns["_YAMLCONF_ATTRIBUTES"] is attributes
+    with pytest.raises(ImproperlyConfigured, match="CUSTOM_INPUT.*environment.*TASK_INPUT"):
+        conf.configure(ns)
+
+
+def test_native_loader_adapter_preserves_opaque_values_and_template_containers():
+    import django_yamlconf
+
+    attributes = {}
+    django_yamlconf.add_attr_info(attributes, "BASE_DIR", "/project", "loader")
+    django_yamlconf.add_attr_info(attributes, "CUSTOM_INPUT", {"nested": ["{BASE_DIR}/data"]}, "loader")
+    django_yamlconf.add_attr_info(attributes, "LOGGING", {"stream": sys.stderr}, "loader")
+    original = attributes["CUSTOM_INPUT"]["value"]
+    conf.expand_attribute_refs(attributes)
+    assert attributes["CUSTOM_INPUT"]["value"] is original
+    assert original == {"nested": ["{BASE_DIR}/data"]}
+    assert attributes["CUSTOM_INPUT"]["evalue"] == {"nested": ["/project/data"]}
+    assert attributes["LOGGING"]["evalue"]["stream"] is sys.stderr

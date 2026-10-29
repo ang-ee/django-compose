@@ -293,3 +293,35 @@ retrying a partially populated native registry is unsupported.
 The lock ends after startup; it does not protect the full serving-child lifetime.
 It coordinates processes sharing the same filesystem lock domain, not separate
 hosts with unrelated copies. Deploy immutable application artifacts accordingly.
+
+## Native yamlconf loader handoff
+
+A deployment loader that prepares native django-yamlconf attribute records before
+`configure()` must preserve reference templates. Use
+`django_compose.conf.expand_attribute_refs(attributes)` in place of upstream
+`django_yamlconf.expand_attribute_refs(attributes)`, then inject the same records:
+
+```python
+from django_compose.conf import configure, expand_attribute_refs
+import django_yamlconf
+
+# The loader has populated native `attributes` with set_attr_value(), including
+# native environment sources, and `settings_module` contains deployment settings.
+expand_attribute_refs(attributes)
+django_yamlconf.inject_attr(attributes, settings_module)
+namespace.update(vars(settings_module))
+configure(namespace)
+```
+
+The adapter delegates expansion to django-yamlconf and updates only each record's
+`evalue`; original `value` and `history` containers retain reference templates.
+It preserves opaque native values, including logging streams. Native logged errors
+retain upstream behavior; a strict loader must keep its error handler active
+around expansion. App contributions already install their strict handler.
+
+Pass the resulting `_YAMLCONF_ATTRIBUTES` unchanged in the settings namespace.
+`configure()` owns structural-setting identification and rejects direct, historical
+and transitive environment inputs; loaders need no second compiler-key policy.
+Ordinary upstream expansion mutates list/dict templates in place. If both `value`
+and `history` have already lost a reference, the adapter cannot recover its origin
+from the expanded cache. Use the adapter before that first expansion.

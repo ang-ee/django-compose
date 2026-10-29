@@ -131,6 +131,17 @@ fingerprint settings and native reference chains, fail with the setting named.
 The check follows native yamlconf provenance and references, not arbitrary Python
 computations or direct `os.environ` reads.
 
+`django_compose.conf.expand_attribute_refs(attributes) -> None` is the native
+loader adapter for preserving this provenance. Loaders call it instead of
+upstream `django_yamlconf.expand_attribute_refs`, then use native `inject_attr`
+and retain `_YAMLCONF_ATTRIBUTES` in the namespace passed to `configure` once.
+It delegates native expansion while updating only `evalue` fields; `value` and
+`history` templates remain intact. Native logged errors retain upstream behavior,
+so strict loaders keep their error handler active. Ordinary upstream expansion
+mutates list/dict templates: once erased from both value and history, their
+reference origins cannot be recovered from already-expanded metadata. See the
+[native loader handoff](configuration.md#native-yamlconf-loader-handoff).
+
 Low-level `snapshot(entries, *, namespace=..., ...) -> Snapshot` remains available
 for integrations needing immutable input inspection. Serving helpers project
 native configs/history from that snapshot; project settings use `configure` to

@@ -43,6 +43,27 @@ def _copy_settings(value: Any) -> Any:
     return value
 
 
+def expand_attribute_refs(attributes: MutableMapping[str, Any]) -> None:
+    """Expand native yamlconf attributes without destroying reference provenance.
+
+    Native loaders call this instead of django_yamlconf.expand_attribute_refs,
+    then call django_yamlconf.inject_attr and pass that settings namespace to
+    configure once. Native grammar and expansion remain django-yamlconf-owned.
+    Only evalue fields are updated; value and history containers remain intact.
+
+    Ordinary upstream expansion mutates collection templates in place. Once lost
+    from both value and history, those references cannot be recovered from an
+    already-expanded cache. Preserve them here before expansion so configure can
+    validate structural inputs against direct and transitive environment sources.
+    Upstream logged errors retain their native behavior; a strict loader installs
+    its own error handler, as contribution application does.
+    """
+    expanded = _copy_settings(attributes)
+    django_yamlconf.expand_attribute_refs(expanded)
+    for key, info in attributes.items():
+        info["evalue"] = expanded[key]["evalue"]
+
+
 class _Errors(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         raise ImproperlyConfigured(record.getMessage())
@@ -140,10 +161,7 @@ class _Contributions:
                     del attributes[f"{name}:raw"]
                     self.literal_inputs.remove(name)
                 django_yamlconf.set_attr_value(attributes, self.module, owner, key, _copy_settings(value))
-            expanded = _copy_settings(attributes)
-            django_yamlconf.expand_attribute_refs(expanded)
-            for key, info in attributes.items():
-                info["evalue"] = expanded[key]["evalue"]
+            expand_attribute_refs(attributes)
             django_yamlconf.inject_attr(attributes, self.module)
         finally:
             logger.removeHandler(handler)
