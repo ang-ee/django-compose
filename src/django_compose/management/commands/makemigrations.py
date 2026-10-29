@@ -1,4 +1,4 @@
-"""Bind declared transitions before Django authors ordinary schema migrations."""
+"""Author initial schema, bind transitions, then reconcile native model changes."""
 
 from __future__ import annotations
 
@@ -37,23 +37,53 @@ class Command(NativeCommand):
     """Keep native authoring and add immutable reusable origin binding."""
 
     autodetector = DropGuardAutodetector
+    _initial_history: frozenset[str] | None = None
 
     def handle(self, *app_labels: str, **options: Any) -> str | None:
         require_serving_mode()
         name = options.get("name")
-        if options.get("merge") or (name and not name.isidentifier()):
+        if name and not name.isidentifier():
             return super().handle(*app_labels, **options)
         for label in app_labels:
             try:
                 apps.get_app_config(label)
             except LookupError:
                 return super().handle(*app_labels, **options)
-        authored = TransitionBinding(labels=history_labels())
+        labels = history_labels()
+        loader = MigrationLoader(None, ignore_no_migrations=True)
+        initialized = frozenset(label for label, _ in loader.disk_migrations)
+        initial = {
+            label
+            for label in labels
+            if label not in initialized
+            and (not app_labels or label in app_labels)
+            and MigrationLoader.migrations_module(label)[0] is not None
+            and any(apps.get_app_config(label).get_models())
+        }
+        selected = set(app_labels) if app_labels else None
+        if initial:
+            for flag in ("merge", "empty", "update"):
+                if options.get(flag):
+                    raise CommandError(f"--{flag} is not applicable before initial schema authoring")
+            self._initial_history = initialized
+            try:
+                super().handle(*sorted(initial), **options)
+            finally:
+                self._initial_history = None
+            if options.get("dry_run") or options.get("check_changes"):
+                return None
+            if selected is not None:
+                # Native dependency expansion can initialize other fresh apps.
+                current = MigrationLoader(None, ignore_no_migrations=True)
+                selected.update(label for label, _ in current.disk_migrations if label not in initialized)
+        if options.get("merge"):
+            return super().handle(*app_labels, **options)
+        authored = TransitionBinding(labels=labels)
         try:
             if options.get("dry_run") or options.get("check_changes"):
-                authored.check(app_labels=app_labels or None)
+                authored.check(app_labels=selected)
             else:
-                authored.materialize(apps, app_labels=app_labels or None)
+                authored.materialize(apps, app_labels=selected)
         except (RuntimeError, ImproperlyConfigured) as error:
             raise CommandError(str(error)) from error
         return super().handle(*app_labels, **options)
@@ -64,6 +94,13 @@ class Command(NativeCommand):
         update_previous_migration_paths: dict[str, str] | None = None,
     ) -> None:
         """Preflight every destination before handing serialization to Django."""
+        if self._initial_history is not None:
+            existing = sorted(set(changes) & self._initial_history)
+            if existing:
+                raise CommandError(
+                    "Initial schema depends on changes to existing apps; "
+                    "author their transitions first: " + ", ".join(existing)
+                )
         destinations = set()
         paths = set()
         for label, migrations in changes.items():
