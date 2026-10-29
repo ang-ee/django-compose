@@ -1,0 +1,282 @@
+"""Project settings compose through native app and yamlconf owners before setup."""
+
+import importlib
+import os
+import subprocess
+import sys
+
+import pytest
+from django.core.exceptions import ImproperlyConfigured
+
+from django_compose import conf
+
+
+@pytest.fixture
+def project(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv("DJANGO_COMPOSE_MODE", "write")
+    created = []
+
+    def app(body=""):
+        name = f"confapp_{len(created)}"
+        package = tmp_path / name
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        (package / "models.py").write_text("raise AssertionError('premature model import')\n")
+        (package / "autoconfig.py").write_text(body)
+        created.append(name)
+        importlib.invalidate_caches()
+        return name
+
+    namespace = {"COMPOSE_OUTPUT_DIR": tmp_path / "runtime", "INSTALLED_APPS": []}
+    yield app, namespace
+    for name in tuple(sys.modules):
+        if name.split(".")[0] in created:
+            sys.modules.pop(name)
+
+
+def test_defaults_native_merges_and_provenance(project):
+    app, ns = project
+    ns.update(PROJECT_VALUE="authored", ITEMS=["project"], OPTIONS={"existing": True})
+    ns["INSTALLED_APPS"] = [
+        app("""SETTINGS = {
+'PROJECT_VALUE': 'default', 'DEFAULT_VALUE': 42,
+'ITEMS:append': ['first'], 'OPTIONS.child': 'first', 'NEW.child': 'new'}
+"""),
+        app("SETTINGS = {'ITEMS:append': ['second'], 'OPTIONS.other': 'second'}"),
+    ]
+    conf.configure(ns)
+    assert ns["PROJECT_VALUE"] == "authored"
+    assert ns["DEFAULT_VALUE"] == 42
+    assert ns["ITEMS"] == ["project", "first", "second"]
+    assert ns["OPTIONS"] == {"existing": True, "child": "first", "other": "second"}
+    assert ns["NEW"] == {"child": "new"}
+    info = ns["_YAMLCONF_ATTRIBUTES"]["ITEMS"]
+    assert info["source"] == "confapp_1.autoconfig"
+    assert info["history"][0][1] == "confapp_0.autoconfig"
+    assert ns["COMPOSE_ROOTS"] == ("confapp_0", "confapp_1")
+    assert ns["COMPOSE_SNAPSHOT"].settings["DEFAULT_AUTO_FIELD"]
+    assert ns["INSTALLED_APPS"][-1] == "django_compose.apps.BuildComposeConfig"
+
+
+def test_callable_reads_effective_environment_and_authored_values(project, monkeypatch):
+    app, ns = project
+    monkeypatch.setenv("TASK_LIMIT", "7")
+    monkeypatch.setenv("UNDECLARED_SECRET", "hidden")
+    ns.update(COMPOSE_ENV_PREFIXES=["TASK_"], DEPLOYMENT="project")
+    ns["INSTALLED_APPS"] = [
+        app("""SETTINGS = {'TASK_LIMIT': 1}
+def settings(namespace):
+    assert namespace['TASK_LIMIT'] == '7'
+    assert namespace['DEPLOYMENT'] == 'project'
+    assert 'UNDECLARED_SECRET' not in namespace
+    return {'TASK_LIMIT': int(namespace['TASK_LIMIT']), 'DEPLOYMENT': 'ignored'}
+""")
+    ]
+    conf.configure(ns)
+    assert ns["TASK_LIMIT"] == 7
+    assert ns["DEPLOYMENT"] == "project"
+    assert ns["_YAMLCONF_ATTRIBUTES"]["TASK_LIMIT"]["history"][0] == ("7", "**ENVIRONMENT**")
+
+
+def test_only_scalar_competing_defaults_fail_even_when_authored(project):
+    app, ns = project
+    ns["VALUE"] = "project"
+    ns["INSTALLED_APPS"] = [app("SETTINGS = {'VALUE': 'one'}"), app("SETTINGS = {'VALUE': 'two'}")]
+    with pytest.raises(ImproperlyConfigured, match="VALUE.*confapp_0.*confapp_1"):
+        conf.configure(ns)
+
+
+def test_container_defaults_fill_gaps_and_callbacks_do_not_replace_another_app(project):
+    app, ns = project
+    ns["INSTALLED_APPS"] = [
+        app("SETTINGS = {'ITEMS': ['one'], 'OPTIONS': {'one': 1}}"),
+        app("""
+SETTINGS = {'ITEMS': ['two'], 'OPTIONS': {'two': 2}}
+def settings(namespace):
+    return {'ITEMS': ['derived'], 'OPTIONS': {'derived': True}}
+"""),
+    ]
+    conf.configure(ns)
+    assert ns["ITEMS"] == ["one"]
+    assert ns["OPTIONS"] == {"one": 1}
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "INSTALLED_APPS:append",
+        "COMPOSE_OUTPUT_DIR.child",
+        "COMPOSE_OUTPUT_OTHER",
+        "COMPOSE_ROOTS:doc",
+        "COMPOSE_SNAPSHOT",
+    ],
+)
+def test_protected_contributions(project, key):
+    app, ns = project
+    ns["INSTALLED_APPS"] = [app(f"SETTINGS = {{{key!r}: 'forbidden'}}")]
+    with pytest.raises(ImproperlyConfigured, match="must not contribute"):
+        conf.configure(ns)
+
+
+@pytest.mark.parametrize(
+    "body, message",
+    [
+        ("SETTINGS = []", "SETTINGS must be a mapping"),
+        ("settings = 1", "settings must be callable"),
+        ("def settings(namespace): return []", "must return a mapping"),
+        ("SETTINGS = {1: 'bad'}", "invalid setting name"),
+        ("SETTINGS = {'lower': 'bad'}", "invalid setting name"),
+        ("SETTINGS = {'OPTIONS:append': []}", "not a dict"),
+    ],
+)
+def test_invalid_contributions_fail(project, body, message):
+    app, ns = project
+    ns["OPTIONS"] = {"existing": 1}
+    ns["INSTALLED_APPS"] = [app(body)]
+    with pytest.raises(ImproperlyConfigured, match=message):
+        conf.configure(ns)
+
+
+@pytest.mark.parametrize("name", ["COMPOSE_ROOTS", "COMPOSE_SNAPSHOT"])
+def test_derived_settings_are_refused_on_entry(project, name):
+    _, ns = project
+    ns[name] = None
+    with pytest.raises(ImproperlyConfigured, match="derived"):
+        conf.configure(ns)
+
+
+def test_structural_environment_refused_before_and_after_custom_declaration(project, monkeypatch):
+    app, ns = project
+    ns["COMPOSE_ENV_PREFIXES"] = ["CUSTOM_"]
+    monkeypatch.setenv("CUSTOM_INPUT", "environment")
+    ns["INSTALLED_APPS"] = [
+        app("SETTINGS = {'CUSTOM_INPUT': 'default'}"),
+        app("SETTINGS = {'COMPOSE_FINGERPRINT_SETTINGS:append': ['CUSTOM_INPUT']}"),
+    ]
+    with pytest.raises(ImproperlyConfigured, match="CUSTOM_INPUT.*environment"):
+        conf.configure(ns)
+
+
+def test_existing_dotted_environment_provenance_is_refused(project):
+    _, ns = project
+    ns["_YAMLCONF_ATTRIBUTES"] = {
+        "MIGRATION_MODULES.label": {
+            "source": "project",
+            "history": [("old", "**ENVIRONMENT**")],
+            "value": None,
+            "evalue": None,
+            "doc": [],
+            "hide": False,
+        }
+    }
+    with pytest.raises(ImproperlyConfigured, match="MIGRATION_MODULES.*environment"):
+        conf.configure(ns)
+
+
+def test_import_errors_are_not_treated_as_absent_autoconfig(project):
+    app, ns = project
+    ns["INSTALLED_APPS"] = [app("import missing_conf_dependency")]
+    with pytest.raises(ModuleNotFoundError, match="missing_conf_dependency"):
+        conf.configure(ns)
+
+
+def test_native_subprocess_build_check_and_compiler_free_serve(tmp_path):
+    package = tmp_path / "nativeapp"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "models.py").write_text("""from django.db import models
+from django_compose.models import Composable
+class Item(Composable, concrete=True):
+    name = models.CharField(max_length=20)
+    class Meta:
+        abstract = True
+""")
+    (package / "autoconfig.py").write_text("SETTINGS = {'TEST_VALUES:append': ['native']}\n")
+    (tmp_path / "settings.py").write_text("""from pathlib import Path
+from django_compose.conf import configure
+SECRET_KEY = 'test'
+INSTALLED_APPS = ['nativeapp']
+COMPOSE_OUTPUT_DIR = Path(__file__).parent / 'runtime'
+DATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}
+configure(globals())
+""")
+    env = dict(
+        os.environ, DJANGO_SETTINGS_MODULE="settings", PYTHONPATH=os.pathsep.join([str(tmp_path), *sys.path])
+    )
+    env.pop("DJANGO_COMPOSE_MODE", None)
+    for args in [
+        ("-m", "django_compose", "compose"),
+        ("-m", "django_compose", "makemigrations", "--noinput"),
+        ("-m", "django_compose", "compose", "--check"),
+        (
+            "-c",
+            """
+import importlib.abc
+import sys
+class BlockCompiler(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {'django_compose.build', 'django_compose.model_composition'}:
+            raise AssertionError('compiler imported while serving')
+sys.meta_path.insert(0, BlockCompiler())
+from django_compose.conf import configure
+assert 'django.db.models' not in sys.modules
+import django
+django.setup()
+from django.apps import apps
+from django.conf import settings
+assert apps.get_model('nativeapp', 'Item')._meta.abstract is False
+assert settings.TEST_VALUES == ['native']
+""",
+        ),
+    ]:
+        result = subprocess.run(
+            [sys.executable, "-B", *args], cwd=tmp_path, env=env, capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_snapshot_once_after_contributions_and_projection_cleanup(project, monkeypatch):
+    app, ns = project
+    ns["INSTALLED_APPS"] = [app("SETTINGS = {'VALUE': 'contributed'}")]
+    monkeypatch.delenv("DJANGO_COMPOSE_MODE")
+    original = conf.snapshot
+    calls = []
+    closed = []
+
+    def freeze(*args, **kwargs):
+        assert kwargs["namespace"]["VALUE"] == "contributed"
+        calls.append(args)
+        return original(*args, **kwargs)
+
+    def verify(snap, output_module, *, retain_startup):
+        assert retain_startup
+        raise RuntimeError("startup failure")
+
+    monkeypatch.setattr(conf, "snapshot", freeze)
+    monkeypatch.setattr(conf.serving, "verify", verify)
+    monkeypatch.setattr(conf.serving, "_close_startup_verification", lambda: closed.append(True))
+    with pytest.raises(RuntimeError, match="startup failure"):
+        conf.configure(ns)
+    assert len(calls) == 1
+    assert closed == [True]
+
+
+def test_direct_structural_environment_input_is_refused(project, monkeypatch):
+    app, ns = project
+    ns["COMPOSE_ENV_PREFIXES"] = ["COMPOSE_"]
+    ns["INSTALLED_APPS"] = [app("SETTINGS = {'COMPOSE_INTEGRATIONS:append': []}")]
+    monkeypatch.setenv("COMPOSE_INTEGRATIONS", "untrusted")
+    with pytest.raises(ImproperlyConfigured, match="COMPOSE_INTEGRATIONS.*environment"):
+        conf.configure(ns)
+
+
+def test_mode_and_required_output_are_validated_before_imports(project, monkeypatch):
+    _, ns = project
+    monkeypatch.setenv("DJANGO_COMPOSE_MODE", "unknown")
+    with pytest.raises(ImproperlyConfigured, match="DJANGO_COMPOSE_MODE"):
+        conf.configure(ns)
+    monkeypatch.setenv("DJANGO_COMPOSE_MODE", "write")
+    del ns["COMPOSE_OUTPUT_DIR"]
+    with pytest.raises(ImproperlyConfigured, match="COMPOSE_OUTPUT_DIR"):
+        conf.configure(ns)
