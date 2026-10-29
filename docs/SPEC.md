@@ -17,7 +17,10 @@ LGPL-3.0-or-later. Django is its only base dependency.
 | Discovery, ordered donors, parent edges and composition facts | ModelComposition |
 | Concrete Python source | rendering.render_models |
 | Literal metadata and capability contributions | ModelDeclaration and three structural protocols |
+| Installed-distribution activation closure | addons.enabled_apps / native metadata / packaging |
 | Immutable pre-setup inputs and digest | snapshot.Snapshot |
+| Import-free module location and exact file providers | sources.SourceResolver |
+| Retained historical Python imports | migration_imports.MigrationImportReport |
 | Freshness, generated config substitution and receipt reads | serving |
 | Phase-2 emission, model imports and artifact hooks | build.BuildPlan / BuildComposeConfig |
 | Safe output ownership, locks and atomic replacement | artifacts.GeneratedTree |
@@ -25,10 +28,13 @@ LGPL-3.0-or-later. Django is its only base dependency.
 | Reusable transition origins and destructive-change policy | TransitionBinding / DropGuardAutodetector |
 | Model type inference | Optional django-stubs extension |
 
-The package has no host app graph, manifest parser, settings composer, dependency
-installer, runtime registry, migration executor or build-backend adapter. Host
-frameworks own enabled-app closure and settings composition. Package imports do
-not configure Django. No source depends on a consumer framework.
+The optional `addons` extra adds installed-distribution app closure through
+`packaging`; Django remains the only base dependency. Hosts select roots and
+compose settings. The package resolves declared installed metadata rather than
+parsing manifests or installing dependencies. Package imports do not configure
+Django. No source depends on a consumer framework. Settings composition, URL and
+ASGI composition, revised artifact phases and the startup lock/reloader protocol
+remain pending; see [the roadmap](ROADMAP.md).
 
 ## Model declarations
 
@@ -45,8 +51,8 @@ Keywords store `compose_concrete`, `compose_extends`, `compose_inherits` and
 `compose_demands` facts on the declaring class. `concrete`, `extends` and
 `inherits` are mutually exclusive, including an explicit `concrete=False`.
 `inherits` implies concrete and may not repeat `concrete`; `demands`
-combines with any declaration or none. Targets use Django's lazy `app_label.Model` form. Invalid
-combinations and references fail at native class creation. Factories may pass
+combines with any declaration or none. Targets use Django's lazy `app_label.Model` form.
+Invalid combinations and references fail at native class creation. Factories may pass
 keywords to `type()`. Django's native explicit `Meta.abstract=True` requirement
 still applies; Composable does not infer abstractness or replace ModelBase.
 
@@ -75,38 +81,67 @@ The public facts API exposes `ordered_models`, `models_by_label`,
 `compose_contributed_field_origins` as sorted (field name, declaring app name)
 pairs. This package interprets no capability vocabulary.
 
-## Settings and immutable inputs
+## Installed addons and immutable inputs
+
+`addons.enabled_apps(roots, *, group)` requires the `addons` extra and an explicit,
+non-empty entry-point group. Root entries are native `INSTALLED_APPS` strings.
+`Closure.entries` lists dependencies before dependants; `roots` preserves root
+app names in authored order; `required` contains dependency-selected app names;
+`addons` contains selected members of the requested group. The closure is frozen.
+
+Each addon distribution declares one entry point in that group. Its key equals
+the selected AppConfig's `name`, and its value is a native app/config string.
+Active `Requires-Dist` requirements evaluated with `extra=""` activate installed
+providers in the same group. A plain root outside the group has no metadata
+activation expansion. Selected configs also declare `requires_apps` as native app
+strings. Explicit root configs take precedence over dependency defaults.
+Competing providers/configs, duplicate native labels, missing active installed
+requirements and cycles fail. Installation alone does not activate an addon or
+an optional extra. Settings composition remains the host's responsibility.
 
 Hosts set `COMPOSE_OUTPUT_DIR`, `COMPOSE_OUTPUT_MODULE` and `COMPOSE_SNAPSHOT`.
-Additional compiler inputs are `COMPOSE_INTEGRATIONS`,
-`COMPOSE_TRANSITION_SOURCE`, `COMPOSE_EXTERNAL_ARTIFACT_ROOTS`,
-`COMPOSE_OWNED_ARTIFACT_PATHS`, `COMPOSE_FINGERPRINT_GLOBS` and
+Additional inputs include `COMPOSE_INTEGRATIONS`, `COMPOSE_TRANSITION_SOURCE`,
+`COMPOSE_EXTERNAL_ARTIFACT_ROOTS`, `COMPOSE_OWNED_ARTIFACT_PATHS`,
+`COMPOSE_FINGERPRINT_GLOBS`, `COMPOSE_FINGERPRINT_EXCLUDES` and
 `COMPOSE_FINGERPRINT_SETTINGS`. Native `MIGRATION_MODULES` remains authoritative,
 including explicit `None` values.
 
-`snapshot.app_entries` normalizes the host's already resolved ordered app
-closure. Entries must be strings; explicit config classes are preserved. Instances
-are rejected because a generated subclass cannot preserve instance state and a
-snapshot cannot identify it. Native duplicate app identity/label rules remain.
+`snapshot.app_entries` normalizes an already resolved ordered app closure without
+importing models. Native strings and previously normalized `Entry` values are
+accepted; explicit config classes are preserved. AppConfig instances are rejected.
+Native duplicate app identity/label rules remain authoritative.
 
-Create one immutable `Snapshot` after host settings composition and before
-finalizing `INSTALLED_APPS`. It records selected app identities/configs/paths;
-sorted source Python and declared glob digests; dotted integration paths and
-module-byte digests; transition origins/digests; authored migration mappings;
-effective compiler settings; declared hook settings; caller facts; and compiler identity.
-Compiler settings always include `COMPOSE_OUTPUT_DIR`, `COMPOSE_OUTPUT_MODULE`,
-`COMPOSE_EXTERNAL_ARTIFACT_ROOTS`, `COMPOSE_OWNED_ARTIFACT_PATHS` and
-`DEFAULT_AUTO_FIELD`, using native/compiler defaults when omitted. Output paths
-accept `Path` or string values with the same normalized fingerprint. Hook extras
-are explicit: the union of `snapshot(settings_keys=...)` and the namespace's
-`COMPOSE_FINGERPRINT_SETTINGS`. Deployment settings are otherwise excluded.
-Source scanning excludes web, tests, migrations and bytecode caches. It imports
-no model, integration or build module. Integration classes may therefore import
-models when later loaded in phase 2. Pre-setup declarations are ordinary settings,
-never methods on integration classes.
+Create one immutable `Snapshot` after settings composition and before finalizing
+`INSTALLED_APPS`. It records selected app identities/configs/paths, sorted source
+Python and declared glob digests, dotted integration paths/module bytes, frozen
+transition records and their origin/digest pairs, authored migration mappings,
+effective compiler settings, declared hook settings and compiler identity.
 
-The same Snapshot object feeds build and serve, so equal inputs produce equal
-digests by construction. Deployment secrets should not be fingerprint inputs.
+Mandatory inputs are the resolved entries, native defaults for `AUTH_USER_MODEL`
+and `DEFAULT_AUTO_FIELD`, the authored migration mapping and all `COMPOSE_*`
+settings except derived `COMPOSE_SNAPSHOT` and `COMPOSE_ROOTS`. A redundant root
+list cannot change the digest. Output paths normalize strings and `Path` values.
+Extra setting keys are the union of `snapshot(settings_keys=...)` and
+`COMPOSE_FINGERPRINT_SETTINGS`; a custom swappable setting must be included.
+Conflicting explicit arguments and namespace declarations fail rather than
+recording different facts for build and serving. Compiler inputs belong to
+their declared settings owners.
+
+Default source exclusions cover tests, migrations and bytecode caches.
+`COMPOSE_FINGERPRINT_EXCLUDES` replaces those patterns explicitly; directories
+named `web` are ordinary inputs unless excluded. Source location uses native
+`PathFinder` component by component and exact RECORD/PEP 610 ownership; it does
+not execute parent packages or guess providers from top-level names. Snapshot
+imports no model, integration or build module. Integration classes may import
+models when loaded in phase 2.
+
+Without `COMPOSE_TRANSITION_SOURCE`, selected apps contribute sorted
+`compose_migrations/<label>/<name>.py` declarations in app order, including numeric
+migration names. An explicit source overrides this discovery and accepts ordered
+four-key records or a pre-setup-safe dotted callable returning them. Snapshot
+stores the normalized immutable collection as `transition_records`; build and
+history consume that same collection. Transition module bytes are fingerprinted
+without execution. Deployment secrets should not be fingerprint inputs.
 
 ## Setup lifecycle
 
@@ -123,9 +158,10 @@ before settings load:
   Compose without it refuses with an actionable error.
 
 In write/check mode, settings install source configs plus retained tombstones and
-`django_compose.apps.BuildComposeConfig` last. They do not call serving.verify,
-so an absent output tree can be built for the first time. In serving mode,
-settings verify the receipt, substitute generated source-config subclasses with
+`django_compose.apps.BuildComposeConfig` last. Write mode permits an absent tree
+for the first build. Check mode verifies the full receipt and owned contents
+before model discovery or integration execution. In serving mode, settings
+verify the receipt, substitute generated source-config subclasses with
 `serving.installed_apps`, and install `django_compose.apps.ComposeConfig`.
 The two lifecycle configs share one native Django identity and cannot coexist.
 
@@ -153,7 +189,9 @@ remain installed dependencies. All ready callbacks see concrete models.
 
 Migration commands (`makemigrations`, `migrate`, `check_migrations`,
 `retire_history`, `reset_migration_history`) require serving mode and refuse a set
-mode variable. A separate process reads the completed receipt and history mapping.
+mode variable. The package launcher rejects these commands before settings load;
+command handlers enforce the same rule for native dispatch. A separate process
+reads the completed receipt and history mapping.
 
 ## Integrations
 
@@ -221,11 +259,15 @@ a removed source distribution cannot prevent the next compose process starting.
 Django owns migration detection, graph loading, serialization, execution,
 recording, aliases and routers. One `effective_states(loader, registry, purge=...)`
 owner preserves history-only models in comparison state; an explicit purge alone
-removes them from that desired state. Every migration comparison command uses it.
+removes them from that desired state. History-only membership is receipt
+`HISTORY_LABELS` minus retired and snapshot-selected app labels. An enabled app
+without a models module is active, so removing its last model still produces a
+native deletion. Every migration comparison command uses this same state owner.
 
-COMPOSE_TRANSITION_SOURCE supplies explicit declarations or a dotted callable.
-TransitionBinding binds reusable native migration origins `<declaring app>:<name>`
-to the host's actual leaves. Guards are pure applies(ProjectState) functions;
+Snapshot owns default or explicit transition discovery and freezes the normalized
+records before setup. `TransitionBinding` uses those records by default; callers
+may still supply explicit declarations directly. It binds reusable native
+migration origins `<declaring app>:<name>` to the host's actual leaves. Guards are pure applies(ProjectState) functions;
 a pending false guard is refused. Immutable source/body digests, dependencies,
 run_before, replaces and complete squash chains are preserved. Materialized
 historical source remains executable after the declaration is removed. New
@@ -248,10 +290,17 @@ scope; purge alone never authorizes retirement. Successful retirement updates th
 receipt under the common lock; the next compose removes the tombstone. External
 databases absent from command settings are outside the provable scope.
 
-check_migrations also reports migration import distributions using native import
-metadata, so consumers can preserve historical field/validator imports before
-uninstalling source packages. Explicit reset_migration_history remains guarded:
-fully applied, model-clean native graph, selected apps, cross-app dependencies,
+`check_migrations` checks native state and pending transitions. Its separate
+`--imports` audit statically parses selected native migration packages, including
+authored mappings, recursively follows project/transition helpers and recognizes
+literal dynamic imports. It reports exact installed distribution providers,
+stdlib/built-in/frozen modules, enabled-app/project sources and unresolved or
+unsupported imports. It also reports offline native-loader failures, performs no
+database queries and never executes migrations. `--imports --removing DIST...`
+refuses enabled providers, retained imports, unresolved/unsupported entries and
+loader failures; it reports a verdict without uninstalling anything.
+
+Explicit `reset_migration_history` remains guarded: fully applied, model-clean native graph, selected apps, cross-app dependencies,
 transactional recorder updates and filesystem rollback. Normal build/clean never
 reset history. See [migration guidance](migrations.md).
 

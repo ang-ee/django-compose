@@ -31,6 +31,9 @@ make dist-check
 `dist-check` builds wheel and sdist through Hatchling, validates metadata with
 Twine, inspects archive contents and installs the base wheel into a separate
 temporary environment. It exercises compose, native history, cold serving, ORM,
-drift refusal and history-preserving cleanup. The typing extra is absent from
-that environment. CI and release workflows upload checked archives as workflow
+drift refusal and history-preserving cleanup with the base package first. It
+then installs the `addons` extra and two fixture addon wheels to verify native
+metadata activation, the four declaration keywords, multi-table inheritance,
+retained-import provider reporting and removal refusal. The typing extra stays
+absent from that environment. CI and release workflows upload checked archives as workflow
 artifacts and contain no package-index publication step.

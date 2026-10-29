@@ -22,7 +22,7 @@ def run(arguments: list[str], *, cwd: Path, env: dict[str, str], success: bool =
         raise RuntimeError(
             f"Command {arguments!r} returned {result.returncode}\n{result.stdout}{result.stderr}"
         )
-    return result.stdout
+    return result.stdout + result.stderr
 
 
 def digest(root: Path) -> dict[str, str]:
@@ -31,6 +31,155 @@ def digest(root: Path) -> dict[str, str]:
         for path in sorted(root.rglob("*"))
         if path.is_file() and "__pycache__" not in path.parts
     }
+
+
+def addon_wheel(directory: Path, package: str, *, dependency: str | None = None) -> Path:
+    """Create a real installed-distribution fixture with native wheel metadata."""
+    distribution = "compose-smoke-" + package.removeprefix("installed_")
+    filename = distribution.replace("-", "_") + "-1.0.0"
+    info = filename + ".dist-info"
+    members = {
+        package + "/__init__.py": "",
+        package + "/apps.py": (
+            f"from django.apps import AppConfig\nclass Config(AppConfig):\n    name = {package!r}\n"
+        ),
+        info + "/METADATA": (
+            f"Metadata-Version: 2.3\nName: {distribution}\nVersion: 1.0.0\n"
+            + (f"Requires-Dist: {dependency}==1.0.0\n" if dependency else "")
+        ),
+        info + "/WHEEL": "Wheel-Version: 1.0\nGenerator: smoke\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        info + "/entry_points.txt": f"[compose.smoke]\n{package} = {package}.apps.Config\n",
+    }
+    if dependency is None:
+        members[package + "/validators.py"] = "def retained(value):\n    pass\n"
+        members[package + "/models.py"] = """from django.db import models
+from django_compose.models import Composable
+from .validators import retained
+class Item(Composable, concrete=True):
+    title = models.CharField(max_length=100, validators=[retained])
+    class Meta:
+        abstract = True
+class Required(Composable, demands="installed_catalog.Item"):
+    class Meta:
+        abstract = True
+class Child(Required, inherits="installed_catalog.Item"):
+    detail = models.CharField(max_length=20)
+    class Meta:
+        abstract = True
+class Grandchild(Required, inherits="installed_catalog.Child"):
+    class Meta:
+        abstract = True
+Factory = type("Factory", (Composable,), {
+    "__module__": __name__, "Meta": type("Meta", (), {"abstract": True}),
+}, concrete=True)
+class Helper(Child):
+    class Meta:
+        abstract = True
+"""
+    else:
+        members[package + "/models.py"] = """from django.db import models
+from django_compose.models import Composable
+from installed_catalog.models import Required
+class Rating(Composable, extends="installed_catalog.Item"):
+    rating = models.PositiveSmallIntegerField(default=0)
+    class Meta:
+        abstract = True
+class Detail(Required, extends="installed_catalog.Child"):
+    reviewed = models.BooleanField(default=False)
+    class Meta:
+        abstract = True
+"""
+    record = info + "/RECORD"
+    members[record] = "".join(f"{name},,\n" for name in sorted((*members, record)))
+    wheel = directory / (filename + "-py3-none-any.whl")
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, contents in sorted(members.items()):
+            archive.writestr(zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0)), contents)
+    return wheel
+
+
+def installed_addons(
+    directory: Path, python: Path, uv: str, wheel: Path, environment: dict[str, str]
+) -> None:
+    """Exercise metadata closure, model declarations and imports from actual wheels."""
+    catalog = addon_wheel(directory, "installed_catalog")
+    reviews = addon_wheel(directory, "installed_reviews", dependency="compose-smoke-catalog")
+    run(
+        [uv, "pip", "install", "--python", str(python), str(wheel) + "[addons]", str(catalog), str(reviews)],
+        cwd=directory,
+        env=environment,
+    )
+    host = directory / "installed-host"
+    host.mkdir()
+    settings = (ROOT / "examples/shop/settings.py").read_text()
+    old_entries = 'entries = app_entries(("catalog", "reviews"))'
+    assert old_entries in settings
+    settings = settings.replace(
+        old_entries,
+        """from django_compose.addons import enabled_apps
+closure = enabled_apps(("installed_reviews",), group="compose.smoke")
+assert closure.roots == ("installed_reviews",)
+assert closure.required == frozenset({"installed_catalog"})
+assert closure.addons == frozenset({"installed_catalog", "installed_reviews"})
+entries = app_entries(closure.entries)
+assert tuple(entry.name for entry in entries) == ("installed_catalog", "installed_reviews")""",
+    )
+    (host / "settings.py").write_text(settings)
+    env = {**environment, "DJANGO_SETTINGS_MODULE": "settings"}
+    compiler = [str(python), "-m", "django_compose"]
+    run([*compiler, "compose"], cwd=host, env=env)
+    run([*compiler, "makemigrations", "installed_catalog", "--noinput"], cwd=host, env=env)
+    run([*compiler, "migrate", "--noinput"], cwd=host, env=env)
+    run([*compiler, "compose", "--check"], cwd=host, env=env)
+    run(
+        [
+            str(python),
+            "-c",
+            """import importlib.util
+assert importlib.util.find_spec("angee") is None
+import django
+django.setup()
+from django.apps import apps
+from django.db.migrations.state import ProjectState
+Item = apps.get_model("installed_catalog", "Item")
+Child = apps.get_model("installed_catalog", "Child")
+Grandchild = apps.get_model("installed_catalog", "Grandchild")
+assert set(Child._meta.parents) == {Item}
+assert set(Grandchild._meta.parents) == {Child}
+assert apps.get_model("installed_catalog", "Factory")._meta.parents == {}
+assert {model.__name__ for model in apps.get_app_config("installed_catalog").get_models()} == {
+    "Item", "Child", "Grandchild", "Factory",
+}
+row = Child.objects.create(title="installed addon", detail="child", rating=5, reviewed=True)
+assert Item.objects.get(pk=row.pk).rating == 5
+assert Child.objects.get(pk=row.pk).reviewed is True
+state = ProjectState.from_apps(apps)
+assert "installed_catalog.item" in state.models["installed_catalog", "child"].bases
+assert set(state.apps.get_model("installed_catalog", "Grandchild")._meta.parents) == {
+    state.apps.get_model("installed_catalog", "Child"),
+}
+""",
+        ],
+        cwd=host,
+        env=env,
+    )
+    report = run([*compiler, "check_migrations", "--imports"], cwd=host, env=env)
+    assert "installed_catalog.validators" in report and "compose-smoke-catalog" in report, report
+    refusal = run(
+        [*compiler, "check_migrations", "--imports", "--removing", "compose-smoke-catalog"],
+        cwd=host,
+        env=env,
+        success=False,
+    )
+    assert "compose-smoke-catalog provides enabled app installed_catalog" in refusal, refusal
+    assert "retained import installed_catalog.validators requires compose-smoke-catalog" in refusal, refusal
+    refusal = run(
+        [*compiler, "check_migrations", "--imports", "--removing", "compose-smoke-reviews"],
+        cwd=host,
+        env=env,
+        success=False,
+    )
+    assert "compose-smoke-reviews provides enabled app installed_reviews" in refusal, refusal
 
 
 def main() -> None:
@@ -43,6 +192,9 @@ def main() -> None:
             "py.typed",
             "models.py",
             "snapshot.py",
+            "sources.py",
+            "addons.py",
+            "migration_imports.py",
             "serving.py",
             "build.py",
             "typing.py",
@@ -54,7 +206,7 @@ def main() -> None:
         metadata = email.parser.Parser().parsestr(archive.read(metadata_name).decode())
         base_dependencies = [value for value in metadata.get_all("Requires-Dist", []) if ";" not in value]
         assert len(base_dependencies) == 1 and base_dependencies[0].lower().startswith("django"), metadata
-        assert metadata.get_all("Provides-Extra") == ["typing"]
+        assert sorted(metadata.get_all("Provides-Extra", [])) == ["addons", "typing"]
         for removed in ("runtime.py", "composer.py", "appgraph.py", "hatch.py", "yamlconf.py"):
             assert f"django_compose/{removed}" not in names, removed
         assert not any(name.startswith(("angee/", "tests/", "examples/")) for name in names)
@@ -96,6 +248,8 @@ def main() -> None:
                 "import django_compose, importlib.util; "
                 "assert 'site-packages' in django_compose.__file__; "
                 "assert importlib.util.find_spec('mypy') is None; "
+                "assert importlib.util.find_spec('angee') is None; "
+                "assert importlib.util.find_spec('packaging') is None; "
                 "assert importlib.util.find_spec('hatch_angee') is None; "
                 "assert importlib.util.find_spec('django_yamlconf') is None",
             ],
@@ -174,9 +328,10 @@ assert Item.objects.get(pk=item.pk).rating == 5
         assert (host / "runtime/keep.txt").read_text() == "Unowned file\n"
         run([*compiler, "compose", "--settings", "settings"], cwd=host, env=environment)
         assert history == digest(host / "runtime/catalog/migrations")
+        installed_addons(directory, python, uv, wheel, environment)
     print(
         "Wheel/sdist contents and fresh installed-host build, serve, ORM, "
-        "migration, drift, and cleanup checks passed."
+        "migration, drift, cleanup, installed addon closure, MTI and import audit checks passed."
     )
 
 

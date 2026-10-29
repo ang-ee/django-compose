@@ -63,14 +63,21 @@ Factories can forward the same keywords to `type()`. Django's usual explicit
 
 ## Configure a host
 
-Use one ordinary settings module. It owns enabled apps and any host-specific
-settings composition. Normalize those app entries with
+Use one ordinary settings module. It selects root apps and owns settings
+composition. For installed addon metadata, install `django-compose[addons]` and
+call `django_compose.addons.enabled_apps(roots, group="your.addons")`. Its frozen
+closure follows active installed requirements and `AppConfig.requires_apps`,
+retaining explicit root config choices. Pass `closure.entries` to the normalizer.
+Plain projects can supply their ordered app list directly.
+
+Normalize the resolved app entries with
 `django_compose.snapshot.app_entries`, create one `Snapshot`, and assign it to
 `COMPOSE_SNAPSHOT`. Set `COMPOSE_OUTPUT_DIR` and `COMPOSE_OUTPUT_MODULE`.
 [The example settings](examples/shop/settings.py) contain the complete wiring:
 
 - In `write` or `check` mode, install source configs, retained history tombstones,
-  and `django_compose.apps.BuildComposeConfig` last.
+  and `django_compose.apps.BuildComposeConfig` last. Write permits the first build;
+  check verifies the existing receipt before discovery.
 - In serving mode, call `serving.verify` before finalizing `INSTALLED_APPS`,
   substitute generated configs using `serving.installed_apps`, and install
   `django_compose.apps.ComposeConfig`.
@@ -93,7 +100,9 @@ required at runtime.
 Native history lives at `<output>/<label>/migrations/`. Track it in version
 control. Compose never authors or applies migrations, and cleanup preserves
 history and unowned files. History-only apps remain installed as tombstones
-until explicit guarded retirement. See [migration guidance](docs/migrations.md).
+until explicit guarded retirement. Before removing a provider, run
+`check_migrations --imports --removing distribution-name` to audit retained imports
+and enabled apps. See [migration guidance](docs/migrations.md).
 
 ## Typing and distribution
 
@@ -107,4 +116,6 @@ incremental runs. Host settings inference belongs in a host plugin. See
 Build composed output explicitly, review native history, then package it through
 your build backend's ordinary file selection. See [packaging](docs/packaging.md).
 Run `make check` and `make dist-check` for the library's local delivery gates.
-The latter installs a wheel into a fresh plain host outside this checkout.
+The latter installs a wheel into fresh plain hosts outside this checkout and
+checks metadata activation with two real addon distributions. Broader host,
+ASGI, settings contribution and dev-loop work remains in [the roadmap](docs/ROADMAP.md).

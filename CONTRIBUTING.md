@@ -12,11 +12,12 @@ make dist-check
 
 The Makefile is shared with CI. Python 3.14, Django 6.1 and the compatible typing
 revisions in `uv.lock` define the supported development environment. Optional
-typing checks require the `typing` extra; distribution smoke installs only the
-base package. `scripts/check_distribution.py` inspects wheel and sdist contents,
+typing checks require the `typing` extra. Distribution smoke first installs the
+base package, then the `addons` extra and two real fixture addon wheels. `scripts/check_distribution.py` inspects wheel and sdist contents,
 then exercises phase-2 composition, native migration authoring/execution, cold
 serving, ORM writes, drift refusal and history-preserving cleanup outside the
-checkout.
+checkout. It also verifies metadata activation, final declaration keywords and
+retained import/removal reporting through installed distributions.
 
 Tests that populate Django use subprocesses or native isolated registries so one
 host's settings cannot contaminate another host. Use temporary SQLite databases

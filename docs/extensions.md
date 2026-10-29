@@ -13,7 +13,8 @@
 implies concrete and may not repeat `concrete`; `demands` combines with
 any declaration or none. Targets use Django's lazy `app_label.Model` form.
 Every source and donor must be explicitly abstract using native `Meta`. A source
-app's native `models_module` exports declarations; foreign reexports do not declare them.
+app's native `models_module` exports declarations; foreign reexports do not
+declare them.
 
 The public `ModelComposition` facts API exposes `ordered_models`,
 `models_by_label`, `donors(source)`, `parent(source)`,
@@ -55,7 +56,8 @@ owning the same name fail. Capabilities own their product vocabulary.
 ## Pre-setup declarations
 
 Snapshot inputs are plain host settings, never methods on integrations:
-`COMPOSE_FINGERPRINT_GLOBS`, `COMPOSE_FINGERPRINT_SETTINGS`,
+`COMPOSE_FINGERPRINT_GLOBS`, `COMPOSE_FINGERPRINT_EXCLUDES`,
+`COMPOSE_FINGERPRINT_SETTINGS`, `COMPOSE_TRANSITION_SOURCE`,
 `COMPOSE_EXTERNAL_ARTIFACT_ROOTS`, and `COMPOSE_INTEGRATIONS`. A host's existing
 settings composer may gather these from capability autoconfig modules. This
 package does not parse manifests or compose host settings.
@@ -63,3 +65,7 @@ package does not parse manifests or compose host settings.
 Snapshot hashes integration modules by path without importing their classes.
 Integration modules may import source models because their execution is deferred
 to phase 2. Snapshot and serving modules remain safe before Django setup.
+
+Snapshot normalizes explicit and namespace declarations once and freezes default
+or explicit transitions for build and history. Custom swappable setting names
+must be included in its inputs. See [input ownership](SPEC.md#installed-addons-and-immutable-inputs).
