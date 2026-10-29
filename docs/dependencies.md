@@ -6,8 +6,7 @@ used by the repository checks. The package is currently unreleased. See
 
 | Installation | Requirements | Purpose |
 | --- | --- | --- |
-| Base | Python `>=3.14`, Django `>=6.1.2,<6.2` | Model composition, generated packages and native migration support |
-| `addons` extra | `packaging>=26` | Select installed reusable apps through distribution metadata |
+| Base | Python `>=3.14`, Django `>=6.1.2,<6.2`, `packaging>=26`, `django-yamlconf>=1.5` | Composition, app selection, settings contributions and native migration support |
 | `typing` extra | Pinned django-stubs, django-stubs-ext and mypy forks | Advanced static analysis of composed models |
 
 Python 3.14 and Django 6.1 are the verified development environment. Support for a
@@ -16,9 +15,11 @@ the current Django constraint does not admit other series.
 
 ## Base installation
 
-Django is the only base dependency. It continues to own app configuration, model
+Django owns app configuration, model
 construction, the ORM and migration execution. Python's standard library supplies
-source inspection, metadata, graph ordering and file handling. The package owns
+source inspection, metadata, graph ordering and file handling. Packaging owns
+requirement/marker parsing; django-yamlconf owns settings injection, merge grammar
+and provenance. The package owns
 the missing composition and generated-output seams; it does not install source
 apps or their dependencies for a project.
 
@@ -28,20 +29,13 @@ retain fields, validators and helper imports after an app is disabled; use the
 [migration import audit](migrations.md#disable-delete-or-uninstall) before a
 proposed provider removal.
 
-## Optional addon selection
+## Installed addon selection
 
-For installed-distribution app selection, install the extra in the project
-environment:
-
-```sh
-python -m pip install '/path/to/django-compose[addons]'
-```
-
-This enables `django_compose.addons.enabled_apps(roots, group=...)`. The entry-point
-group is explicit, and installing a distribution or an extra does not by itself
-enable a Django app. See [addon selection](addons.md) for standard package metadata
-and native `AppConfig` examples. Projects using a fixed app list do not need this
-extra.
+`django_compose.addons.enabled_apps(roots, group=None)` is included in the base
+installation. A group enables installed-distribution activation; without it,
+only native `requires_apps` edges apply. Installing a distribution or extra never
+by itself enables an app. See [addon selection](addons.md) for package metadata
+and native `AppConfig` examples.
 
 ## Advanced typing
 

@@ -13,6 +13,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from packaging.requirements import Requirement
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -43,6 +45,7 @@ def addon_wheel(directory: Path, package: str, *, dependency: str | None = None)
         package + "/apps.py": (
             f"from django.apps import AppConfig\nclass Config(AppConfig):\n    name = {package!r}\n"
         ),
+        package + "/autoconfig.py": (f'SETTINGS = {{"SMOKE_CONTRIBUTORS:append": [{package!r}]}}\n'),
         info + "/METADATA": (
             f"Metadata-Version: 2.3\nName: {distribution}\nVersion: 1.0.0\n"
             + (f"Requires-Dist: {dependency}==1.0.0\n" if dependency else "")
@@ -105,24 +108,16 @@ def installed_addons(
     catalog = addon_wheel(directory, "installed_catalog")
     reviews = addon_wheel(directory, "installed_reviews", dependency="compose-smoke-catalog")
     run(
-        [uv, "pip", "install", "--python", str(python), str(wheel) + "[addons]", str(catalog), str(reviews)],
+        [uv, "pip", "install", "--python", str(python), str(wheel), str(catalog), str(reviews)],
         cwd=directory,
         env=environment,
     )
     host = directory / "installed-host"
     host.mkdir()
     settings = (ROOT / "examples/shop/settings.py").read_text()
-    old_entries = 'entries = app_entries(("catalog", "reviews"))'
-    assert old_entries in settings
     settings = settings.replace(
-        old_entries,
-        """from django_compose.addons import enabled_apps
-closure = enabled_apps(("installed_reviews",), group="compose.smoke")
-assert closure.roots == ("installed_reviews",)
-assert closure.required == frozenset({"installed_catalog"})
-assert closure.addons == frozenset({"installed_catalog", "installed_reviews"})
-entries = app_entries(closure.entries)
-assert tuple(entry.name for entry in entries) == ("installed_catalog", "installed_reviews")""",
+        'INSTALLED_APPS = ["catalog", "reviews"]',
+        'INSTALLED_APPS = ["installed_reviews"]\nCOMPOSE_ADDON_GROUP = "compose.smoke"',
     )
     (host / "settings.py").write_text(settings)
     env = {**environment, "DJANGO_SETTINGS_MODULE": "settings"}
@@ -141,6 +136,12 @@ import django
 django.setup()
 from django.apps import apps
 from django.db.migrations.state import ProjectState
+from django.conf import settings
+assert settings.COMPOSE_ROOTS == ("installed_reviews",)
+assert settings.SMOKE_CONTRIBUTORS == ["installed_catalog", "installed_reviews"]
+assert tuple(entry.name for entry in settings.COMPOSE_SNAPSHOT.entries) == (
+    "installed_catalog", "installed_reviews",
+)
 Item = apps.get_model("installed_catalog", "Item")
 Child = apps.get_model("installed_catalog", "Child")
 Grandchild = apps.get_model("installed_catalog", "Grandchild")
@@ -194,6 +195,7 @@ def main() -> None:
             "snapshot.py",
             "sources.py",
             "addons.py",
+            "conf.py",
             "migration_imports.py",
             "serving.py",
             "build.py",
@@ -205,8 +207,12 @@ def main() -> None:
         metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
         metadata = email.parser.Parser().parsestr(archive.read(metadata_name).decode())
         base_dependencies = [value for value in metadata.get_all("Requires-Dist", []) if ";" not in value]
-        assert len(base_dependencies) == 1 and base_dependencies[0].lower().startswith("django"), metadata
-        assert sorted(metadata.get_all("Provides-Extra", [])) == ["addons", "typing"]
+        assert {Requirement(value).name.lower() for value in base_dependencies} == {
+            "django",
+            "packaging",
+            "django-yamlconf",
+        }, metadata
+        assert sorted(metadata.get_all("Provides-Extra", [])) == ["typing"]
         for removed in ("runtime.py", "composer.py", "appgraph.py", "hatch.py", "yamlconf.py"):
             assert f"django_compose/{removed}" not in names, removed
         assert not any(name.startswith(("angee/", "tests/", "examples/")) for name in names)
@@ -249,9 +255,9 @@ def main() -> None:
                 "assert 'site-packages' in django_compose.__file__; "
                 "assert importlib.util.find_spec('mypy') is None; "
                 "assert importlib.util.find_spec('angee') is None; "
-                "assert importlib.util.find_spec('packaging') is None; "
+                "assert importlib.util.find_spec('packaging') is not None; "
                 "assert importlib.util.find_spec('hatch_angee') is None; "
-                "assert importlib.util.find_spec('django_yamlconf') is None",
+                "assert importlib.util.find_spec('django_yamlconf') is not None",
             ],
             cwd=host,
             env=environment,
@@ -294,6 +300,7 @@ django.setup()
 from django.apps import apps
 from django.conf import settings
 assert settings.SECRET_KEY == 'serving-secret-proof'
+assert settings.CATALOG_PAGE_SIZE == 20
 Item = apps.get_model('catalog', 'Item')
 item = Item.objects.create(title='An independent wheel', rating=5)
 assert item.describe() == 'An independent wheel'

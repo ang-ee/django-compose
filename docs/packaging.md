@@ -29,7 +29,7 @@ uv build --wheel
 python -m pip install /path/to/django-compose/dist/django_compose-0.1.0.dev0-py3-none-any.whl
 ```
 
-The base installation needs only Django. Optional extras are described in
+The base installation includes Django, packaging and django-yamlconf. Optional extras are described in
 [dependencies](dependencies.md); the advanced typing extra is unnecessary for
 the [quick start](quickstart.md). Continue with the
 [configuration guide](configuration.md) to wire your own project.
@@ -106,7 +106,7 @@ make dist-check
 `dist-check` builds wheel and sdist through Hatchling, validates their metadata
 with Twine, inspects archive contents, and installs a wheel into a separate
 temporary environment. It exercises a plain Django project with base dependencies
-first, then the optional addon-selection extra and fixture addon wheels. Typing
+first, then actual installed addon wheels with settings contributions. Typing
 is absent from that installation test. Current CI and release-artifact workflows
 upload checked archives as workflow artifacts; they do not publish to a package
 index. Building a local archive does not publish it.

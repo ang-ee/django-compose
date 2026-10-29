@@ -14,7 +14,7 @@ Django continues to own model construction, queries and migrations.
 
 ## Build and run a project
 
-- [Optional addon selection](addons.md): activate installed reusable apps from
+- [Installed addon selection](addons.md): activate installed reusable apps from
   distribution metadata and native app dependencies.
 - [Migrations](migrations.md): author and retain native history, audit imports,
   and manage removed apps.

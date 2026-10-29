@@ -5,7 +5,7 @@ import subprocess
 import sys
 
 
-def test_snapshot_and_serving_import_without_models_or_build():
+def test_configuration_inputs_and_serving_import_without_models_or_build():
     script = """import sys
 class BlockImports:
     def find_spec(self, fullname, path=None, target=None):
@@ -14,6 +14,11 @@ class BlockImports:
         if any(fullname == name or fullname.startswith(name + ".") for name in blocked):
             raise AssertionError(fullname)
 sys.meta_path.insert(0, BlockImports())
+from django_compose.conf import configure
+from django_compose.addons import enabled_apps
+from django.conf import settings
+assert not settings.configured
+assert enabled_apps(()).entries == ()
 from django_compose.snapshot import snapshot
 from django_compose.serving import migration_modules
 assert snapshot(()).digest()

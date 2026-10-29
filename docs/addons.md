@@ -8,20 +8,12 @@ not enable it, and an enabled app need not declare any generated models.
 
 You can keep a plain `INSTALLED_APPS` list, as in
 [project configuration](configuration.md). For reusable packages that depend on
-other app packages, the optional addon selector expands that list using installed
-Python metadata. It neither installs dependencies nor merges settings.
-
-## Install the optional selector
-
-The base package depends on Django alone. Install its `addons` extra when using
-`django_compose.addons`:
-
-```sh
-python -m pip install -e "/path/to/django-compose[addons]"
-```
+other app packages, configure expands that list using installed Python metadata.
+It then applies selected apps' settings contributions; it never installs packages.
 
 The examples below are two local distributions you create, not names assumed to
 exist on a package index. Install them in the same environment as the project.
+Addon selection is included in the base installation.
 
 ## Declare each distribution
 
@@ -121,46 +113,24 @@ python -m pip install -e ./shop-catalog -e ./shop-reviews
 
 ## Expand the project's root apps
 
-In [the configuration example](configuration.md#shopsettingspy), add the selector
-import alongside the other imports:
+In [the configuration example](configuration.md#shopsettingspy), select the roots
+and group before the existing final `configure(globals())` call:
 
 ```python
-from django_compose.addons import enabled_apps
-```
-
-Replace the complete settings block from the original `INSTALLED_APPS`
-assignment through `entries = app_entries(COMPOSE_ROOTS)` with:
-
-```python
-INSTALLED_APPS = [
-    "catalog.apps.CatalogConfig",
-    "shop_reviews.apps.ReviewsConfig",
-]
-MIGRATION_MODULES = {}
-COMPOSE_OUTPUT_DIR = BASE_DIR / "runtime"
-COMPOSE_OUTPUT_MODULE = "runtime"
+INSTALLED_APPS = ["catalog.apps.CatalogConfig", "shop_reviews.apps.ReviewsConfig"]
 COMPOSE_ADDON_GROUP = "example.shop.apps"
-COMPOSE_ROOTS = tuple(INSTALLED_APPS)
-authored_migrations = dict(MIGRATION_MODULES)
-closure = enabled_apps(COMPOSE_ROOTS, group=COMPOSE_ADDON_GROUP)
-entries = app_entries(closure.entries)
 ```
 
-Keep the snapshot and the build, serving and migration projections below this
-block unchanged. The explicit `group=` argument is required; the selector does
-not read Django settings. Declaring `COMPOSE_ADDON_GROUP` before the snapshot
-also includes that choice among composition settings.
+`shop_catalog` is selected through the reviews distribution's dependency. The
+project's original `catalog` remains enabled. Explicit root configs take
+precedence over dependency defaults. Selected apps can contribute
+[settings](configuration.md#app-settings-contributions) through `autoconfig.py`.
 
-The original project app `catalog` remains enabled, preserving its generated
-`catalog.Product` and the existing `/products/` endpoint. The two sample packages
-have distinct app names, `shop_catalog` and `shop_reviews`, and their minimal
-configs declare no models.
-
-Here `closure.entries` retains `catalog.apps.CatalogConfig` and places
-`shop_catalog.apps.CatalogConfig` before `shop_reviews.apps.ReviewsConfig`.
-`closure.roots` contains `catalog` and `shop_reviews`; `closure.required` contains
-only `shop_catalog`; `closure.addons` contains `shop_catalog` and `shop_reviews`.
-The result is immutable.
+The low-level `enabled_apps(roots, *, group=None)` helper returns an immutable
+`Closure` with ordered native `entries`, native root names, dependency-only
+`required` names and selected group-member `addons` names. It reads no settings.
+With no group it skips distribution discovery and follows only `requires_apps`;
+an explicitly empty or invalid group fails. `configure` uses this same helper.
 
 ## Dependency and configuration rules
 

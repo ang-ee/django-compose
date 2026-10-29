@@ -48,7 +48,7 @@ Declare both the integration and its file ownership before creating the snapshot
 in settings:
 
 ```python
-# shop/settings.py, before COMPOSE_SNAPSHOT
+# shop/settings.py, before configure(globals())
 COMPOSE_INTEGRATIONS = ("catalog.integrations.ProductExport",)
 COMPOSE_EXTERNAL_ARTIFACT_ROOTS = ("exports",)
 COMPOSE_OWNED_ARTIFACT_PATHS = ("exports/catalog.json",)

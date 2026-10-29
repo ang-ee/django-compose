@@ -11,7 +11,10 @@ and [configuration guide](configuration.md) use that API today.
 - Select a fixed ordered app list, or use the optional installed-distribution
   [addon selection](addons.md) helper.
 - Build deterministic model/configuration modules through Django setup, with
-  explicit settings integration, source fingerprints and verified build output.
+  `configure(globals())`, app settings contributions, source fingerprints and
+  verified build output.
+- Retain shared serving/check startup verification through the final native
+  `ready()` callback, excluding concurrent writers in the same lock domain.
 - Add model declarations, generated files and retirement policy through the
   [extension contracts](extensions.md).
 - Use native Django migrations with reusable transition binding, retained
@@ -24,10 +27,9 @@ Django constraints and [contributing](../CONTRIBUTING.md) for the checks.
 
 ## Planned, not part of the current API
 
-- A `configure()` convenience API and settings composition with django-yamlconf.
 - URL configuration and ASGI composition.
-- A managed development loop, shared startup reader/writer locking and reloader
-  coordination.
+- A managed development loop, full serving-child lifetime locks, receipt leases
+  and reloader coordination.
 - Revised artifact lifecycle phases and a new location for history-only app
   configurations.
 

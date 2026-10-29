@@ -23,7 +23,7 @@ capabilities. For a single project with a fixed model structure, ordinary Django
 models and abstract bases may already be sufficient.
 
 **Status:** unreleased `0.1.0.dev0`; Python 3.14 and Django 6.1 are supported.
-Django is the only base dependency. The instructions below use this checkout;
+The base dependencies are Django, packaging and django-yamlconf. The instructions below use this checkout;
 they do not require a published package or another framework.
 
 ## Try the example

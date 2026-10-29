@@ -7,14 +7,26 @@ one `catalog_item` table.
 
 You need [uv](https://docs.astral.sh/uv/) and Python 3.14. This package is an
 unreleased development checkout (`0.1.0.dev0`), supporting Django 6.1. The example
-needs only base dependencies and uses SQLite. You do not need the optional
-addon-selection or typing extras.
+needs only base dependencies and uses SQLite. The optional typing extra is unnecessary.
 
 ## Run the checked-in project
 
 The example already includes [settings.py](../examples/shop/settings.py) and
 [manage.py](../examples/shop/manage.py). Its settings select `catalog` and
-`reviews` and put generated Python files in `runtime/`.
+`reviews` and put generated Python files in `runtime/`:
+
+```python
+from django_compose.conf import configure
+
+INSTALLED_APPS = ["catalog", "reviews"]
+COMPOSE_OUTPUT_DIR = BASE_DIR / "runtime"
+COMPOSE_OUTPUT_MODULE = "runtime"
+configure(globals())
+```
+
+The checked-in `catalog/autoconfig.py` contributes `CATALOG_PAGE_SIZE = 20` as a
+plain default. Projects can author their own value before `configure`; selected
+apps' contributions are applied before the immutable input snapshot is created.
 
 Start at the checkout root:
 

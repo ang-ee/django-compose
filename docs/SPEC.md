@@ -81,8 +81,10 @@ app/config strings and previously normalized `Entry` values, preserves explicit
 config classes, and rejects config instances or duplicate native identities and
 labels. It does not expand dependencies.
 
-The optional `django_compose.addons.enabled_apps(roots, *, group) -> Closure`
-requires the `addons` extra and a nonempty explicit group. Its frozen result has
+The base `django_compose.addons.enabled_apps(roots, *, group=None) -> Closure`
+uses a nonempty group for distribution activation. Without a group it skips
+distribution metadata while retaining native `requires_apps` edges. An explicitly
+empty or invalid group fails. Its frozen result has
 `entries: tuple[str, ...]` in dependency order, `roots: tuple[str, ...]` of authored
 root app names, and `required`/`addons` frozensets of dependency-only app names and
 selected group members respectively.
@@ -102,14 +104,35 @@ installed metadata; it does not install packages or compose settings. See
 
 ## Settings and snapshots
 
-Create `snapshot(entries, *, namespace=..., ...) -> Snapshot` after all
-composition settings are final and before projecting `INSTALLED_APPS` and
-`MIGRATION_MODULES` for the current process. The same snapshot feeds build and
-serving. The full [settings example](configuration.md#shopsettingspy) shows the
-required order.
+`django_compose.conf.configure(namespace) -> None` is called once at the end of
+project settings, normally with `globals()`. It resolves authored
+`INSTALLED_APPS` through `enabled_apps`, applies app contributions, creates one
+immutable snapshot and projects native app configurations and migration modules.
+Authored migration overrides, including `None`, apply after generated defaults.
+`COMPOSE_ROOTS` and `COMPOSE_SNAPSHOT` are derived and refused on entry.
+
+Enabled apps' optional `autoconfig.py` modules declare `SETTINGS` mappings and
+`settings(namespace)` callbacks returning mappings. Dependency order determines
+contribution order. Plain defaults preserve project-authored settings; competing
+plain scalar defaults name both apps and fail even with a project override.
+Native django-yamlconf dotted keys, directives, injection errors and provenance
+are preserved. Contributions cannot set roots, output package choices or derived
+state. Declared `COMPOSE_ENV_PREFIXES` allow environment overlays of matching
+static contribution names before callbacks. Callbacks see the effective project
+namespace, without ambient environment fallback; static declarations or a project
+loader must supply environment values. Environment-sourced structural inputs,
+including custom fingerprint settings, fail with the setting named.
+
+Low-level `snapshot(entries, *, namespace=..., ...) -> Snapshot` remains available
+for integrations needing immutable input inspection. Serving helpers project
+native configs/history from that snapshot; project settings use `configure` to
+keep ordering and input ownership in one place. See the
+[settings example](configuration.md#shopsettingspy).
 
 | Setting | Meaning / default |
 | --- | --- |
+| `COMPOSE_ADDON_GROUP` | Optional installed entry-point group; absent means native dependencies only |
+| `COMPOSE_ENV_PREFIXES` | Declared prefixes permitted for static contribution environment overlays; empty by default |
 | `COMPOSE_OUTPUT_DIR` | Project-selected generated package directory; required for building |
 | `COMPOSE_OUTPUT_MODULE` | Import path for that directory; defaults to `"runtime"` |
 | `COMPOSE_INTEGRATIONS` | Ordered dotted integration class paths; empty by default |
@@ -124,8 +147,8 @@ required order.
 Mandatory inputs include resolved app/config identities, source Python and
 extra-glob bytes, selected config MRO implementation modules, integration modules,
 transition records/bytes, `DEFAULT_AUTO_FIELD`, `AUTH_USER_MODEL`, authored
-migration mappings, every `COMPOSE_*` value except derived `COMPOSE_ROOTS` and
-`COMPOSE_SNAPSHOT`, and compiler identity. Built-in/frozen config owners use a
+migration mappings, every `COMPOSE_*` value except derived `COMPOSE_ROOTS`,
+`COMPOSE_SNAPSHOT` and execution-only `COMPOSE_COMMAND_CONTEXT`, and compiler identity. Built-in/frozen config owners use a
 deterministic interpreter implementation/version identity instead of file bytes.
 A redundant root list cannot alter the digest of an unchanged resolved selection.
 
@@ -138,7 +161,8 @@ arguments must agree with corresponding namespace values when both are supplied.
 Explicit authored migration mappings must also agree with `MIGRATION_MODULES` in
 the namespace. Deployment secrets are excluded unless deliberately named.
 
-Default exclusions can be replaced, and apply to extra globs too. Other
+Default exclusions can be replaced and prune the default Python walk. Explicit
+extra globs include matching files even beneath excluded directories. Other
 subdirectories, including any directory named `web`, are ordinary source inputs.
 One shared `SourceResolver` locates modules through native path finders over
 selected app directories and then `sys.path`, and determines installed providers
@@ -164,11 +188,11 @@ before importing settings. `compose --help` answers without Django startup.
 Direct Django launchers must set composition mode themselves before settings
 load; migration commands require it to be absent.
 
-In write/check mode, install selected source configs, retained history-only
-configs, then `django_compose.apps.BuildComposeConfig` last. In serving mode,
-verify the build record, use `serving.installed_apps` for generated config
-substitution and retained history, then install `django_compose.apps.ComposeConfig`
-last. The two configs have the same native identity and cannot coexist.
+`configure` selects the process configuration. In write/check mode it installs
+selected source configs, retained history-only configs, then
+`django_compose.apps.BuildComposeConfig` last. In serving mode it verifies the
+build record and uses `serving.installed_apps` for generated config substitution
+and retained history, then installs `django_compose.apps.ComposeConfig` last. The two configs have the same native identity and cannot coexist.
 
 Build runs in native app-population phase 2, after source `import_models()` hooks
 and before `ready()` callbacks:
@@ -239,7 +263,14 @@ phase system. See [build integrations](extensions.md) for an example.
 generated Python, returning `None` when absent. Invalid or symlinked records
 fail. `serving.verify(snapshot, output_module)` requires an importable package
 and rejects absent, interrupted, mismatched or content-altered output, naming
-composition as the remedy. It checks every owned file hash.
+composition as the remedy. It checks every owned file hash. By default verification is short-lived;
+`configure` requests `retain_startup=True` for serving/check so shared output
+ownership remains through the final native `ready()` callback. A retained startup
+requires an existing real `.compose.lock` alongside the receipt; readers never
+create output or lock files. Configuration errors and package-launcher failures
+close retained ownership. A failed bare `django.setup()` process must terminate.
+The lock is not a full serving-child lifetime lease and coordinates only processes
+in the same filesystem lock domain, not unrelated copies on different hosts.
 
 Generation and emitted bytes are deterministic for identical inputs. No clock,
 random identifier or absolute source path is emitted. Generated Python modules
@@ -317,5 +348,5 @@ App selection, snapshots and serving are usable before Django setup when the
 selected app/config modules satisfy Django's pre-setup import requirements.
 Serving never imports the compiler; model declarations depend on native Django
 models without importing build; build is loaded lazily by the build lifecycle.
-Package imports do not configure Django or load a consumer framework. Django is
-the only base dependency; installed-addon selection and typing are optional.
+Package imports do not configure Django or load a consumer framework. Django,
+packaging and django-yamlconf are base dependencies; typing is optional.

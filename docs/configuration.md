@@ -3,9 +3,10 @@
 Use this guide to add django-compose to your own project. For a first run with
 files already provided, follow the [quick start](quickstart.md).
 
-The current API uses explicit settings helpers. Your settings select the source
-apps, describe the generated package, and choose build or serving configurations.
-There is no `configure()` convenience function.
+Author ordinary Django settings, select source apps, then call
+`django_compose.conf.configure(globals())` once at the end of the settings module.
+It resolves dependencies, applies app contributions, freezes composition inputs
+and selects build or verified serving configurations.
 
 ## Project layout
 
@@ -62,23 +63,13 @@ if __name__ == "__main__":
 
 ## shop/settings.py
 
-Set native and composition settings before creating the snapshot. Keep the
-project-authored `INSTALLED_APPS` as the root selection; capture it before
-replacing it with the configurations used for this process.
+Set native Django values and the generated package location before configuring:
 
 ```python
 # shop/settings.py
 from pathlib import Path
 
-from django_compose.serving import (
-    installed_apps,
-    migration_modules,
-    mode,
-    read_receipt,
-    tombstones,
-    verify,
-)
-from django_compose.snapshot import app_entries, snapshot
+from django_compose.conf import configure
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = "development-only-change-for-deployment"
@@ -92,63 +83,68 @@ DATABASES = {
     }
 }
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
-
-# Ordinary Django app strings or explicit AppConfig paths.
 INSTALLED_APPS = ["catalog.apps.CatalogConfig"]
-MIGRATION_MODULES = {}
-
-# The directory and import path identify the same generated package.
 COMPOSE_OUTPUT_DIR = BASE_DIR / "runtime"
 COMPOSE_OUTPUT_MODULE = "runtime"
-COMPOSE_ROOTS = tuple(INSTALLED_APPS)
-authored_migrations = dict(MIGRATION_MODULES)
-entries = app_entries(COMPOSE_ROOTS)
-COMPOSE_SNAPSHOT = snapshot(
-    entries,
-    namespace=globals(),
-    authored_migration_modules=authored_migrations,
-)
-previous = read_receipt(COMPOSE_OUTPUT_DIR)
 
-if mode():  # write or check: native source imports, then composition
-    INSTALLED_APPS = (
-        tuple(entry.entry for entry in entries)
-        + tombstones(previous, entries, COMPOSE_OUTPUT_MODULE)
-        + ("django_compose.apps.BuildComposeConfig",)
-    )
-else:  # ordinary Django commands and application serving
-    receipt = verify(COMPOSE_SNAPSHOT, COMPOSE_OUTPUT_MODULE)
-    INSTALLED_APPS = installed_apps(entries, receipt, COMPOSE_OUTPUT_MODULE) + (
-        "django_compose.apps.ComposeConfig",
-    )
-
-MIGRATION_MODULES = migration_modules(
-    authored_migrations, previous, COMPOSE_OUTPUT_MODULE
-)
+configure(globals())
 ```
 
-`app_entries` resolves Django app identities; it does not expand dependencies.
-The optional [installed-addon selection](addons.md) can supply that ordered list
-instead.
+`configure` returns `None` and mutates this namespace. `INSTALLED_APPS` contains
+native app strings or explicit AppConfig paths. Optional
+[addon selection](addons.md) uses `COMPOSE_ADDON_GROUP`; without it, native
+`requires_apps` dependencies still apply. Installation alone enables no apps.
 
-`BuildComposeConfig` must be last so all source app `import_models()` hooks run
-before composition and every `ready()` callback sees the generated concrete
-models. In check mode it verifies freshness before integration hooks or model
-discovery. `tombstones` preserves the native migration identity of previously
-selected apps without loading their old models.
+The function owns derived `COMPOSE_ROOTS` and `COMPOSE_SNAPSHOT`; projects and
+contributions must not set them. It snapshots the authored migration mapping,
+then projects retained generated history with authored overrides last. Set
+`MIGRATION_MODULES = {"catalog": None}` before configuring to preserve Django's
+native override semantics, or use `"catalog.migrations"` for source-owned history.
 
-Serving verifies the existing output and substitutes generated subclasses of the
-selected source configurations. Keep the source packages installed: generated
-classes and configurations still import them. `ComposeConfig` supplies management
-commands and checks that the imported generated modules belong to the verified
-build.
+Build/check installs source configs and the build config last. Serving verifies
+existing output before model population and substitutes generated subclasses of
+the selected native configs. Source packages remain required. Native app identity,
+`import_models()` hooks and `ready()` callbacks remain Django-owned; callbacks
+see the generated concrete models.
 
-The final `migration_modules` call starts with retained generated history and
-applies your authored overrides last. An override such as `{"catalog": None}`
-retains Django's native meaning. To keep history in an existing source package,
-set `MIGRATION_MODULES = {"catalog": "catalog.migrations"}` before the snapshot.
-Snapshot the authored mapping before this projection; do not fingerprint the
-generated defaults as project input.
+## App settings contributions
+
+An enabled app can provide a pre-setup-safe `autoconfig.py`:
+
+```python
+# catalog/autoconfig.py
+SETTINGS = {
+    "CATALOG_PAGE_SIZE": 20,
+    "CATALOG_OPTIONS.cache": True,
+    "COMPOSE_FINGERPRINT_GLOBS:append": ["policies/*.txt"],
+}
+
+
+def settings(namespace):
+    return {"CATALOG_LIMIT": int(namespace["CATALOG_PAGE_SIZE"]) * 2}
+```
+
+`SETTINGS` and the optional `settings(namespace)` return value must be mappings.
+They run in resolved dependency order. The callback sees the same effective
+project namespace, including previous contributions. Plain defaults preserve
+project-authored values; lists and dictionaries are defaults too. Two apps
+claiming the same plain scalar default fail, naming both owners, even when the
+project overrides that value. Use native django-yamlconf dotted keys and merge
+directives such as `:append` for additive contributions. Its provenance is
+preserved, including provenance supplied by a project loader; injection errors
+fail explicitly.
+
+Contributions cannot choose `INSTALLED_APPS`, the output package, or derived
+composition state. Keep those project decisions above `configure`.
+
+Environment overlays require declared `COMPOSE_ENV_PREFIXES`, for example
+`("CATALOG_",)`. Only statically declared contribution settings with a matching
+prefix are overlaid before their app's callback. A callback does not see an
+ambient environment mapping: declare a prefixed setting in `SETTINGS`, or have
+the project's loader supply its value. Overlays retain native yamlconf
+provenance. Structural inputs, including custom settings named by
+`COMPOSE_FINGERPRINT_SETTINGS`, cannot come from the environment. Load deployment
+secrets through the project's normal settings mechanism.
 
 ## shop/urls.py
 
@@ -246,12 +242,12 @@ both generated output and migration history match the sources.
 
 ## Choose fingerprint inputs
 
-The snapshot is immutable: create it once, after all settings that affect
-composition are final. Passing `namespace=globals()` supplies their effective
-values. It includes resolved app/config identities, source and configuration
-implementation bytes, integration and transition inputs, `DEFAULT_AUTO_FIELD`,
+The snapshot is immutable and `configure` creates it once after all contributions.
+Author additional inputs before calling `configure`. It includes resolved app/config
+identities, source and configuration implementation bytes, integration and transition inputs, `DEFAULT_AUTO_FIELD`,
 `AUTH_USER_MODEL`, authored migration mappings, and `COMPOSE_*` values. Derived
-`COMPOSE_ROOTS` and `COMPOSE_SNAPSHOT` are excluded.
+`COMPOSE_ROOTS`, `COMPOSE_SNAPSHOT` and execution-only `COMPOSE_COMMAND_CONTEXT`
+are excluded.
 
 Deployment secrets such as `SECRET_KEY` and database credentials do not affect
 model composition and are excluded unless you explicitly name them. You can
@@ -259,7 +255,7 @@ load them through your normal deployment settings mechanism. Any additional
 setting read by a build integration must participate:
 
 ```python
-# Set before COMPOSE_SNAPSHOT.
+# Set before configure(globals()).
 PRODUCT_SEARCH_DEPTH = 3
 COMPOSE_FINGERPRINT_SETTINGS = ("PRODUCT_SEARCH_DEPTH",)
 COMPOSE_FINGERPRINT_GLOBS = ("policies/*.txt",)
@@ -270,6 +266,21 @@ A custom model `Meta.swappable` setting must also be declared as an input;
 The default exclusion patterns are `**/tests/**`, `**/migrations/**` and
 `**/__pycache__/**`. `COMPOSE_FINGERPRINT_EXCLUDES` replaces that set, so include
 those patterns yourself if adding another exclusion. Declared glob paths are
-relative to each selected app directory. Use [build integrations](extensions.md)
-for additional generated files and [the API reference](SPEC.md#settings-and-snapshots)
+relative to each selected app directory and explicitly include matching files
+even under excluded directories. Exclusions prune only the default Python walk.
+Use [build integrations](extensions.md) for additional generated files and
+[the API reference](SPEC.md#settings-and-snapshots)
 for the complete input contract.
+
+## Startup consistency
+
+Serving and check retain a shared output lock from verification through the last
+native `ready()` callback. Writers use the same lock exclusively. An existing
+receipt requires its real `.compose.lock`; readers never create output or a
+missing lock. Configuration failures and errors through the package launcher
+release startup ownership. If bare `django.setup()` fails, terminate that process;
+retrying a partially populated native registry is unsupported.
+
+The lock ends after startup; it does not protect the full serving-child lifetime.
+It coordinates processes sharing the same filesystem lock domain, not separate
+hosts with unrelated copies. Deploy immutable application artifacts accordingly.
