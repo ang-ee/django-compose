@@ -507,3 +507,11 @@ def test_command_context_never_enters_snapshot_even_when_explicitly_requested():
 def test_fingerprint_setting_names_are_validated(declared):
     with pytest.raises(ImproperlyConfigured, match="COMPOSE_FINGERPRINT_SETTINGS"):
         snapshot((), namespace={"COMPOSE_FINGERPRINT_SETTINGS": declared})
+
+
+@pytest.mark.parametrize("name", ["../rename", "rename.py", "a/b", "_private", "Rename", "", "a-b"])
+def test_invalid_transition_names_fail_at_normalization(name):
+    with pytest.raises(ImproperlyConfigured, match="transition declaration|migration name"):
+        transition_declarations(
+            [{"declaring_app": "author", "name": name, "app_label": "alpha", "module": "transitions.rename"}]
+        )

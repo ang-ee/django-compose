@@ -41,6 +41,8 @@ from django_compose.declarations import MigrationPolicy, resolve_integrations
 from django_compose.management import require_serving_mode as require_serving_mode
 from django_compose.migration_imports import HistoricalImport as HistoricalImport
 from django_compose.migration_imports import historical_imports as historical_imports
+from django_compose.serving import read_receipt
+from django_compose.snapshot import transition_declarations
 
 Node = tuple[str, str]
 MATERIALIZED_FOOTER = "# DJANGO-COMPOSE MATERIALIZED MIGRATION - DO NOT EDIT"
@@ -54,8 +56,6 @@ def history_only_labels() -> frozenset[str]:
     A live app may legitimately have no models module. Native apps without a
     composition snapshot have no compiler-declared history-only membership.
     """
-    from django_compose.serving import read_receipt
-
     snap = getattr(settings, "COMPOSE_SNAPSHOT", None)
     if snap is None:
         return frozenset()
@@ -226,8 +226,6 @@ class TransitionBinding:
         labels: Iterable[str],
         declarations: Iterable[Mapping[str, str]] | None = None,
     ) -> None:
-        from django_compose.snapshot import transition_declarations
-
         self.labels = frozenset(labels)
         self.declarations = transition_declarations(
             getattr(getattr(settings, "COMPOSE_SNAPSHOT", None), "transition_records", ())
@@ -279,8 +277,6 @@ class TransitionBinding:
             origins.add(origin)
             if label not in self.labels:
                 raise RuntimeError(f"{origin}: unknown runtime migration target {label!r}")
-            if not name.isidentifier() or not name.islower() or name.startswith("_"):
-                raise RuntimeError(f"{origin}: name must be a lower-case Python identifier")
             module_name = declaration["module"]
             conventional = declaring_app + ".migrations"
             if module_name == conventional or module_name.startswith(conventional + "."):
@@ -805,7 +801,6 @@ def retire_history(label: str, *, purge: bool = False) -> None:
     history for retry; it never records retirement prematurely.
     """
     from django_compose.artifacts import receipt_lock, update_receipt
-    from django_compose.serving import read_receipt
 
     require_serving_mode()
     output = Path(settings.COMPOSE_OUTPUT_DIR)

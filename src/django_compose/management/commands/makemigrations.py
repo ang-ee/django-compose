@@ -22,12 +22,11 @@ from django_compose.migrations import (
     TransitionBinding,
     _metadata,
 )
+from django_compose.serving import read_receipt
 
 
 def history_labels() -> tuple[str, ...]:
     """Read the compiler receipt without invoking composition."""
-    from django_compose.serving import read_receipt
-
     receipt = read_receipt(Path(settings.COMPOSE_OUTPUT_DIR))
     if receipt is None:
         raise CommandError("Migration authoring requires a receipt; run compose first")

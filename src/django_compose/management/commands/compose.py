@@ -6,6 +6,8 @@ from typing import Any
 from django.apps import apps
 from django.core.management.base import BaseCommand, CommandError
 
+from django_compose.serving import mode
+
 
 class Command(BaseCommand):
     help = "Compose concrete models and capability artifacts."
@@ -15,8 +17,6 @@ class Command(BaseCommand):
         parser.add_argument("--check", action="store_true", help="Compare output without writing files")
 
     def handle(self, *args: Any, **options: Any) -> None:
-        from django_compose.serving import mode
-
         expected = "check" if options["check"] else "write"
         config = apps.get_app_config("django_compose")
         if mode() != expected or getattr(config, "compose_mode", None) != expected:

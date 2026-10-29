@@ -54,7 +54,8 @@ class BuildPlan:
         ):
             raise ImproperlyConfigured("Output package must have Python identifiers")
         self.snapshot = snap
-        self.configs = tuple(c for c in configs if c.name != "django_compose")
+        selected = {entry.name for entry in snap.entries}
+        self.configs = tuple(c for c in configs if c.name in selected)
         self.mode = mode
         self.integrations = integrations
         self.transitions = tuple(transitions)
@@ -158,12 +159,7 @@ class BuildPlan:
                         "        from importlib import import_module\n"
                         f"        self.models_module = import_module({model_module!r})\n"
                     )
-                else:
-                    body = (
-                        "from django.apps import AppConfig\n\nclass LegacyConfig(AppConfig):\n"
-                        f"    name = {f'{self.output_module}.{label}'!r}\n    label = {label!r}\n"
-                    )
-                self.sources[Path(label) / "apps.py"] = self._header(body)
+                    self.sources[Path(label) / "apps.py"] = self._header(body)
                 if label in self.labels:
                     self.sources[Path(label) / "models.py"] = self._header(
                         render_models(
@@ -286,21 +282,5 @@ def emit(
     ).emit()
 
 
-def render_artifacts(
-    composition: BuildPlan, models_view: ConcreteModels, hooks: Iterable[ArtifactHook], *, mode: str
-) -> None:
-    if mode != composition.mode:
-        raise ImproperlyConfigured("Compose mode cannot change during population")
-    composition.render_artifacts(models_view, hooks)
-
-
-def finalize(receipt_fields: BuildPlan, output_dir: Path | str, output_module: str) -> Receipt:
-    if Path(output_dir) != receipt_fields.output_dir or output_module != receipt_fields.output_module:
-        raise ImproperlyConfigured("Cannot finalize a different generated package")
-    return receipt_fields.finalize()
-
-
-def clean(
-    output_dir: Path | str, *, external_roots: Iterable[str] = (), owned_paths: Iterable[str] = ()
-) -> tuple[Path, ...]:
+def clean(output_dir: Path | str) -> tuple[Path, ...]:
     return GeneratedTree(Path(output_dir), {}).clean()

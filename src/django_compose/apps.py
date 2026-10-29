@@ -58,7 +58,7 @@ class BuildComposeConfig(AppConfig):
         if self.apps is None or tuple(self.apps.get_app_configs())[-1] is not self:
             raise ImproperlyConfigured("BuildComposeConfig must be last in INSTALLED_APPS")
         self.compose_mode = selected_mode
-        from django_compose.build import ConcreteModels, emit, finalize, render_artifacts
+        from django_compose.build import ConcreteModels, emit
         from django_compose.declarations import ArtifactHook, resolve_integrations
 
         snap = getattr(settings, "COMPOSE_SNAPSHOT", None)
@@ -81,13 +81,11 @@ class BuildComposeConfig(AppConfig):
             output_module=output_module,
         )
         try:
-            render_artifacts(
-                self.plan,
+            self.plan.render_artifacts(
                 ConcreteModels(self.plan.composition),
                 tuple(hook for hook in integrations if isinstance(hook, ArtifactHook)),
-                mode=selected_mode,
             )
-            self.receipt = finalize(self.plan, output_dir, output_module)
+            self.receipt = self.plan.finalize()
         except BaseException:
             self.plan.close()
             raise

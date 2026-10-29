@@ -92,6 +92,7 @@ django.setup()
 from django.apps import apps
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.core.exceptions import ImproperlyConfigured
 from django.db import connection, migrations, models
 from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.loader import MigrationLoader
@@ -275,7 +276,7 @@ def test_invalid_declaration_names(host, bad):
     run(f"""
 declarations.entries[0]["name"] = {bad}
 before = files()
-expect(RuntimeError, "lower-case", lambda: owner().materialize(apps))
+expect(ImproperlyConfigured, "lower-case", lambda: owner().materialize(apps))
 assert files() == before
 """)
 
@@ -682,4 +683,24 @@ owner().check()
 assert owner().materialize(apps) == ()
 assert files() == original
 assert not hasattr(MigrationLoader(None).disk_migrations[("alpha", "rename")], "compose_body_sha256")
+""")
+
+
+def test_default_numeric_transition_materializes_native_history(host):
+    root, run = host
+    write(root, "author/compose_migrations/__init__.py")
+    write(root, "author/compose_migrations/alpha/__init__.py")
+    write(root, "author/compose_migrations/alpha/0002_rename.py", TRANSITION)
+    run("""
+from django_compose.snapshot import Entry, snapshot
+entry = Entry("author", "author", "django.apps.AppConfig", str(Path("author").resolve()), "author")
+snap = snapshot((entry,))
+assert snap.transition_records[0]["name"] == "0002_rename"
+binding = TransitionBinding(labels=("alpha", "beta"), declarations=snap.transition_records)
+path, = binding.materialize(apps)
+assert "author:0002_rename" in path.read_text()
+assert binding.materialize(apps) == ()
+executor = MigrationExecutor(connection)
+executor.migrate(executor.loader.graph.leaf_nodes())
+assert "new" in executor.loader.project_state().models[("alpha", "record")].fields
 """)

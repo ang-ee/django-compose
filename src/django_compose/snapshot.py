@@ -182,6 +182,9 @@ def transition_declarations(source: Any) -> tuple[Mapping[str, str], ...]:
         if not all(isinstance(value, str) and value for value in declaration.values()):
             raise ImproperlyConfigured(f"Invalid transition declaration: {declaration!r}")
         origin = f"{declaration['declaring_app']}:{declaration['name']}"
+        name = declaration["name"]
+        if not ("_" + name).isidentifier() or name != name.lower() or name.startswith("_"):
+            raise ImproperlyConfigured(f"{origin}: name must be a lower-case migration name")
         if origin in origins:
             raise ImproperlyConfigured(f"Duplicate transition origin: {origin}")
         origins.add(origin)
@@ -199,7 +202,7 @@ def _default_transitions(entries: tuple[Entry, ...]) -> tuple[Mapping[str, str],
             if path.name == "__init__.py" or not path.is_file():
                 continue
             label = path.parent.name
-            if not label.isidentifier() or not ("_" + path.stem).isidentifier():
+            if not label.isidentifier():
                 raise ImproperlyConfigured(f"Invalid default transition path: {path}")
             records.append(
                 {

@@ -216,6 +216,7 @@ def test_removed_source_uses_prebuilt_source_free_history_config(tmp_path: Path)
     )
     assert (root / "runtime/custom_boot/migrations/__init__.py").exists()
     assert not (root / "runtime/custom_boot/models.py").exists()
+    assert not (root / "runtime/custom_boot/apps.py").exists()
 
 
 def test_native_auth_ready_observes_concrete_model(tmp_path: Path) -> None:
