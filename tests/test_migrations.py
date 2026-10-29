@@ -591,3 +591,75 @@ before = files()
 expect(RuntimeError, "end with a newline", lambda: owner().materialize(apps))
 assert before == files()
 """)
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "",
+        '"""Author docstring with non-ASCII déjà vu."""\n',
+        "from __future__ import annotations\n",
+        '"""Author docstring."""\nfrom __future__ import annotations\nfrom __future__ import division\n',
+        '"""Inline déjà vu."""; from __future__ import annotations; ',
+    ],
+)
+def test_snapshot_retains_relative_import_context_after_declaration_module_removal(host, header):
+    root, run = host
+    write(root, "author/transitions/helper.py", 'VALUE = "relative conversion"\n')
+    source = header + "from .helper import VALUE\n" + TRANSITION.replace('new="converted"', "new=VALUE")
+    if "__future__" in header:
+        source = source.replace("def fill(apps, editor):", "def fill(apps: UndefinedHistoricalType, editor):")
+    write(root, "author/transitions/rename.py", source)
+    run("""
+import hashlib
+source = Path("author/transitions/rename.py").read_bytes()
+plan, = owner().plan()
+assert plan.source_package == "author.transitions"
+executor = MigrationExecutor(connection)
+executor.migrate([("alpha", "0001_origin")])
+legacy = executor.loader.project_state().apps.get_model("alpha", "Record")
+legacy._base_manager.create(old="must convert")
+path, = owner().materialize(apps)
+module = importlib.import_module("history.alpha.rename")
+author = importlib.import_module("author.transitions.rename")
+assert module.__doc__ == author.__doc__
+assert module.fill.__annotations__ == author.fill.__annotations__
+assert module.Migration.compose_source_sha256 == hashlib.sha256(source).hexdigest()
+body = path.read_bytes().partition(b"# DJANGO-COMPOSE MATERIALIZED MIGRATION")[0]
+assert module.Migration.compose_body_sha256 == hashlib.sha256(body).hexdigest()
+assert module.Migration.compose_body_sha256 != module.Migration.compose_source_sha256
+original = files()
+declarations.entries = []
+Path("author/transitions/rename.py").unlink()
+refresh()
+# The author module is gone; only its ordinary helper package remains.
+executor = MigrationExecutor(connection)
+executor.migrate(executor.loader.graph.leaf_nodes())
+converted = apps.get_model("alpha", "Record")._base_manager.values_list("new", flat=True)
+assert list(converted) == ["relative conversion"]
+assert owner().materialize(apps) == ()
+assert files() == original
+""")
+
+
+def test_original_canonical_snapshot_without_separate_body_digest_remains_immutable(host):
+    _, run = host
+    run("""
+import hashlib
+from django_compose.migrations import MATERIALIZED_FOOTER
+source = Path("author/transitions/rename.py").read_text()
+payload = (source + MATERIALIZED_FOOTER + "\\n"
+    + "Migration.dependencies = [('alpha', '0001_origin')]\\n"
+    + "Migration.run_before = []\\n"
+    + "Migration.compose_origin = 'author:rename'\\n"
+    + f"Migration.compose_source_sha256 = {hashlib.sha256(source.encode()).hexdigest()!r}\\n")
+path = Path("history/alpha/rename.py")
+seal = hashlib.sha256(payload.encode()).hexdigest()
+path.write_text(payload + f"Migration.compose_materialization_sha256 = {seal!r}\\n")
+refresh()
+original = files()
+owner().check()
+assert owner().materialize(apps) == ()
+assert files() == original
+assert not hasattr(MigrationLoader(None).disk_migrations[("alpha", "rename")], "compose_body_sha256")
+""")

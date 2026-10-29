@@ -402,3 +402,58 @@ after.remove_field("alpha", "item", "computed")
 with patch.object(connection, "cursor", side_effect=AssertionError("independent storage")):
     assert DropGuardAutodetector(before, after).changes(graph)["alpha"]
 """)
+
+
+@pytest.mark.parametrize("drop", ["column", "table"])
+def test_default_router_protects_rows_stored_only_on_secondary_alias(host, drop):
+    _, run = host
+    run(f"""
+from django.db import connections, router
+from django.db.migrations.recorder import MigrationRecorder
+connections.settings["other"] = {{**settings.DATABASES["default"], "NAME": "other.sqlite3"}}
+assert not settings.DATABASE_ROUTERS
+executor = MigrationExecutor(connections["other"])
+executor.migrate([("alpha", "0001_origin")])
+before = executor.loader.project_state()
+model = before.apps.get_model("alpha", "Record")
+model._base_manager.using("other").create(old="secondary protection")
+assert router.allow_migrate_model("other", model)
+after = before.clone()
+if {drop!r} == "column":
+    after.remove_field("alpha", "record", "old")
+else:
+    after.remove_model("alpha", "record")
+original = files()
+recorded = set(MigrationRecorder(connections["other"]).applied_migrations())
+def action():
+    return DropGuardAutodetector(before, after).changes(executor.loader.graph)
+expect(CommandError, "on 'other'", action)
+assert files() == original
+assert set(MigrationRecorder(connections["other"]).applied_migrations()) == recorded
+assert list(model._base_manager.using("other").values_list("old", flat=True)) == ["secondary protection"]
+""")
+
+
+def test_reset_without_custom_routers_preserves_every_database_and_history_file(host):
+    _, run = host
+    run("""
+from django.db import connections
+from django.db.migrations.recorder import MigrationRecorder
+connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
+assert not settings.DATABASE_ROUTERS
+owner().materialize(apps)
+for alias in ("default", "other"):
+    executor = MigrationExecutor(connections[alias])
+    executor.migrate(executor.loader.graph.leaf_nodes())
+    apps.get_model("alpha", "Record")._base_manager.using(alias).create(new=alias)
+declarations.entries = []
+original = files()
+recorded = {alias: set(MigrationRecorder(connections[alias]).applied_migrations())
+            for alias in ("default", "other")}
+expect(RuntimeError, "also routed", lambda: reset_migration_history(("alpha",)))
+assert files() == original
+for alias in ("default", "other"):
+    assert set(MigrationRecorder(connections[alias]).applied_migrations()) == recorded[alias]
+    values = apps.get_model("alpha", "Record")._base_manager.using(alias).values_list("new", flat=True)
+    assert list(values) == [alias]
+""")

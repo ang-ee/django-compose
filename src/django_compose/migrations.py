@@ -6,6 +6,7 @@ history; Django remains responsible for migration state, execution and recording
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib
 import os
@@ -19,7 +20,6 @@ from typing import Any, cast
 from django.apps import AppConfig
 from django.apps import apps as global_apps
 from django.apps.registry import Apps
-from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -116,6 +116,7 @@ class RuntimeMigrationPlan:
     source_sha256: str
     dependencies: tuple[Node, ...]
     run_before: tuple[Node, ...]
+    source_package: str
 
 
 @dataclass(frozen=True)
@@ -126,6 +127,7 @@ class _Source:
     path: Path
     text: str
     digest: str
+    package: str
 
 
 class _BindingLoader(MigrationLoader):
@@ -196,11 +198,18 @@ class RuntimeMigrations:
             path = _directory(key[0]) / f"{key[1]}.py"
             data = path.read_bytes()
             digest = _metadata(migration, "source_sha256")
-            marker = MATERIALIZED_FOOTER.encode() if hasattr(migration, "compose_origin") else _LEGACY_FOOTER
+            canonical = hasattr(migration, "compose_origin")
+            body_digest = getattr(migration, "compose_body_sha256", digest) if canonical else digest
+            marker = MATERIALIZED_FOOTER.encode() if canonical else _LEGACY_FOOTER
             body, separator, _ = data.partition(marker)
-            if not separator or not isinstance(digest, str) or hashlib.sha256(body).hexdigest() != digest:
+            if (
+                not separator
+                or not isinstance(digest, str)
+                or not isinstance(body_digest, str)
+                or hashlib.sha256(body).hexdigest() != body_digest
+            ):
                 raise RuntimeError(f"{origin}: materialized body digest changed or footer is missing")
-            if hasattr(migration, "compose_origin"):
+            if canonical:
                 payload, separator, seal = data.rpartition(_SEAL_PREFIX)
                 expected = repr(hashlib.sha256(payload).hexdigest()).encode() + b"\n"
                 if not separator or seal != expected:
@@ -278,7 +287,10 @@ class RuntimeMigrations:
                 leaves = loader.graph.leaf_nodes(label)
                 if len(leaves) == 1 and leaves[0] not in migration.dependencies:
                     cast(list[Node], migration.dependencies).append(leaves[0])
-                pending[key] = _Source(origin, migration, guard, path, data.decode("utf-8"), digest)
+                package = (module.__spec__.parent if module.__spec__ else None) or module_name.rpartition(
+                    "."
+                )[0]
+                pending[key] = _Source(origin, migration, guard, path, data.decode("utf-8"), digest, package)
         return pending
 
     def plan(
@@ -347,6 +359,7 @@ class RuntimeMigrations:
                     source.digest,
                     tuple(source.migration.dependencies),
                     tuple(source.migration.run_before),
+                    source.package,
                 )
             )
         if apps is not None and not defer_drop_check:
@@ -396,14 +409,38 @@ class RuntimeMigrations:
     def _render(plan: RuntimeMigrationPlan) -> bytes:
         if not plan.source.endswith("\n"):
             raise RuntimeError(f"{plan.origin}: source migration must end with a newline")
+        # Keep native relative imports anchored to the author package. Module
+        # docstrings and future imports must precede the injected assignment.
+        header = None
+        for index, node in enumerate(ast.parse(plan.source).body):
+            if (
+                index == 0
+                and isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ) or (isinstance(node, ast.ImportFrom) and node.module == "__future__"):
+                header = node
+            else:
+                break
+        original = plan.source.encode()
+        if header is None:
+            body = f"__package__ = {plan.source_package!r}\n".encode() + original
+        else:
+            lines = original.splitlines(keepends=True)
+            offset = sum(map(len, lines[: cast(int, header.end_lineno) - 1])) + cast(
+                int, header.end_col_offset
+            )
+            body = original[:offset] + f"; __package__ = {plan.source_package!r}".encode() + original[offset:]
+        body_digest = hashlib.sha256(body).hexdigest()
         payload = (
-            plan.source
+            body.decode()
             + MATERIALIZED_FOOTER
             + "\n"
             + f"Migration.dependencies = {list(plan.dependencies)!r}\n"
             + f"Migration.run_before = {list(plan.run_before)!r}\n"
             + f"Migration.compose_origin = {plan.origin!r}\n"
             + f"Migration.compose_source_sha256 = {plan.source_sha256!r}\n"
+            + f"Migration.compose_body_sha256 = {body_digest!r}\n"
         ).encode()
         return payload + _SEAL_PREFIX + repr(hashlib.sha256(payload).hexdigest()).encode() + b"\n"
 
@@ -541,8 +578,7 @@ class DropGuardAutodetector(MigrationAutodetector):
         table: str,
         column: str | None,
     ) -> Iterator[str]:
-        aliases = connections if settings.DATABASE_ROUTERS else [DEFAULT_DB_ALIAS]
-        for alias in sorted(aliases):
+        for alias in sorted(connections):
             if not router.allow_migrate_model(alias, model):
                 continue
             connection = connections[alias]
@@ -597,15 +633,11 @@ def reset_migration_history(
     connection = connections[database]
     if not connection.features.supports_transactions:
         raise RuntimeError("history reset requires transactional recorder support")
-    for alias in connections:
-        if (
-            alias != database
-            and settings.DATABASE_ROUTERS
-            and any(
-                router.allow_migrate_model(alias, model)
-                for label in labels
-                for model in global_apps.get_app_config(label).get_models()
-            )
+    for alias in sorted(connections):
+        if alias != database and any(
+            router.allow_migrate_model(alias, model)
+            for label in labels
+            for model in global_apps.get_app_config(label).get_models()
         ):
             raise RuntimeError(
                 f"selected history is also routed to database {alias!r}; coordinate its cutoff first"
