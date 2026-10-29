@@ -785,24 +785,35 @@ def historical_imports(output_dir: Path) -> tuple[HistoricalImport, ...]:
 
 
 def _history_aliases(loader: MigrationLoader, labels: set[str]) -> tuple[str, ...]:
-    historical = loader.project_state().apps
-    models = [model for model in historical.get_models() if model._meta.app_label in labels]
-    if not models:
-        # A previously authored purge may already be the graph leaf on retry.
-        # Its predecessor state still owns model-specific routing facts.
-        for leaf in loader.graph.leaf_nodes():
-            if leaf[0] in labels:
-                prior = loader.project_state(nodes=[leaf], at_end=False).apps
-                models.extend(model for model in prior.get_models() if model._meta.app_label in labels)
-    return tuple(
+    """Union routes for every native historical model, including deleted models.
+
+    Intermediate operation states matter: a model may be created and deleted
+    within one migration, or change routing identity before a later deletion.
+    Native operations own those state transitions; leaf state alone loses them.
+    """
+    aliases: set[str] = set()
+    model_labels: set[str] = set()
+
+    def include(state: ProjectState) -> None:
+        for model in state.apps.get_models():
+            if model._meta.app_label in labels:
+                model_labels.add(model._meta.app_label)
+                aliases.update(alias for alias in connections if router.allow_migrate_model(alias, model))
+
+    for node, migration in sorted(loader.graph.nodes.items()):
+        if node[0] not in labels:
+            continue
+        state = loader.project_state(nodes=[node], at_end=False)
+        include(state)
+        for operation in migration.operations:
+            operation.state_forwards(node[0], state)
+            include(state)
+    aliases.update(
         alias
-        for alias in sorted(connections)
-        if (
-            any(router.allow_migrate_model(alias, model) for model in models)
-            if models
-            else any(router.allow_migrate(alias, label) for label in labels)
-        )
+        for alias in connections
+        if any(router.allow_migrate(alias, label) for label in labels - model_labels)
     )
+    return tuple(sorted(aliases))
 
 
 def _check_dependents(loader: MigrationLoader, labels: set[str]) -> None:

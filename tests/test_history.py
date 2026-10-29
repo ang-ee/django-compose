@@ -234,3 +234,97 @@ expect(DatabaseError, "unable to open", lambda: retire_history("alpha"))
 assert not updated.called
 """
     )
+
+
+@pytest.mark.parametrize("operation", ["retire", "reset"])
+def test_deleted_historical_model_keeps_secondary_database_in_cutoff_scope(host, operation):
+    root, run = host
+    write(
+        root,
+        "history/alpha/0001_origin.py",
+        """
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    dependencies = []
+    operations = [migrations.CreateModel(name=name, fields=[
+        ("id", models.AutoField(primary_key=True)),
+    ]) for name in ("Record", "Legacy")]
+""",
+    )
+    write(
+        root,
+        "history/alpha/0002_delete.py",
+        """
+from django.db import migrations
+class Migration(migrations.Migration):
+    dependencies = [("alpha", "0001_origin")]
+    operations = [migrations.DeleteModel(name="Legacy")]
+""",
+    )
+    run(
+        DISABLE
+        + f"""
+from django.db import connections, router
+from django.db.migrations.recorder import MigrationRecorder
+from django_compose.migrations import _history_aliases
+connections.settings["other"] = {{**settings.DATABASES["default"], "NAME": "other.sqlite3"}}
+class ModelRouter:
+    def allow_migrate(self, db, app_label, model_name=None, **hints):
+        if app_label == "alpha" and model_name:
+            return db == ("other" if model_name == "legacy" else "default")
+        return None
+with patch.object(router, "routers", [ModelRouter()]):
+    executor = MigrationExecutor(connection)
+    executor.migrate(executor.loader.graph.leaf_nodes())
+    secondary = MigrationExecutor(connections["other"])
+    secondary.migrate([("alpha", "0001_origin")])
+    assert _history_aliases(MigrationLoader(None), {{"alpha"}}) == ("default", "other")
+    before = files()
+    records = {{alias: set(MigrationRecorder(connections[alias]).applied_migrations())
+               for alias in connections}}
+    if {operation!r} == "retire":
+        expect(RuntimeError, "database 'other'", lambda: retire_history("alpha"))
+    else:
+        expect(RuntimeError, "also routed", lambda: reset_migration_history(("alpha",)))
+    assert not updated.called
+    assert files() == before
+    assert "alpha_legacy" in connections["other"].introspection.table_names()
+    for alias in connections:
+        assert set(MigrationRecorder(connections[alias]).applied_migrations()) == records[alias]
+"""
+    )
+
+
+def test_transient_model_inside_one_migration_keeps_its_database_in_scope(host):
+    root, run = host
+    write(
+        root,
+        "history/alpha/0001_origin.py",
+        """
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    dependencies = []
+    operations = [migrations.CreateModel(name=name, fields=[
+        ("id", models.AutoField(primary_key=True)),
+    ]) for name in ("Record", "Legacy")] + [migrations.DeleteModel(name="Legacy")]
+""",
+    )
+    run(
+        DISABLE
+        + """
+from django.db import connections, router
+from django_compose.migrations import _history_aliases
+connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
+class ModelRouter:
+    def allow_migrate(self, db, app_label, model_name=None, **hints):
+        if app_label == "alpha" and model_name:
+            return db == ("other" if model_name == "legacy" else "default")
+        return None
+with patch.object(router, "routers", [ModelRouter()]):
+    executor = MigrationExecutor(connection)
+    executor.migrate(executor.loader.graph.leaf_nodes())
+    assert _history_aliases(MigrationLoader(None), {"alpha"}) == ("default", "other")
+    expect(RuntimeError, "database 'other'", lambda: retire_history("alpha"))
+assert not updated.called
+"""
+    )
