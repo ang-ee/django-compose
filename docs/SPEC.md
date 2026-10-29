@@ -256,8 +256,11 @@ incremental analysis agree. Host settings inference and history projections
 belong to host plugins. The extra pins verified upstream revisions; ordinary
 serving installations do not need mypy or django-stubs.
 
-Snapshot and serving import stdlib and pre-setup Django configuration/exceptions
-only: never models, build, composition, rendering, artifacts or integrations.
+Snapshot and serving use stdlib, pre-setup Django configuration/exceptions, and
+native `django.apps.AppConfig.create` to resolve selected app identities. Selected
+app and config modules must remain safe to import before Django setup. These
+owners never import models, build, composition, rendering, artifacts or
+integrations.
 Models imports native Django models but never build. Apps lazily imports build
 only from BuildComposeConfig.import_models. Serving and management dispatch do
 not rebuild an app graph or introduce another composition engine.
