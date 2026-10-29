@@ -12,6 +12,7 @@ import pytest
 from django.apps import AppConfig
 from django.core.exceptions import ImproperlyConfigured
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 from django_compose.addons import active_requirements, enabled_apps, installed_addons
 
@@ -25,6 +26,15 @@ def installed(tmp_path, monkeypatch):
     apps = set()
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setattr(metadata, "distributions", lambda: tuple(distributions))
+
+    def distribution(name):
+        return next(
+            dist
+            for dist in distributions
+            if canonicalize_name(dist.metadata["Name"]) == canonicalize_name(name)
+        )
+
+    monkeypatch.setattr(metadata, "distribution", distribution)
 
     class Installed:
         def app(self, name, *, configs="", requires=(), label=None):
@@ -371,7 +381,7 @@ def test_active_requirements_are_native_platform_filtered_and_extra_empty(instal
     assert str(requirements[1].specifier) == ">=1"
 
 
-@pytest.mark.parametrize("kind", ("provider", "entries", "distribution"))
+@pytest.mark.parametrize("kind", ("provider", "entries"))
 def test_installed_index_rejects_metadata_collisions_without_activation(installed, kind):
     installed.distribution(
         "first-provider",
@@ -380,9 +390,7 @@ def test_installed_index_rejects_metadata_collisions_without_activation(installe
     )
     if kind == "provider":
         installed.distribution("second-provider", app="unimportable.app")
-    elif kind == "distribution":
-        installed.distribution("first.provider")
-    with pytest.raises(ImproperlyConfigured, match="Competing providers|one entry point|Multiple installed"):
+    with pytest.raises(ImproperlyConfigured, match="Competing providers|one entry point"):
         installed_addons(GROUP)
 
 
@@ -479,3 +487,52 @@ def test_closure_configs_keep_dependency_order_and_tuple_immutability(installed)
         closure.app_configs = ()
     with pytest.raises(TypeError):
         closure.app_configs[0] = closure.app_configs[1]
+
+
+@pytest.mark.parametrize("first", ["installed", "source"])
+def test_native_distribution_precedence_with_actual_dist_and_egg_info(tmp_path, monkeypatch, first):
+    installed = tmp_path / "installed"
+    source = tmp_path / "source"
+    installed.mkdir()
+    source.mkdir()
+    for root, suffix, metadata_file, requirement, app in (
+        (installed, "-1.0.dist-info", "METADATA", "installed-requirement>=2", "unimportable.installed"),
+        (source, ".egg-info", "PKG-INFO", "source-requirement>=3", "unimportable.source"),
+    ):
+        directory = root / ("compose_native_shadow" + suffix)
+        directory.mkdir()
+        (directory / metadata_file).write_text(
+            "Metadata-Version: 2.3\nName: compose-native-shadow\nVersion: 1.0\n"
+            f"Requires-Dist: {requirement}\n"
+        )
+        (directory / "entry_points.txt").write_text(f"[{GROUP}]\n{app} = {app}.Config\n")
+        # An unrelated editable duplicate must not reject the entire index.
+        unrelated = root / ("compose_unrelated_shadow" + suffix)
+        unrelated.mkdir()
+        (unrelated / metadata_file).write_text(
+            "Metadata-Version: 2.3\nName: compose-unrelated-shadow\nVersion: 1.0\n"
+        )
+    paths = (installed, source) if first == "installed" else (source, installed)
+    monkeypatch.setattr(sys, "path", [*map(str, paths), *sys.path])
+    discovered = [
+        dist
+        for dist in metadata.distributions()
+        if canonicalize_name(dist.metadata["Name"]) == "compose-native-shadow"
+    ]
+    assert len(discovered) == 2
+    winner = metadata.distribution("compose-native-shadow")
+    native_distribution = metadata.distribution
+    calls = []
+
+    def distribution(name):
+        calls.append(name)
+        return native_distribution(name)
+
+    monkeypatch.setattr(metadata, "distribution", distribution)
+    index = installed_addons(GROUP)
+    assert calls.count("compose-native-shadow") == 1
+    assert calls.count("compose-unrelated-shadow") == 1
+    assert index.distributions["compose-native-shadow"].requires == winner.requires
+    assert index.entry_points["compose-native-shadow"] == next(iter(winner.entry_points.select(group=GROUP)))
+    assert tuple(map(str, index.active_requirements("compose-native-shadow"))) == tuple(winner.requires)
+    assert not any(name.startswith("unimportable") for name in sys.modules)
