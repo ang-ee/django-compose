@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 from contextlib import ExitStack
+from types import MappingProxyType
 from typing import Any
 
 from django.apps import apps
@@ -40,14 +41,36 @@ class _Dispatch:
         return getattr(self.command, name)
 
     def run_from_argv(self, argv: list[str]) -> Any:
-        with ExitStack() as stack:
-            # runserver recovery fabricates apps.ready but never sets ready_event.
-            if apps.ready_event.is_set() and not any(
-                item in {"--help", "-h", "--version"} for item in argv[1:]
-            ):
-                for dotted in getattr(settings, "COMPOSE_COMMAND_CONTEXT", ()):
-                    stack.enter_context(import_string(dotted)(argv[1], tuple(argv)))
+        """Adapt native execute after parsing, retaining the winning argv dispatcher.
+
+        Custom run_from_argv implementations must call self.execute to participate.
+        Factories receive command, original argv and read-only shallow-copied options.
+        The native dispatcher continues to own parsing, errors and connection cleanup.
+        """
+        original_execute = self.command.execute
+        missing = object()
+        previous = vars(self.command).get("execute", missing)
+        original_argv = tuple(argv)
+
+        def execute(*args: Any, **options: Any) -> Any:
+            with ExitStack() as stack:
+                # runserver recovery fabricates ready flags, but not ready_event.
+                if apps.ready_event.is_set():
+                    parsed_options = MappingProxyType(options.copy())
+                    for dotted in getattr(settings, "COMPOSE_COMMAND_CONTEXT", ()):
+                        stack.enter_context(
+                            import_string(dotted)(original_argv[1], original_argv, parsed_options)
+                        )
+                return original_execute(*args, **options)
+
+        self.command.execute = execute
+        try:
             return self.command.run_from_argv(argv)
+        finally:
+            if previous is missing:
+                del self.command.execute
+            else:
+                self.command.execute = previous
 
 
 class _Utility(ManagementUtility):

@@ -36,13 +36,13 @@ def project(root: Path) -> None:
     (package / "contexts.py").write_text("""from contextlib import contextmanager
 from django.apps import apps
 @contextmanager
-def first(command, argv):
+def first(command, argv, options):
     assert apps.get_model("plain.Record")
     print("first-enter", command)
     try: yield
     finally: print("first-exit")
 @contextmanager
-def second(command, argv):
+def second(command, argv, options):
     print("second-enter")
     try: yield
     finally: print("second-exit")
