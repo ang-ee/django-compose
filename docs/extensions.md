@@ -1,71 +1,123 @@
-# Extension owners
+# Build integrations
 
-`django_compose.models.Composable` accepts four class keywords:
+Use an integration when your reusable app needs literal metadata on generated
+models or an additional generated file. For ordinary model fields, methods and
+managers, use [model extension classes](models.md) instead.
 
-| Keyword | Meaning | Inherited declaration |
+An integration is an ordinary class selected by a dotted path in
+`COMPOSE_INTEGRATIONS`. The builder imports and instantiates each class once, in
+settings order, after Django has imported the source model declarations. A class
+implements one or more supported protocols through its methods; inheriting a
+package base class is unnecessary.
+
+## Example: export the composed model's field list
+
+For the `catalog.Product` in [project configuration](configuration.md), this
+integration adds a literal export name and writes a JSON description of the
+actual generated model. It works after other selected apps have contributed
+fields to that model.
+
+```python
+# catalog/integrations.py
+import json
+from pathlib import Path
+
+from django_compose.declarations import ModelDeclaration
+
+
+class ProductExport:
+    external_root = "exports"
+
+    def model_declaration(self, composition, source):
+        if source._meta.label_lower != "catalog.product":
+            return ModelDeclaration()
+        return ModelDeclaration(attributes={"export_name": "products"})
+
+    def render(self, composition, models):
+        Product = models.get_model("catalog", "Product")
+        document = {
+            "model": Product._meta.label,
+            "name": Product.export_name,
+            "fields": [field.name for field in Product._meta.fields],
+        }
+        content = json.dumps(document, sort_keys=True, indent=2) + "\n"
+        return {Path("exports/catalog.json"): content.encode("utf-8")}
+```
+
+Declare both the integration and its file ownership before creating the snapshot
+in settings:
+
+```python
+# shop/settings.py, before COMPOSE_SNAPSHOT
+COMPOSE_INTEGRATIONS = ("catalog.integrations.ProductExport",)
+COMPOSE_EXTERNAL_ARTIFACT_ROOTS = ("exports",)
+COMPOSE_OWNED_ARTIFACT_PATHS = ("exports/catalog.json",)
+```
+
+Run `python manage.py compose` again. The file appears at
+`runtime/exports/catalog.json`. `compose --check` compares the rendered bytes and
+fails if they differ. Integration modules may import source models, but app and
+AppConfig modules must remain safe to import before Django setup. Snapshot
+locates integration module files without importing them.
+
+## Supported protocols
+
+| Protocol in `django_compose.declarations` | Required interface | When it runs |
 | --- | --- | --- |
-| `concrete=True` | New concrete identity | No |
-| `extends="label.Model"` | Add an abstract donor base to an identity | No |
-| `inherits="label.Model"` | Concrete child of this multi-table parent | No |
-| `demands="label.Model"` | Required concrete ancestor | Yes, through the MRO |
+| `ModelDeclarationHook` | `model_declaration(composition, source) -> ModelDeclaration` | Before rendering each generated model |
+| `ArtifactHook` | `external_root: str`; `render(composition, models) -> Mapping[Path, bytes]` | After concrete model registration, before `ready()` callbacks |
+| `MigrationPolicy` | `retired_primary_keys(model, alias) -> Iterable[Any]` | Destructive migration checks |
 
-`concrete`, `extends` and `inherits` are mutually exclusive. `inherits`
-implies concrete and may not repeat `concrete`; `demands` combines with
-any declaration or none. Targets use Django's lazy `app_label.Model` form.
-Every source and donor must be explicitly abstract using native `Meta`. A source
-app's native `models_module` exports declarations; foreign reexports do not
-declare them.
+A class can implement any combination. Duplicate integration classes, classes
+that implement no protocol, and classes requiring constructor arguments fail.
+The `MigrationPolicy` result is an explicit exemption for rows owned by the
+integration, not a general replacement for the migration safety checks. Use the
+[migration guide](migrations.md) for that advanced workflow.
 
-The public `ModelComposition` facts API exposes `ordered_models`,
-`models_by_label`, `donors(source)`, `parent(source)`,
-`contributed_fields(source)`, and `contributed_field_origins(source)`.
-Fields and managers remain native Django objects. Donors precede the source,
-then its concrete parent. The first donor manager overrides a source manager;
-two donors declaring different managers under one name fail. A donor may author
-`Meta.constraints`, `abstract` and `app_label`; other authored native Meta options
-fail with the donor named. Shared abstract ancestry contributes once.
+## Model metadata
 
-## Capability protocols
+`ModelDeclaration(attributes=..., meta_options=...)` contributes literal class
+attributes and custom `Meta` options. Allowed values are `None`, booleans,
+integers, strings, nested lists/tuples and dictionaries with string keys.
+Rendering sorts dictionary keys. Floats, executable values, native fields,
+managers and methods are outside this declaration interface.
 
-`COMPOSE_INTEGRATIONS` is an ordered list or tuple of dotted class paths.
-`declarations.resolve_integrations` imports and instantiates each once in phase 2.
-Classes implement one or more independent runtime-checkable protocols without a
-common base class:
+Custom `Meta` names also need support from the Django extension that interprets
+them; the declaration interface does not change Django's option validation.
+Attributes cannot replace structural or private names, fields, managers or
+methods. `meta_options` cannot replace native Django `Meta` options. Two
+integrations claiming the same output name fail rather than overwrite each
+other. Choose names belonging to the capability your app provides.
 
-- `ModelDeclarationHook.model_declaration(composition, source)` returns
-  `ModelDeclaration(attributes=..., meta_options=...)`.
-- `ArtifactHook` declares `external_root` and implements
-  `render(composition, models) -> Mapping[Path, bytes]`.
-- `MigrationPolicy.retired_primary_keys(model, alias)` returns explicitly
-  capability-owned row exemptions for destructive-change checks.
+## Registry access and timing
 
-The artifact hook runs after all concrete models have registered, before ready
-callbacks. Its restricted `ModelsView` exposes `composition` and
-`get_model(label, name)`, using native registry access with `require_ready=False`.
-Hooks must not require a fully ready registry. File keys are relative to the
-hook's declared root under the output directory. Roots must be declared through
-`COMPOSE_EXTERNAL_ARTIFACT_ROOTS`, and individual ownership through
-`COMPOSE_OWNED_ARTIFACT_PATHS` where required by the generated-tree contract.
-Competing ownership, traversal and symlinks fail.
+The `composition` argument is a `ModelComposition`. Its query interface includes
+`ordered_models`, `models_by_label`, `donors(source)`, `parent(source)`,
+`contributed_fields(source)` and `contributed_field_origins(source)`. The API
+retains the term `donors` for the extension classes contributing to a source
+model. Fields and managers remain native Django objects.
 
-Model declarations accept only closed deterministic Python literals: None,
-bool, int, str, nested lists/tuples and string-keyed dicts. They cannot override
-fields, managers, methods, structural names or native Meta options. Two hooks
-owning the same name fail. Capabilities own their product vocabulary.
+Artifact rendering receives a restricted `ModelsView` with `composition` and
+`get_model(label, name)`. Generated concrete classes are registered, but Django
+has not yet marked the complete model registry ready. Use this view for model
+lookup; do not require the full registry or run database queries in the hook.
+The generated files exist before native `ready()` callbacks execute. There is
+one artifact-rendering stage; a separate `ready` artifact phase is not currently
+implemented.
 
-## Pre-setup declarations
+## Output and input ownership
 
-Snapshot inputs are plain host settings, never methods on integrations:
-`COMPOSE_FINGERPRINT_GLOBS`, `COMPOSE_FINGERPRINT_EXCLUDES`,
-`COMPOSE_FINGERPRINT_SETTINGS`, `COMPOSE_TRANSITION_SOURCE`,
-`COMPOSE_EXTERNAL_ARTIFACT_ROOTS`, and `COMPOSE_INTEGRATIONS`. A host's existing
-settings composer may gather these from capability autoconfig modules. This
-package does not parse manifests or compose host settings.
+`external_root` must be one directory name beneath the generated package, such
+as `exports`. The paths returned by `render` are relative to the generated
+package, so include that directory in every key. Every root must appear in
+`COMPOSE_EXTERNAL_ARTIFACT_ROOTS`, and every individual file must appear in
+`COMPOSE_OWNED_ARTIFACT_PATHS`. Content must be bytes. Hooks cannot overwrite
+another hook's files, generated model structure or migrations. Traversal,
+symlinks and file/directory collisions are refused.
 
-Snapshot hashes integration modules by path without importing their classes.
-Integration modules may import source models because their execution is deferred
-to phase 2. Snapshot and serving modules remain safe before Django setup.
-
-Snapshot normalizes explicit and namespace declarations once and freezes default
-or explicit transitions for build and history. Custom swappable setting names
-must be included in its inputs. See [input ownership](SPEC.md#installed-addons-and-immutable-inputs).
+File and settings inputs also belong in the snapshot. Declare non-Python source
+files with `COMPOSE_FINGERPRINT_GLOBS` and additional settings with
+`COMPOSE_FINGERPRINT_SETTINGS`; see [fingerprint inputs](configuration.md#choose-fingerprint-inputs).
+This lets serving reject output generated from different inputs without
+executing the integration. A rendering failure leaves the build invalid until a
+successful compose completes.
