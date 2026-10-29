@@ -3,9 +3,9 @@
 import pytest
 from django.apps import AppConfig
 from django.core.exceptions import ImproperlyConfigured
-from django_compose.declarations import AppDeclarationSource
 
 from django_compose.appgraph import AppGraph
+from django_compose.declarations import AppDeclarationSource
 
 
 class Dependencies(AppDeclarationSource):

@@ -76,8 +76,12 @@ from pathlib import Path
 from unittest.mock import patch
 import django
 from django.conf import settings
+from django.apps import AppConfig
+# These owner tests use concrete native apps, with no generated runtime.
+# Select Django's plain config explicitly for command discovery only.
+commands = AppConfig("django_compose", importlib.import_module("django_compose"))
 settings.configure(
-    SECRET_KEY="test", INSTALLED_APPS=["django_compose", "alpha", "beta", "author"],
+    SECRET_KEY="test", INSTALLED_APPS=[commands, "alpha", "beta", "author"],
     DEFAULT_AUTO_FIELD="django.db.models.AutoField",
     DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": "database.sqlite3"}},
     MIGRATION_MODULES={"alpha": "history.alpha", "beta": "history.beta", "author": None},
