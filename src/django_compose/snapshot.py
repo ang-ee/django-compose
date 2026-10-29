@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import json
 import os
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -314,9 +315,22 @@ def snapshot(
                 modules[f"config:{owner.__module__}"] = owner.__module__
     for key, module in sorted(modules.items()):
         location = resolver.resolve(module)
-        if location.path is None or not location.path.is_file():
+        if location.kind in {"builtin", "frozen"}:
+            # The interpreter version owns implementations without a source file.
+            data = repr(
+                (
+                    module,
+                    location.kind,
+                    sys.implementation.name,
+                    tuple(sys.implementation.version),
+                    tuple(sys.version_info),
+                )
+            ).encode()
+        elif location.path is not None and location.path.is_file():
+            data = location.path.read_bytes()
+        else:
             raise ImproperlyConfigured(f"Cannot fingerprint module {module!r}")
-        files[key] = hashlib.sha256(location.path.read_bytes()).hexdigest()
+        files[key] = hashlib.sha256(data).hexdigest()
     return Snapshot(
         normalized,
         tuple(sorted(files.items())),

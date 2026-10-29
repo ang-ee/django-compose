@@ -366,8 +366,8 @@ def test_matching_direct_and_namespace_transition_callable_runs_once(tmp_path, m
     assert calls == [True]
 
 
-@pytest.mark.parametrize("inherited", [False, True])
-def test_external_config_hook_implementation_changes_fingerprint_and_discovery(tmp_path, inherited):
+@pytest.mark.parametrize("owner", ["selected", "config_base", "mixin"])
+def test_external_config_hook_implementation_changes_fingerprint_and_discovery(tmp_path, owner):
     package = tmp_path / "inputprobe"
     package.mkdir()
     (package / "__init__.py").write_text("")
@@ -390,10 +390,18 @@ class HookConfig(AppConfig):
         self.models_module.selected = declarations.A
 """
     config = tmp_path / "external_config.py"
-    implementation = tmp_path / "external_base.py" if inherited else config
-    implementation.write_text(hook if inherited else hook.replace("HookConfig", "Config"))
-    if inherited:
+    implementation = config if owner == "selected" else tmp_path / "external_base.py"
+    if owner == "selected":
+        implementation.write_text(hook.replace("HookConfig", "Config"))
+    elif owner == "config_base":
+        implementation.write_text(hook)
         config.write_text("from external_base import HookConfig\nclass Config(HookConfig):\n    pass\n")
+    else:
+        implementation.write_text(hook.replace("class HookConfig(AppConfig):", "class HookConfig:"))
+        config.write_text(
+            "from external_base import HookConfig\nfrom django.apps import AppConfig\n"
+            "class Config(HookConfig, AppConfig):\n    name = 'inputprobe'\n"
+        )
     script = """import json
 import sys
 from django.conf import settings
@@ -424,5 +432,36 @@ print(json.dumps([snap.digest(), [model.__name__ for model in composition.ordere
     assert after[1] == ["B"]
     assert before[0] != after[0]
     assert "config:external_config" in before[2]
-    if inherited:
+    if owner != "selected":
         assert "config:external_base" in before[2]
+
+
+@pytest.mark.parametrize(("module", "mixin"), [("abc", "ABC"), ("builtins", "dict")])
+def test_native_config_interpreter_owned_mixin_has_deterministic_fingerprint(tmp_path, module, mixin):
+    package = tmp_path / "native_config_probe"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (tmp_path / "interpreter_config.py").write_text(
+        f"from django.apps import AppConfig\nfrom {module} import {mixin}\n"
+        f"class Config(AppConfig, {mixin}):\n    name = 'native_config_probe'\n"
+    )
+    script = f"""from django.apps import AppConfig
+from django_compose.snapshot import snapshot
+config = AppConfig.create('interpreter_config.Config')
+assert config.name == 'native_config_probe'
+first = snapshot(('interpreter_config.Config',))
+second = snapshot(('interpreter_config.Config',))
+assert first.digest() == second.digest()
+assert 'config:{module}' in dict(first.files)
+print(first.digest())
+"""
+    environment = dict(os.environ, PYTHONPATH=os.pathsep.join([str(tmp_path), *sys.path]))
+    results = [
+        subprocess.run(
+            [sys.executable, "-B", "-c", script], env=environment, capture_output=True, text=True, check=False
+        )
+        for _ in range(2)
+    ]
+    for result in results:
+        assert result.returncode == 0, result.stdout + result.stderr
+    assert results[0].stdout == results[1].stdout
