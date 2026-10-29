@@ -33,11 +33,13 @@ root. The example uses a local SQLite database.
 
 ```sh
 uv sync --frozen --no-dev
+uv pip install --no-deps ./examples/shop/catalog ./examples/shop/reviews
 cd examples/shop
 uv run --project ../.. --no-sync python manage.py compose
-uv run --project ../.. --no-sync python manage.py makemigrations catalog
+uv run --project ../.. --no-sync python manage.py makemigrations catalog auth contenttypes
 uv run --project ../.. --no-sync python manage.py migrate
 uv run --project ../.. --no-sync python manage.py compose --check
+uv run --project ../.. --no-sync python verify.py
 uv run --project ../.. --no-sync python manage.py shell
 ```
 

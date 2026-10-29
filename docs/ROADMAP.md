@@ -8,19 +8,22 @@ The current verification target is a plain Django project and a separately
 installed wheel. See [dependencies](dependencies.md) for the supported Python and
 Django constraints and [contributing](../CONTRIBUTING.md) for the checks.
 
-## Planned, not part of the current API
+## Remaining verification and release work
 
-- URL configuration and ASGI composition.
-- A managed development loop, full serving-child lifetime locks, receipt leases
-  and reloader coordination.
-- Revised artifact lifecycle phases and a new location for history-only app
-  configurations.
+URL/ASGI composition, models/ready artifact phases, receipt leases, dynamic
+history-only configurations and the managed development loop are implemented;
+see the [reference](SPEC.md), [integrations](extensions.md) and
+[configuration guide](configuration.md).
 
-These need separate design, implementation and verification. Use the existing
-[configuration](configuration.md), [extension](extensions.md) and
-[deployment](packaging.md) workflows until their replacements are delivered.
-Future Django-series support also needs a verified lifecycle, migration and
-typing matrix; it is not implied by the current release target.
+A package-index release remains blocked on published typing dependencies exposing
+the native extension APIs currently supplied by the pinned forks. Keep the working
+pins until a compatible published set passes the typing matrix. Runtime use does
+not need the typing extra. See [dependencies](dependencies.md).
+
+Real StatReloader edit, failure/repair and file creation/deletion checks have run.
+Watchman adapter tests cover the same declarations, but a native Watchman daemon
+was unavailable; full backend acceptance remains outstanding. Future Django-series
+support also requires its own lifecycle, migration and typing matrix.
 
 Changes to a public contract go through the contributor
 [proposal process](proposals/README.md).

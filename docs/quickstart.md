@@ -12,13 +12,14 @@ needs only base dependencies and uses SQLite. The optional typing extra is unnec
 ## Run the checked-in project
 
 The example already includes [settings.py](../examples/shop/settings.py) and
-[manage.py](../examples/shop/manage.py). Its settings select `catalog` and
-`reviews` and put generated Python files in `runtime/`:
+[manage.py](../examples/shop/manage.py). Its settings select `reviews`; the installed distribution dependency selects
+`catalog`. Generated Python files go in `runtime/`:
 
 ```python
 from django_compose.conf import configure
 
-INSTALLED_APPS = ["catalog", "reviews"]
+INSTALLED_APPS = ["reviews"]
+COMPOSE_ADDON_GROUP = "compose.example"
 COMPOSE_OUTPUT_DIR = BASE_DIR / "runtime"
 COMPOSE_OUTPUT_MODULE = "runtime"
 configure(globals())
@@ -32,11 +33,13 @@ Start at the checkout root:
 
 ```sh
 uv sync --frozen --no-dev
+uv pip install --no-deps ./examples/shop/catalog ./examples/shop/reviews
 cd examples/shop
 uv run --project ../.. --no-sync python manage.py compose
-uv run --project ../.. --no-sync python manage.py makemigrations catalog
+uv run --project ../.. --no-sync python manage.py makemigrations catalog auth contenttypes
 uv run --project ../.. --no-sync python manage.py migrate
 uv run --project ../.. --no-sync python manage.py compose --check
+uv run --project ../.. --no-sync python verify.py
 uv run --project ../.. --no-sync python manage.py shell
 ```
 
@@ -45,7 +48,7 @@ Each command has a separate job:
 | Command | Result |
 | --- | --- |
 | `compose` | Writes the generated Python package for the selected apps |
-| `makemigrations catalog` | Authors native Django migration files for the concrete model |
+| `makemigrations catalog auth contenttypes` | Authors native Django migration files for the concrete model |
 | `migrate` | Applies those migrations to the local SQLite database |
 | `compose --check` | Checks generated output and native migration state without rewriting them |
 | `shell` | Opens Django with the generated concrete model registered |
@@ -60,7 +63,6 @@ shop/
 ├── manage.py                     # command launcher
 ├── runtime/                      # generated Python package
 │   ├── __init__.py               # generated build metadata
-│   ├── history.py                # generated history configuration
 │   └── catalog/
 │       ├── __init__.py
 │       ├── apps.py               # generated app configuration
@@ -93,6 +95,10 @@ Django has already run setup in the management shell. `apps.get_model()` returns
 the registered **concrete** model, including fields and methods from both apps.
 In your own process, configure the project and run `django.setup()` before using
 the app registry; [project configuration](configuration.md) shows the setup.
+
+The checked-in project also demonstrates native auth ready callbacks, additive
+settings, both artifact phases, URL/ASGI composition, lifespan and receipt leases.
+See the [example guide](../examples/shop/README.md) for those seams.
 
 ## Read the two declarations
 
@@ -160,7 +166,7 @@ command. From `examples/shop`, the usual schema-change sequence is:
 
 ```sh
 uv run --project ../.. --no-sync python manage.py compose
-uv run --project ../.. --no-sync python manage.py makemigrations catalog
+uv run --project ../.. --no-sync python manage.py makemigrations catalog auth contenttypes
 uv run --project ../.. --no-sync python manage.py migrate
 uv run --project ../.. --no-sync python manage.py compose --check
 ```

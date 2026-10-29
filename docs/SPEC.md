@@ -87,7 +87,8 @@ distribution metadata while retaining native `requires_apps` edges. An explicitl
 empty or invalid group fails. Its frozen result has
 `entries: tuple[str, ...]` in dependency order, `roots: tuple[str, ...]` of authored
 root app names, and `required`/`addons` frozensets of dependency-only app names and
-selected group members respectively.
+selected group members respectively. `dependencies` maps selected native app names
+to ordered direct dependency app names.
 
 Each participating distribution declares exactly one group entry point, keyed
 by native `AppConfig.name`, whose value is a native app/config string. Active
@@ -154,6 +155,8 @@ keep ordering and input ownership in one place. See the
 | `COMPOSE_ENV_PREFIXES` | Declared prefixes permitted for static contribution environment overlays; empty by default |
 | `COMPOSE_OUTPUT_DIR` | Project-selected generated package directory; required for building |
 | `COMPOSE_OUTPUT_MODULE` | Import path for that directory; defaults to `"runtime"` |
+| `COMPOSE_WATCH_PATHS` | Files and `(directory, glob)` pairs additionally watched by native reloaders |
+| `COMPOSE_COMMAND_CONTEXT` | Ordered dotted post-setup `(command, argv)` context-manager factories; empty by default |
 | `COMPOSE_INTEGRATIONS` | Ordered dotted integration class paths; empty by default |
 | `COMPOSE_FINGERPRINT_GLOBS` | Additional per-app source globs; empty by default |
 | `COMPOSE_FINGERPRINT_EXCLUDES` | Source exclusion patterns; defaults to `**/tests/**`, `**/migrations/**`, `**/__pycache__/**` |
@@ -204,6 +207,16 @@ use the same records.
 `DJANGO_COMPOSE_MODE` is `write`, `check`, or absent for serving; every other value
 is invalid. `django_compose.management.execute(argv=None)` selects the mode
 before importing settings. `compose --help` answers without Django startup.
+`compose --if-stale` exits before setup for verified current output; `--check`
+compares without mutation; `--wait SECONDS` bounds writer lock acquisition
+(default five seconds). `--report-inputs FD` writes sorted JSON file/glob evidence
+to a caller-owned open descriptor, including partial failure inputs. The runserver
+launcher is the native reloader parent: compose first, then start the serving child;
+on failure watch reported candidates and retry after changes. Settings loaders
+call `autoreload.report_inputs(files=(), globs=())` before reads. Files may be
+absent and globs initially empty. `COMPOSE_WATCH_PATHS` extends the same owner.
+`COMPOSE_COMMAND_CONTEXT` factories receive `(command, tuple(argv))` after native
+setup around command dispatch; settings-free/help/version paths skip them.
 Direct Django launchers must set composition mode themselves before settings
 load; migration commands require it to be absent.
 
@@ -213,18 +226,20 @@ selected source configs, retained history-only configs, then
 build record and uses `serving.installed_apps` for generated config substitution
 and retained history, then installs `django_compose.apps.ComposeConfig` last. The two configs have the same native identity and cannot coexist.
 
-Build runs in native app-population phase 2, after source `import_models()` hooks
-and before `ready()` callbacks:
+Build begins in native app-population phase 2, after source `import_models()`
+hooks, and finalizes in the final `ready()` callback:
 
 1. Check mode verifies the build record and owned file contents before resolving
    integrations or discovering model declarations. Write mode permits an absent
    output package.
 2. Discover and validate declarations; render or compare generated models.
 3. Import generated models so native concrete classes are registered.
-4. Render or compare integration files through the restricted model view.
-5. Finalize the successful write record; a check performs no mutation.
+4. Render or compare `models` artifacts through the restricted model view.
+5. Earlier native ready callbacks run, then the final build config renders `ready`
+   artifacts with the native app registry and finalizes the record. A check performs
+   no mutation.
 
-All native `ready()` callbacks see the concrete models and completed files.
+All native `ready()` callbacks see concrete models and models-phase files.
 `BuildComposeConfig.ready()` additionally compares native migration history and
 pending transitions in check mode. Ordinary write composition does not load
 migration history, query a deployment database, author migrations or apply them.
@@ -232,9 +247,8 @@ Native source import hooks still execute as part of Django population.
 
 Serving imports no compiler. Generated configurations subclass selected native
 configs, run their source import hook once, then select the generated
-`models_module`. Source packages remain runtime dependencies. `ComposeConfig`
-checks the imported build record and generated module generations against the
-verified output to detect a writer publishing during population.
+`models_module`. Source packages remain runtime dependencies. `ComposeConfig` compares the retained startup receipt bytes before releasing
+startup ownership. Generated modules carry no generation headers.
 
 `makemigrations`, `migrate`, `check_migrations`, `retire_history` and
 `reset_migration_history` require serving mode. The package launcher rejects a
@@ -247,7 +261,8 @@ Ordered `COMPOSE_INTEGRATIONS` classes are instantiated once during build and
 implement one or more independent protocols from `django_compose.declarations`:
 
 - `ModelDeclarationHook.model_declaration(composition, source) -> ModelDeclaration`.
-- `ArtifactHook.external_root` and `render(composition, models) -> Mapping[Path, bytes]`.
+- `ArtifactHook.external_root`, `phase` (`"models"` or `"ready"`) and
+  `render(composition, models) -> Mapping[Path, bytes]`.
 - `MigrationPolicy.retired_primary_keys(model, alias) -> Iterable[Any]`.
 
 `ModelDeclaration` accepts literal attributes and custom `Meta` options: `None`,
@@ -260,15 +275,14 @@ backed by native lookup with `require_ready=False`; full registry readiness
 belongs to `ready()` callbacks. Each file must be bytes, lie beneath the hook's
 single declared output root, and appear in `COMPOSE_OWNED_ARTIFACT_PATHS`.
 Traversal, symlinks, competing ownership and generated structure/history
-collisions fail. There is one artifact stage before ready, not a configurable
-phase system. See [build integrations](extensions.md) for an example.
+collisions fail. Models-phase hooks receive `ModelsView`; ready-phase hooks receive the native
+registry in the final ready callback, before publication. See [build integrations](extensions.md) for an example.
 
 ## Generated output and freshness
 
 ```text
 <output>/
 ├── __init__.py           # literal build record (Receipt)
-├── history.py           # generated history-only configurations
 └── <label>/
     ├── __init__.py
     ├── apps.py          # subclass of the selected source config
@@ -276,9 +290,9 @@ phase system. See [build integrations](extensions.md) for an example.
     └── migrations/      # durable native migration history
 ```
 
-`Receipt` records `GENERATION`, `HISTORY_LABELS`, `RETIRED_LABELS`, `MODEL_LABELS`,
+`Receipt` records `HISTORY_LABELS`, `RETIRED_LABELS`, `MODEL_LABELS`,
 `DIGEST`, `OWNED_FILES` with sha256 hashes, `COMPILER`, and `IN_PROGRESS`.
-`serving.read_receipt(output_dir)` parses literal assignments without executing
+`serving.read_receipt(output_module_or_path)` parses literal assignments without executing
 generated Python, returning `None` when absent. Invalid or symlinked records
 fail. `serving.verify(snapshot, output_module)` requires an importable package
 and rejects absent, interrupted, mismatched or content-altered output, naming
@@ -288,12 +302,16 @@ ownership remains through the final native `ready()` callback. A retained startu
 requires an existing real `.compose.lock` alongside the receipt; readers never
 create output or lock files. Configuration errors and package-launcher failures
 close retained ownership. A failed bare `django.setup()` process must terminate.
-The lock is not a full serving-child lifetime lease and coordinates only processes
+Reloader children retain shared ownership for their lifetime. Other commands may
+use `receipt_lease()` to hold a shared lock while acting on the startup-verified
+receipt. It yields that Receipt and refuses changed receipt bytes.
+The lock coordinates only processes
 in the same filesystem lock domain, not unrelated copies on different hosts.
 
 Generation and emitted bytes are deterministic for identical inputs. No clock,
 random identifier or absolute source path is emitted. Generated Python modules
-retain generation markers; serving compares their markers after population.
+contain no generation markers; the retained receipt and shared lock own startup
+consistency. The literal reader accepts the historical receipt field only.
 
 Every record mutation uses the common output lock. Writers invalidate first,
 write guarded files atomically through `GeneratedTree`, then finalize last.
@@ -369,3 +387,37 @@ Serving never imports the compiler; model declarations depend on native Django
 models without importing build; build is loaded lazily by the build lifecycle.
 Package imports do not configure Django or load a consumer framework. Django,
 packaging and django-yamlconf are base dependencies; typing is optional.
+
+## Serving composition and metadata inspection
+
+After `django.setup()`, `django_compose.urls.urlpatterns` includes selected
+configs' optional `compose_urls` modules using `compose_url_prefix` (default empty)
+and `compose_url_namespace` (default absent). Native system checks reject duplicate
+effective routes as `django_compose.E001`.
+
+`django_compose.asgi.application` composes optional `config.compose_asgi()` factories
+returning `AsgiContribution(http_mounts=..., lifespans=..., protocols=...)`.
+Absolute mount paths use longest-prefix matching on path boundaries; the original
+path is retained and root_path extended. Unmounted HTTP uses Django's ASGIHandler.
+Lifespan factories enter in app order, unwind in reverse and report startup/shutdown
+failure. HTTP and lifespan are reserved protocols; duplicate mounts or protocol
+claims fail. These modules require completed setup and install no server policy.
+
+`addons.installed_addons(group)` indexes installed native Distribution and EntryPoint
+objects without importing app modules. Its read-only `distributions`, `entry_points`
+and `providers` maps use canonical distribution names/app keys as documented by the
+native owner. `active_requirements(iterable_of_strings)` and the index method
+`active_requirements(provider)` return native Requirement values active with
+`extra=""`. Metadata inspection does not activate apps.
+
+`serving.verified_receipt()` returns the process startup receipt;
+`serving.artifact_path(relative)` validates declaration, receipt ownership, safe
+path and current hash before returning a Path. During build-ready callbacks it
+supports models-phase artifacts before final publication. Disabled history uses
+`django_compose.history.History_<label>` native configs, generated dynamically from
+retained receipt facts, with no models loaded from the deselected source.
+
+`typing.CompositionPlugin.project_model` projects native generated model classes
+into django-stubs TypeInfo in memory, including missing runtime-module symbols.
+It writes no source or stub files; custom constructor/generic specialization stays
+with the dependency's native field owner.

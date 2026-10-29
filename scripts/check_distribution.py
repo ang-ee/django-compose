@@ -114,7 +114,17 @@ def installed_addons(
     )
     host = directory / "installed-host"
     host.mkdir()
-    settings = (ROOT / "examples/shop/settings.py").read_text()
+    settings = """from pathlib import Path
+from django_compose.conf import configure
+BASE_DIR = Path(__file__).parent
+SECRET_KEY = "installed-smoke"
+DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "shop.sqlite3"}}
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+COMPOSE_OUTPUT_DIR = BASE_DIR / "runtime"
+COMPOSE_OUTPUT_MODULE = "runtime"
+INSTALLED_APPS = ["catalog", "reviews"]
+configure(globals())
+"""
     settings = settings.replace(
         'INSTALLED_APPS = ["catalog", "reviews"]',
         'INSTALLED_APPS = ["installed_reviews"]\nCOMPOSE_ADDON_GROUP = "compose.smoke"',
@@ -262,6 +272,20 @@ def main() -> None:
             cwd=host,
             env=environment,
         )
+        run(
+            [
+                uv,
+                "pip",
+                "install",
+                "--python",
+                str(python),
+                "--no-deps",
+                str(host / "catalog"),
+                str(host / "reviews"),
+            ],
+            cwd=host,
+            env=environment,
+        )
         compiler = [str(python), "-m", "django_compose"]
         run(
             [*compiler, "compose", "--help", "--settings", "not_a_settings_module"], cwd=host, env=environment
@@ -277,7 +301,9 @@ def main() -> None:
 
         environment["DJANGO_SETTINGS_MODULE"] = "settings"
         run(
-            [str(python), "-m", "django", "makemigrations", "catalog", "--noinput"], cwd=host, env=environment
+            [str(python), "-m", "django", "makemigrations", "catalog", "auth", "contenttypes", "--noinput"],
+            cwd=host,
+            env=environment,
         )
         run([str(python), "-m", "django", "migrate", "--noinput"], cwd=host, env=environment)
         run([str(python), "-m", "django", "check"], cwd=host, env=environment)
@@ -308,6 +334,7 @@ assert item.is_recommended()
 assert Item.objects.get(pk=item.pk).rating == 5
 """
         run([str(python), "-c", cold], cwd=host, env=environment)
+        run([str(python), "verify.py"], cwd=host, env=environment)
         history = digest(host / "runtime/catalog/migrations")
         (host / "runtime/keep.txt").write_text("Unowned file\n")
         models = host / "runtime/catalog/models.py"

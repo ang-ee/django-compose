@@ -41,7 +41,6 @@ With the guides' `runtime` output package, the relevant files are:
 ```text
 runtime/
 ├── __init__.py                  # generated build record
-├── history.py                   # generated history-only app configurations
 └── catalog/
     ├── __init__.py
     ├── apps.py                  # generated app configuration

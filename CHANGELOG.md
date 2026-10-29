@@ -16,3 +16,10 @@
 - Offer advanced composed-model typing through pinned django-stubs/mypy forks;
   base dependencies are Django, packaging and django-yamlconf.
 - Include a plain Django example, user guides and fresh installed-wheel checks.
+- Render declared artifacts in models and ready phases, then finalize publication;
+  expose verified artifact paths and receipt leases to startup and serving readers.
+- Compose native URL declarations, ASGI mounts/protocols and ordered lifespans.
+- Recompose before native development-server children start, report inputs before
+  reads and recover after failed composition and file creation/deletion.
+- Inspect installed addon metadata without importing app modules and project
+  generated model typing in memory without rewriting source or stub files.
