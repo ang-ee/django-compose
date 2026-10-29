@@ -130,7 +130,7 @@ class BuildPlan:
             for label in history_labels:
                 self.sources[Path(label) / "__init__.py"] = ""
                 config = next((c for c in self.configs if c.label == label), None)
-                if config:
+                if config and label in self.labels:
                     config_path = f"{type(config).__module__}.{type(config).__qualname__}"
                     module, _, name = config_path.rpartition(".")
                     model_module = f"{self.output_module}.{label}.models"
