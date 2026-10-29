@@ -1,0 +1,10 @@
+django-compose
+Copyright 2026 Angee, Inc.
+
+This package reconstructs generic Django composition contracts originally
+developed in django-angee, distributed under LGPL-3.0-or-later.
+The GNU Lesser General Public License version 3 and GNU General Public License
+version 3 are included in LICENSE and COPYING.
+
+Django, django-yamlconf, hatch-angee, Hatchling, mypy and django-stubs remain
+separate dependencies under their respective upstream licenses.

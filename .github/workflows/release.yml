@@ -1,0 +1,22 @@
+name: Build release artifacts
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  distribution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.28"
+      - run: uv python install 3.14
+      - run: make install
+      - run: make check dist-check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/*
