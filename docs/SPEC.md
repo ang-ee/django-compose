@@ -110,18 +110,26 @@ project settings, normally with `globals()`. It resolves authored
 immutable snapshot and projects native app configurations and migration modules.
 Authored migration overrides, including `None`, apply after generated defaults.
 `COMPOSE_ROOTS` and `COMPOSE_SNAPSHOT` are derived and refused on entry.
+`COMPOSE_ROOTS` preserves the authored app/config strings and their order.
 
 Enabled apps' optional `autoconfig.py` modules declare `SETTINGS` mappings and
 `settings(namespace)` callbacks returning mappings. Dependency order determines
 contribution order. Plain defaults preserve project-authored settings; competing
 plain scalar defaults name both apps and fail even with a project override.
 Native django-yamlconf dotted keys, directives, injection errors and provenance
-are preserved. Contributions cannot set roots, output package choices or derived
+are preserved. Contributions can reference authored project settings through
+native `{BASE_DIR}` syntax. Untouched project values stay literal; explicit dotted
+or append contributions opt affected containers into normal native expansion.
+Contributions cannot set roots, output package choices or derived
 state. Declared `COMPOSE_ENV_PREFIXES` allow environment overlays of matching
-static contribution names before callbacks. Callbacks see the effective project
-namespace, without ambient environment fallback; static declarations or a project
-loader must supply environment values. Environment-sourced structural inputs,
-including custom fingerprint settings, fail with the setting named.
+static contribution names before callbacks. Each callback receives a detached,
+read-only mapping of effective public uppercase setting values; nested containers
+are detached and the returned mapping is its sole contribution. There is no
+ambient environment fallback; static declarations or a project loader must supply
+environment values. Environment-sourced structural inputs, including custom
+fingerprint settings and native reference chains, fail with the setting named.
+The check follows native yamlconf provenance and references, not arbitrary Python
+computations or direct `os.environ` reads.
 
 Low-level `snapshot(entries, *, namespace=..., ...) -> Snapshot` remains available
 for integrations needing immutable input inspection. Serving helpers project

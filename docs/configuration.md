@@ -96,8 +96,9 @@ native app strings or explicit AppConfig paths. Optional
 `requires_apps` dependencies still apply. Installation alone enables no apps.
 
 The function owns derived `COMPOSE_ROOTS` and `COMPOSE_SNAPSHOT`; projects and
-contributions must not set them. It snapshots the authored migration mapping,
-then projects retained generated history with authored overrides last. Set
+contributions must not set them. `COMPOSE_ROOTS` preserves the authored app strings
+and explicit AppConfig paths in their original order. It snapshots the authored
+migration mapping, then projects retained generated history with authored overrides last. Set
 `MIGRATION_MODULES = {"catalog": None}` before configuring to preserve Django's
 native override semantics, or use `"catalog.migrations"` for source-owned history.
 
@@ -125,14 +126,19 @@ def settings(namespace):
 ```
 
 `SETTINGS` and the optional `settings(namespace)` return value must be mappings.
-They run in resolved dependency order. The callback sees the same effective
-project namespace, including previous contributions. Plain defaults preserve
-project-authored values; lists and dictionaries are defaults too. Two apps
+They run in resolved dependency order. Each callback receives a detached,
+read-only mapping of effective public uppercase setting values, including previous
+contributions. Nested containers are detached too; changing them cannot mutate
+the project settings. The returned mapping is the callback's sole contribution.
+Plain defaults preserve project-authored values; lists and dictionaries are defaults too. Two apps
 claiming the same plain scalar default fail, naming both owners, even when the
 project overrides that value. Use native django-yamlconf dotted keys and merge
 directives such as `:append` for additive contributions. Its provenance is
 preserved, including provenance supplied by a project loader; injection errors
-fail explicitly.
+fail explicitly. Contributions can reference authored project values using native
+yamlconf syntax, for example `"CATALOG_DATA_DIR": "{BASE_DIR}/catalog"`.
+Untouched project values remain literal. An explicit dotted or append contribution
+opts the affected container into normal native reference expansion.
 
 Contributions cannot choose `INSTALLED_APPS`, the output package, or derived
 composition state. Keep those project decisions above `configure`.
@@ -143,8 +149,11 @@ prefix are overlaid before their app's callback. A callback does not see an
 ambient environment mapping: declare a prefixed setting in `SETTINGS`, or have
 the project's loader supply its value. Overlays retain native yamlconf
 provenance. Structural inputs, including custom settings named by
-`COMPOSE_FINGERPRINT_SETTINGS`, cannot come from the environment. Load deployment
-secrets through the project's normal settings mechanism.
+`COMPOSE_FINGERPRINT_SETTINGS`, cannot come from the environment, including through
+native yamlconf reference chains. This check follows native provenance and
+references; it does not analyze arbitrary Python computations or direct
+`os.environ` reads. Load deployment secrets through the project's normal settings
+mechanism.
 
 ## shop/urls.py
 
