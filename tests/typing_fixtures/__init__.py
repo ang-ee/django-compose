@@ -24,7 +24,7 @@ class Shared(Composable):
     shared = models.IntegerField()
     class Meta:
         abstract = True
-class Required(Composable, must_inherit="modelapp.Entity"):
+class Required(Composable, demands="modelapp.Entity"):
     def parent_title(self) -> str:
         return self.title
     class Meta:
@@ -70,7 +70,7 @@ class Descriptor:
         return "description"
     def __set__(self, row: object, value: str) -> None:
         pass
-class Audit(Shared, GenericMethods[int], mixin_for="modelapp.Entity"):
+class Audit(Shared, GenericMethods[int], extends="modelapp.Entity"):
     rank = models.IntegerField()
     description: Descriptor = Descriptor()
     def score(self) -> int:
@@ -105,13 +105,13 @@ class Audit(Shared, GenericMethods[int], mixin_for="modelapp.Entity"):
         return "audit"
     class Meta:
         abstract = True
-class ChildAddon(Composable, mixin_for="modelapp.Child"):
+class ChildAddon(Composable, extends="modelapp.Child"):
     adopted = models.BooleanField()
     def ancestor_title(self) -> str:
         return self.title
     class Meta:
         abstract = True
-class Extra(Shared, mixin_for="modelapp.Entity"):
+class Extra(Shared, extends="modelapp.Entity"):
     note = models.CharField(max_length=30)
     def extra(self) -> str:
         return self.note

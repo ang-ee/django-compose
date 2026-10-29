@@ -15,17 +15,17 @@ _UNSET: Any = object()
 class Composable(models.Model):
     """Declare composition through class keywords, retaining Django's Meta rules.
 
-    ``concrete``, ``mixin_for`` and ``inherits`` are mutually exclusive and
+    ``concrete``, ``extends`` and ``inherits`` are mutually exclusive and
     apply only to the class declaring them. ``inherits`` implies concrete.
-    ``must_inherit`` applies through the complete MRO and combines with any
+    ``demands`` applies through the complete MRO and combines with any
     declaration. Every source and mixin must explicitly remain abstract using
     native Meta. Factories may pass the same keywords to ``type()``.
     """
 
     compose_concrete: ClassVar[bool] = False
-    compose_mixin_for: ClassVar[str | None] = None
+    compose_extends: ClassVar[str | None] = None
     compose_inherits: ClassVar[str | None] = None
-    compose_must_inherit: ClassVar[str | None] = None
+    compose_demands: ClassVar[str | None] = None
 
     class Meta:
         abstract = True
@@ -34,23 +34,23 @@ class Composable(models.Model):
         cls,
         *,
         concrete: bool = _UNSET,
-        mixin_for: str | None = None,
+        extends: str | None = None,
         inherits: str | None = None,
-        must_inherit: str | None = None,
+        demands: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init_subclass__(**kwargs)
         identity = f"{cls.__module__}.{cls.__name__}"
         if concrete is not _UNSET and type(concrete) is not bool:
             raise ImproperlyConfigured(f"{identity}: concrete must be a boolean")
-        if sum((concrete is not _UNSET, mixin_for is not None, inherits is not None)) > 1:
-            raise ImproperlyConfigured(f"{identity}: concrete, mixin_for and inherits are mutually exclusive")
+        if sum((concrete is not _UNSET, extends is not None, inherits is not None)) > 1:
+            raise ImproperlyConfigured(f"{identity}: concrete, extends and inherits are mutually exclusive")
         if concrete is True or inherits is not None:
             cls.compose_concrete = True
         for name, value in (
-            ("mixin_for", mixin_for),
+            ("extends", extends),
             ("inherits", inherits),
-            ("must_inherit", must_inherit),
+            ("demands", demands),
         ):
             if value is None:
                 continue

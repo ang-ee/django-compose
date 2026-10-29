@@ -55,14 +55,16 @@ class ModelComposition:
                 self.models_by_label[key] = source
         for target, donors in extensions.items():
             if target not in self.models_by_label:
-                raise ImproperlyConfigured(f"Donors extend unknown model {target!r}")
+                raise ImproperlyConfigured(
+                    f"{', '.join(donor._meta.label for donor in donors)} extends unknown model {target!r}"
+                )
             if any(donor not in self._owners for donor in donors):
                 raise ImproperlyConfigured("Addon ownership is required for extension donors")
         graph = {}
         for key, source in sorted(self.models_by_label.items()):
             parent_ref = vars(source).get("compose_inherits")
             if parent_ref is not None and parent_ref not in self.models_by_label:
-                raise ImproperlyConfigured(f"{source._meta.label} extends unknown model {parent_ref!r}")
+                raise ImproperlyConfigured(f"{source._meta.label} inherits unknown model {parent_ref!r}")
             graph[key] = () if parent_ref is None else (parent_ref,)
         order = _ordered(graph, "concrete model parents")
         modules: dict[str, set[str]] = {label: set() for label in self.sources_by_label}
@@ -126,7 +128,7 @@ class ModelComposition:
                 concrete = own.get("compose_concrete", False)
                 if type(concrete) is not bool:
                     raise ImproperlyConfigured(f"{model._meta.label}.compose_concrete must be a boolean")
-                target = own.get("compose_mixin_for")
+                target = own.get("compose_extends")
                 if not concrete and target is None:
                     continue
                 if model._meta.app_label != config.label:
@@ -197,13 +199,13 @@ class ModelComposition:
                 for declaration in contributor.__mro__:
                     if not issubclass(declaration, models.Model):
                         continue
-                    reference = vars(declaration).get("compose_must_inherit")
+                    reference = vars(declaration).get("compose_demands")
                     if reference is None:
                         continue
                     target = self.models_by_label.get(reference)
                     if target is None or target not in ancestors:
                         raise ImproperlyConfigured(
-                            f"{source._meta.label} requires ancestor {reference!r} "
+                            f"{source._meta.label} demands ancestor {reference!r} "
                             f"through {declaration._meta.label}"
                         )
                     required[declaration] = target

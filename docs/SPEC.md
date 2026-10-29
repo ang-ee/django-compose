@@ -37,14 +37,14 @@ not configure Django. No source depends on a consumer framework.
 | Keyword | Fact | Inherited declaration |
 | --- | --- | --- |
 | `concrete=True` | A new concrete identity | No |
-| `mixin_for="label.Model"` | Add a donor base to that identity | No |
+| `extends="label.Model"` | Add a donor base to that identity | No |
 | `inherits="label.Model"` | Concrete child of this multi-table parent | No |
-| `must_inherit="label.Model"` | Every concrete descendant requires this ancestor | Yes, through the MRO |
+| `demands="label.Model"` | Every concrete descendant requires this ancestor | Yes, through the MRO |
 
-Keywords store `compose_concrete`, `compose_mixin_for`, `compose_inherits` and
-`compose_must_inherit` facts on the declaring class. `concrete`, `mixin_for` and
+Keywords store `compose_concrete`, `compose_extends`, `compose_inherits` and
+`compose_demands` facts on the declaring class. `concrete`, `extends` and
 `inherits` are mutually exclusive, including an explicit `concrete=False`.
-`inherits` implies concrete and may not repeat `concrete`; `must_inherit`
+`inherits` implies concrete and may not repeat `concrete`; `demands`
 combines with any declaration or none. Targets use Django's lazy `app_label.Model` form. Invalid
 combinations and references fail at native class creation. Factories may pass
 keywords to `type()`. Django's native explicit `Meta.abstract=True` requirement

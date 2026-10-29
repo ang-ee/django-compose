@@ -45,7 +45,7 @@ class Item(Composable, concrete=True):
     class Meta:
         abstract = True
 
-class Rating(Composable, mixin_for="catalog.Item"):
+class Rating(Composable, extends="catalog.Item"):
     rating = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
@@ -54,8 +54,8 @@ class Rating(Composable, mixin_for="catalog.Item"):
 
 `inherits="label.Model"` declares a concrete child of that model through
 multi-table inheritance. It implies `concrete` and may not repeat it.
-`concrete`, `mixin_for` and `inherits` are mutually exclusive.
-`must_inherit="label.Model"` adds an ancestor requirement through the MRO and
+`concrete`, `extends` and `inherits` are mutually exclusive.
+`demands="label.Model"` adds an ancestor requirement through the MRO and
 can combine with any declaration or none. Other declarations apply only to
 their declaring class.
 Factories can forward the same keywords to `type()`. Django's usual explicit

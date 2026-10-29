@@ -5,7 +5,7 @@ from django.db import models
 from django_compose.models import Composable
 
 
-class Rating(Composable, mixin_for="catalog.Item"):
+class Rating(Composable, extends="catalog.Item"):
     rating = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
