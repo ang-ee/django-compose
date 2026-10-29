@@ -60,6 +60,9 @@ class Runtime:
         self.declarations = declarations if declarations is not None else AppDeclarationSource.configured()
         self.integrations = BuildIntegration.configured() if integrations is None else tuple(integrations)
         migration_modules = dict(getattr(settings, "MIGRATION_MODULES", {}))
+        self.authored_migration_modules = dict(
+            getattr(settings, "COMPOSE_AUTHORED_MIGRATION_MODULES", migration_modules)
+        )
         for label in self.labels:
             migration_modules.setdefault(label, f"{runtime_module}.{label}.migrations")
         settings.MIGRATION_MODULES = migration_modules
@@ -137,6 +140,7 @@ class Runtime:
             integrations=tuple(getattr(settings, "COMPOSE_INTEGRATIONS", ())),
             model_labels=self.labels,
             authored_runtime_dir=getattr(settings, "COMPOSE_AUTHORED_RUNTIME_DIR", None),
+            authored_migration_modules=dict(sorted(self.authored_migration_modules.items())),
         )
 
     @property

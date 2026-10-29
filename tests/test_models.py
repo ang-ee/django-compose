@@ -422,3 +422,40 @@ print(json.dumps({str(path): text for path, text in runtime.render_sources().ite
         )
         outputs.append(result.stdout)
     assert outputs[0] == outputs[1]
+
+
+def test_manifest_seals_authored_mapping_separately_from_generated_defaults(tmp_path):
+    run_host(
+        tmp_path,
+        {"coreapp": BASE},
+        """
+settings.MIGRATION_MODULES = {"disabled": None, "external": "project.history"}
+settings.COMPOSE_AUTHORED_MIGRATION_MODULES = dict(settings.MIGRATION_MODULES)
+runtime = Runtime.discover(apps.get_app_configs(), runtime_dir=Path("runtime"))
+assert runtime.manifest.authored_migration_modules == {"disabled": None, "external": "project.history"}
+assert runtime.manifest.migration_modules == {
+    "coreapp": "runtime.coreapp.migrations", "disabled": None, "external": "project.history",
+}
+# Replaying defaults or mutating settings does not change the authored snapshot.
+settings.COMPOSE_AUTHORED_MIGRATION_MODULES.clear()
+assert runtime.manifest.authored_migration_modules == {"disabled": None, "external": "project.history"}
+runtime.emit_sources()
+from django_compose.manifest import RuntimeManifest
+assert RuntimeManifest.read(Path("runtime")).authored_migration_modules == {
+    "disabled": None, "external": "project.history",
+}
+""",
+    )
+
+
+def test_direct_runtime_snapshots_explicit_mapping_before_defaulting(tmp_path):
+    run_host(
+        tmp_path,
+        {"coreapp": BASE},
+        """
+settings.MIGRATION_MODULES = {"disabled": None}
+runtime = Runtime.discover(apps.get_app_configs(), runtime_dir=Path("runtime"))
+assert runtime.manifest.authored_migration_modules == {"disabled": None}
+assert runtime.manifest.migration_modules["coreapp"] == "runtime.coreapp.migrations"
+""",
+    )

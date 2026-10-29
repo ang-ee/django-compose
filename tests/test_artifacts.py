@@ -118,3 +118,12 @@ def test_manifest_is_import_only_and_strict(tmp_path):
     data["version"] = 99
     with pytest.raises(ValueError, match="version"):
         RuntimeManifest.from_json(json.dumps(data))
+
+
+@pytest.mark.parametrize("mapping", [[], {"bad.label": None}, {"coreapp": "../outside"}])
+def test_manifest_refuses_invalid_authored_migration_mapping(mapping):
+    text = next(value for name, value in plan().items() if name.name == MANIFEST_FILENAME)
+    data = json.loads(text)
+    data["authored_migration_modules"] = mapping
+    with pytest.raises(ValueError, match="migration mapping"):
+        RuntimeManifest.from_json(json.dumps(data))

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import keyword
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,7 @@ class RuntimeManifest:
     integrations: tuple[str, ...] = ()
     model_labels: tuple[str, ...] = ()
     authored_runtime_dir: str | None = None
+    authored_migration_modules: Mapping[str, str | None] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if type(self.version) is not int or self.version != FORMAT_VERSION:
@@ -80,9 +81,10 @@ class RuntimeManifest:
                 raise ValueError("Invalid manifest app identity")
         if len({label for _, label in self.app_identities}) != len(self.app_identities):
             raise ValueError("Duplicate manifest app labels")
-        for label, module in self.migration_modules.items():
-            if not module_name(label) or "." in label or (module is not None and not module_name(module)):
-                raise ValueError("Invalid manifest migration mapping")
+        for mapping in (self.migration_modules, self.authored_migration_modules):
+            for label, module in mapping.items():
+                if not module_name(label) or "." in label or (module is not None and not module_name(module)):
+                    raise ValueError("Invalid manifest migration mapping")
         if tuple(sorted(set(self.owned_files))) != self.owned_files:
             raise ValueError("Manifest owned files must be unique and sorted")
         for value in self.owned_files:
@@ -127,8 +129,9 @@ class RuntimeManifest:
             ):
                 raise ValueError("Invalid manifest identities")
             data["app_identities"] = tuple(tuple(item) for item in identities)
-            if not isinstance(data["migration_modules"], dict):
-                raise ValueError("Invalid manifest migration mapping")
+            for key in ("migration_modules", "authored_migration_modules"):
+                if not isinstance(data[key], dict):
+                    raise ValueError("Invalid manifest migration mapping")
             return cls(**data)
         except (KeyError, TypeError, json.JSONDecodeError) as error:
             raise ValueError(f"Invalid django-compose manifest: {error}") from error
