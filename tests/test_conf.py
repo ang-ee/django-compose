@@ -280,3 +280,143 @@ def test_mode_and_required_output_are_validated_before_imports(project, monkeypa
     del ns["COMPOSE_OUTPUT_DIR"]
     with pytest.raises(ImproperlyConfigured, match="COMPOSE_OUTPUT_DIR"):
         conf.configure(ns)
+
+
+def test_authored_explicit_roots_survive_dependency_expansion(project, tmp_path):
+    app, ns = project
+    dependency = app()
+    root = app()
+    (tmp_path / root / "apps.py").write_text(f"""from django.apps import AppConfig
+class Chosen(AppConfig):
+    name = {root!r}
+    requires_apps = ({dependency!r},)
+""")
+    selected = f"{root}.apps.Chosen"
+    ns["INSTALLED_APPS"] = (selected,)
+    conf.configure(ns)
+    assert ns["COMPOSE_ROOTS"] == (selected,)
+    assert ns["INSTALLED_APPS"][:2] == (dependency, selected)
+
+
+def test_callback_snapshot_is_readonly_and_nested_values_are_detached(project):
+    app, ns = project
+    ns.update(OPTIONS={"items": ["project"]}, deployment_module=os)
+    ns["INSTALLED_APPS"] = [
+        app("""SETTINGS = {'CALLBACK_VALUE': 'before'}
+def settings(namespace):
+    try:
+        namespace['COMPOSE_OUTPUT_DIR'] = '/redirected'
+    except TypeError:
+        pass
+    else:
+        raise AssertionError('writable callback namespace')
+    namespace['OPTIONS']['items'].append('mutated')
+    return {'CALLBACK_VALUE': 'after'}
+""")
+    ]
+    original = ns["COMPOSE_OUTPUT_DIR"]
+    conf.configure(ns)
+    assert ns["COMPOSE_OUTPUT_DIR"] == original
+    assert ns["OPTIONS"] == {"items": ["project"]}
+    assert ns["CALLBACK_VALUE"] == "after"
+
+
+def test_returned_callback_protected_keys_still_fail(project):
+    app, ns = project
+    ns["INSTALLED_APPS"] = [app("def settings(namespace): return {'COMPOSE_OUTPUT_DIR': '/other'}")]
+    with pytest.raises(ImproperlyConfigured, match="COMPOSE_OUTPUT_DIR"):
+        conf.configure(ns)
+
+
+def test_project_reference_inputs_and_raw_authored_strings(project):
+    app, ns = project
+    ns.update(BASE_DIR="/project", TEMPLATE="literal {not_a_reference}", OPTIONS={"literal": "{untouched}"})
+    ns["INSTALLED_APPS"] = [app("SETTINGS = {'DATA_DIR': '{BASE_DIR}/data'}")]
+    conf.configure(ns)
+    assert ns["DATA_DIR"] == "/project/data"
+    assert ns["TEMPLATE"] == "literal {not_a_reference}"
+    assert ns["OPTIONS"] == {"literal": "{untouched}"}
+    assert ns["_YAMLCONF_ATTRIBUTES"]["BASE_DIR"]["source"] == "project.settings"
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "{TASK_INPUT}",
+        ["{TASK_INPUT}"],
+        {"nested": ["{TASK_INPUT}"]},
+        "{BRIDGE}",
+        "{TASK_INPUT!r}",
+    ],
+)
+def test_transitive_environment_references_in_structural_values(project, monkeypatch, template):
+    app, ns = project
+    ns["COMPOSE_ENV_PREFIXES"] = ["TASK_"]
+    monkeypatch.setenv("TASK_INPUT", "environment")
+    ns["INSTALLED_APPS"] = [
+        app(f"""SETTINGS = {{
+'TASK_INPUT': 'default', 'BRIDGE': '{{TASK_INPUT}}', 'CUSTOM_INPUT': {template!r}}}
+"""),
+        app("SETTINGS = {'COMPOSE_FINGERPRINT_SETTINGS:append': ['CUSTOM_INPUT']}"),
+    ]
+    with pytest.raises(ImproperlyConfigured, match="CUSTOM_INPUT.*environment.*TASK_INPUT"):
+        conf.configure(ns)
+
+
+def test_environment_in_directive_and_prior_native_provenance(project, monkeypatch):
+    app, ns = project
+    ns["COMPOSE_ENV_PREFIXES"] = ["TASK_"]
+    monkeypatch.setenv("TASK_INPUT", "environment")
+    ns["_YAMLCONF_ATTRIBUTES"] = {
+        "BRIDGE": {
+            "value": "{TASK_INPUT}",
+            "evalue": "default",
+            "source": "project",
+            "history": [],
+            "doc": [],
+            "hide": False,
+        }
+    }
+    ns["INSTALLED_APPS"] = [
+        app("SETTINGS = {'TASK_INPUT': 'default', 'CUSTOM_INPUT:append': ['{BRIDGE}']}"),
+        app("SETTINGS = {'COMPOSE_FINGERPRINT_SETTINGS:append': ['CUSTOM_INPUT']}"),
+    ]
+    with pytest.raises(ImproperlyConfigured, match="CUSTOM_INPUT.*environment"):
+        conf.configure(ns)
+
+
+def test_unrelated_nonstructural_environment_is_allowed(project, monkeypatch):
+    app, ns = project
+    ns.update(COMPOSE_ENV_PREFIXES=["TASK_"], COMPOSE_FINGERPRINT_SETTINGS=["CUSTOM_INPUT"])
+    monkeypatch.setenv("TASK_INPUT", "environment")
+    ns["INSTALLED_APPS"] = [app("SETTINGS = {'TASK_INPUT': 'default', 'CUSTOM_INPUT': '{BASE_DIR}/data'}")]
+    ns["BASE_DIR"] = "/project"
+    conf.configure(ns)
+    assert ns["TASK_INPUT"] == "environment"
+    assert ns["CUSTOM_INPUT"] == "/project/data"
+
+
+def test_seeded_project_dictionary_preserves_later_dotted_contribution(project):
+    app, ns = project
+    ns["PROJECT_OPTIONS"] = {"a": 1}
+    ns["INSTALLED_APPS"] = [app("SETTINGS = {'PROJECT_OPTIONS.b': 2}"), app("SETTINGS = {'OTHER': 'value'}")]
+    conf.configure(ns)
+    assert ns["PROJECT_OPTIONS"] == {"a": 1, "b": 2}
+
+
+def test_reference_to_preexisting_environment_dictionary_leaf(project):
+    app, ns = project
+    ns.update(OPTIONS={"child": "environment"}, COMPOSE_FINGERPRINT_SETTINGS=["CUSTOM_INPUT"])
+    ns["_YAMLCONF_ATTRIBUTES"] = {
+        "OPTIONS.child": {
+            "value": "environment",
+            "evalue": "environment",
+            "source": "**ENVIRONMENT**",
+            "history": [],
+            "doc": [],
+            "hide": False,
+        }
+    }
+    ns["INSTALLED_APPS"] = [app("SETTINGS = {'CUSTOM_INPUT': '{OPTIONS[child]}'}")]
+    with pytest.raises(ImproperlyConfigured, match="CUSTOM_INPUT.*environment.*OPTIONS.child"):
+        conf.configure(ns)

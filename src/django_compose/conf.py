@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Mapping, MutableMapping
+from copy import deepcopy
 from importlib import import_module
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import Any
 
 import django_yamlconf
@@ -33,15 +34,47 @@ class _Errors(logging.Handler):
         raise ImproperlyConfigured(record.getMessage())
 
 
+class _Reference:
+    """Observe native format field use without parsing its grammar."""
+
+    def __init__(self, value: Any, name: str, used: set[str]) -> None:
+        self._value, self._name, self._used = value, name, used
+
+    def __format__(self, spec: str) -> str:
+        self._used.add(self._name)
+        return format(self._value, spec)
+
+    def __str__(self) -> str:
+        self._used.add(self._name)
+        return str(self._value)
+
+    def __repr__(self) -> str:
+        self._used.add(self._name)
+        return repr(self._value)
+
+    def __getitem__(self, key: Any) -> _Reference:
+        self._used.add(self._name)
+        return _Reference(self._value[key], f"{self._name}.{key}", self._used)
+
+    def __getattr__(self, name: str) -> _Reference:
+        self._used.add(self._name)
+        return _Reference(getattr(self._value, name), f"{self._name}.{name}", self._used)
+
+
 class _Contributions:
     def __init__(self, namespace: MutableMapping[str, Any]) -> None:
-        self.namespace = namespace
+        self._namespace = namespace
         self.authored = frozenset(namespace)
         self.scalars: dict[str, str] = {}
         self.previous: frozenset[str] = frozenset()
         self.module = ModuleType(str(namespace.get("__name__", "project.settings")))
         self.module.__dict__.update(namespace)
-        self.module.__dict__.setdefault(_ATTRIBUTES, {})
+        attributes = self.module.__dict__.setdefault(_ATTRIBUTES, {})
+        for name, value in namespace.items():
+            if not name.startswith("_") and name.isupper() and name not in attributes:
+                django_yamlconf.add_attr_info(attributes, name, value, self.module.__name__)
+                # Project values are reference inputs, not new expansion templates.
+                django_yamlconf.add_attr_info(attributes, f"{name}:raw", True, self.module.__name__)
 
     def merge(self, values: Mapping[str, Any], owner: str, *, derived: bool = False) -> set[str]:
         accepted = {}
@@ -66,7 +99,7 @@ class _Contributions:
                         f"{name} has competing scalar defaults from {previous} and {owner}"
                     )
             if plain and (
-                name in self.authored or (name in self.namespace and (not derived or name in self.previous))
+                name in self.authored or (name in self._namespace and (not derived or name in self.previous))
             ):
                 continue
             if "." in key.split(":", 1)[0]:
@@ -82,10 +115,17 @@ class _Contributions:
         logger = logging.getLogger("django_yamlconf")
         logger.addHandler(handler)
         try:
-            django_yamlconf.add_attributes(self.module, values, owner)
+            attributes = vars(self.module)[_ATTRIBUTES]
+            for key, value in values.items():
+                django_yamlconf.set_attr_value(attributes, self.module, owner, key, deepcopy(value))
+            expanded = deepcopy(attributes)
+            django_yamlconf.expand_attribute_refs(expanded)
+            for key, info in attributes.items():
+                info["evalue"] = expanded[key]["evalue"]
+            django_yamlconf.inject_attr(attributes, self.module)
         finally:
             logger.removeHandler(handler)
-        self.namespace.update(
+        self._namespace.update(
             {
                 name: value
                 for name, value in vars(self.module).items()
@@ -94,7 +134,7 @@ class _Contributions:
         )
 
     def environment(self, names: set[str]) -> None:
-        prefixes = self.namespace.get("COMPOSE_ENV_PREFIXES", ())
+        prefixes = self._namespace.get("COMPOSE_ENV_PREFIXES", ())
         if not isinstance(prefixes, (list, tuple)) or not all(isinstance(p, str) for p in prefixes):
             raise ImproperlyConfigured("COMPOSE_ENV_PREFIXES must be a list or tuple of strings")
         values = {
@@ -103,20 +143,40 @@ class _Contributions:
             if name.startswith(tuple(prefixes)) and name in os.environ
         }
         for name in values:
-            if name in structural_settings(self.namespace) or name in _PROTECTED:
+            if name in structural_settings(self._namespace) or name in _PROTECTED:
                 raise ImproperlyConfigured(f"Structural setting {name} must not come from the environment")
         self.apply(values, _ENVIRONMENT)
 
     def check_environment(self) -> None:
-        structural = structural_settings(self.namespace) | _DERIVED
-        for key, info in vars(self.module)[_ATTRIBUTES].items():
-            if _root(key) in structural and _ENVIRONMENT in (
-                info["source"],
-                *(source for _, source in info["history"]),
-            ):
-                raise ImproperlyConfigured(
-                    f"Structural setting {_root(key)} must not come from the environment"
-                )
+        attributes = vars(self.module)[_ATTRIBUTES]
+        structural = structural_settings(self._namespace) | _DERIVED
+
+        def inspect(key: str, visited: set[str]) -> str | None:
+            if key in visited or key not in attributes:
+                return None
+            visited.add(key)
+            info = attributes[key]
+            if _ENVIRONMENT in (info["source"], *(source for _, source in info["history"])):
+                return key
+            if attributes.get(f"{key}:raw", {}).get("value"):
+                return None
+            used: set[str] = set()
+            wrt = {name: _Reference(data["evalue"], name, used) for name, data in attributes.items()}
+            for value in (info["value"], *(value for value, _ in info["history"])):
+                django_yamlconf.expand_attr_helper(deepcopy(value), wrt=wrt)
+            for reference in sorted(used):
+                source = inspect(reference, visited)
+                if source is not None:
+                    return source
+            return None
+
+        for key in attributes:
+            if _root(key) in structural:
+                source = inspect(key, set())
+                if source is not None:
+                    raise ImproperlyConfigured(
+                        f"Structural setting {_root(key)} must not come from the environment ({source})"
+                    )
 
     def app(self, entry: str) -> None:
         config = AppConfig.create(entry)
@@ -127,14 +187,19 @@ class _Contributions:
         values = getattr(module, "SETTINGS", {})
         if not isinstance(values, Mapping):
             raise ImproperlyConfigured(f"{owner}.SETTINGS must be a mapping")
-        self.previous = frozenset(self.namespace)
+        self.previous = frozenset(self._namespace)
         names = self.merge(values, owner)
         self.environment(names)
         callback = getattr(module, "settings", None)
         if callback is not None:
             if not callable(callback):
                 raise ImproperlyConfigured(f"{owner}.settings must be callable")
-            result = callback(self.namespace)
+            effective = {
+                name: value
+                for name, value in self._namespace.items()
+                if not name.startswith("_") and name.isupper()
+            }
+            result = callback(MappingProxyType(deepcopy(effective)))
             if not isinstance(result, Mapping):
                 raise ImproperlyConfigured(f"{owner}.settings() must return a mapping")
             self.merge(result, owner, derived=True)
@@ -160,12 +225,13 @@ def configure(namespace: MutableMapping[str, Any]) -> None:
             raise ImproperlyConfigured(f"{name} is derived and must not be authored")
     if not namespace.get("COMPOSE_OUTPUT_DIR"):
         raise ImproperlyConfigured("COMPOSE_OUTPUT_DIR is required")
-    closure = enabled_apps(namespace.get("INSTALLED_APPS", ()), group=namespace.get("COMPOSE_ADDON_GROUP"))
+    roots = tuple(namespace.get("INSTALLED_APPS", ()))
+    closure = enabled_apps(roots, group=namespace.get("COMPOSE_ADDON_GROUP"))
     contributions = _Contributions(namespace)
     for entry in closure.entries:
         contributions.app(entry)
     contributions.check_environment()
-    namespace["COMPOSE_ROOTS"] = closure.roots
+    namespace["COMPOSE_ROOTS"] = roots
     snap = snapshot(closure.entries, namespace=namespace)
     namespace["COMPOSE_SNAPSHOT"] = snap
     output_module = snap.settings["COMPOSE_OUTPUT_MODULE"]
