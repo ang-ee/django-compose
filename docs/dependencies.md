@@ -41,10 +41,10 @@ and native `AppConfig` examples.
 
 The `typing` extra is unnecessary for building or running a project. It is loaded
 only when the project's mypy configuration selects the composition plugin.
-Current verified pins are django-stubs and django-stubs-ext at
-`423ed850e5f2d7ea9e67f3e0f9e8bee4be215988`, and mypy at
-`ac3de6e4c34b04728e768e07d4842f4309ff6c45`. These forks provide native field,
-manager and semantic-analysis hooks used by the plugin.
+The exact compatible revisions are declared together in
+[`pyproject.toml`](../pyproject.toml) and resolved in [`uv.lock`](../uv.lock).
+These forks provide native field, manager and semantic-analysis hooks used by
+the plugin.
 
 Installing this extra needs Git access to the direct references in
 `pyproject.toml`, or cached sources. Keep the compatible pins together when

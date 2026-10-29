@@ -4,23 +4,6 @@ The package is currently unreleased at `0.1.0.dev0`. The
 [specification](SPEC.md) describes implemented behavior; the [quick start](quickstart.md)
 and [configuration guide](configuration.md) use that API today.
 
-## Supported now
-
-- Compose native abstract Django source and extension classes into ordinary
-  concrete model classes, including lazy relations and multi-table inheritance.
-- Select a fixed ordered app list, or use the optional installed-distribution
-  [addon selection](addons.md) helper.
-- Build deterministic model/configuration modules through Django setup, with
-  `configure(globals())`, app settings contributions, source fingerprints and
-  verified build output.
-- Retain shared serving/check startup verification through the final native
-  `ready()` callback, excluding concurrent writers in the same lock domain.
-- Add model declarations, generated files and retirement policy through the
-  [extension contracts](extensions.md).
-- Use native Django migrations with reusable transition binding, retained
-  disabled-app history, destructive-change guards and import/provider audits.
-- Check composed model types with the optional pinned django-stubs/mypy plugin.
-
 The current verification target is a plain Django project and a separately
 installed wheel. See [dependencies](dependencies.md) for the supported Python and
 Django constraints and [contributing](../CONTRIBUTING.md) for the checks.
