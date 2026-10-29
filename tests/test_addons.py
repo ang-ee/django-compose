@@ -11,8 +11,9 @@ from pathlib import Path
 import pytest
 from django.apps import AppConfig
 from django.core.exceptions import ImproperlyConfigured
+from packaging.requirements import Requirement
 
-from django_compose.addons import enabled_apps
+from django_compose.addons import enabled_apps, installed_addons
 
 GROUP = "testsite.addons"
 
@@ -248,7 +249,7 @@ def test_closure_runs_without_configuring_settings_in_fresh_process():
     script = (
         "import sys\n"
         "from django.conf import settings\n"
-        "from django_compose.addons import enabled_apps\n"
+        "from django_compose.addons import enabled_apps, installed_addons\n"
         "assert not settings.configured\n"
         "assert 'django.db.models' not in sys.modules\n"
         "result = enabled_apps(('django.contrib.contenttypes',), group='independent.addons')\n"
@@ -317,3 +318,82 @@ def test_unset_group_resolves_native_graph_without_distribution_access(installed
     assert result.entries == (explicit, "selection_z", root)
     assert result.required == {"selection_z"}
     assert result.addons == frozenset()
+
+
+def test_installed_index_retains_native_metadata_without_importing_or_loading(installed, monkeypatch):
+    distribution = installed.distribution(
+        "Mixed.Provider", app="unimportable.app", entry="unimportable.app.apps.Config"
+    )
+    ordinary = installed.distribution("ordinary-library")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("metadata inspection must not activate apps")
+
+    monkeypatch.setattr(AppConfig, "create", forbidden)
+    monkeypatch.setattr(metadata.EntryPoint, "load", forbidden)
+    index = installed_addons(GROUP)
+    assert index.distributions == {"mixed-provider": distribution, "ordinary-library": ordinary}
+    assert index.providers == {"unimportable.app": "mixed-provider"}
+    point = index.entry_points["mixed-provider"]
+    assert isinstance(point, metadata.EntryPoint)
+    assert point.value == "unimportable.app.apps.Config"
+    assert "unimportable" not in sys.modules
+    for mapping in (index.distributions, index.entry_points, index.providers):
+        with pytest.raises(TypeError):
+            mapping["new"] = None
+    with pytest.raises(FrozenInstanceError):
+        index.providers = {}
+
+
+def test_active_requirements_are_native_platform_filtered_and_extra_empty(installed):
+    installed.distribution(
+        "root-dist",
+        app="unimportable.app",
+        requires=(
+            'optional; extra == "feature"',
+            'included[feature]>=1; extra != "feature"',
+            f'platform-present; sys_platform == "{sys.platform}"',
+            f'platform-absent; sys_platform != "{sys.platform}"',
+            'disjunction; extra == "feature" or python_version >= "3"',
+        ),
+    )
+    requirements = installed_addons(GROUP).active_requirements("root-dist")
+    assert all(isinstance(requirement, Requirement) for requirement in requirements)
+    assert tuple(requirement.name for requirement in requirements) == (
+        "disjunction",
+        "included",
+        "platform-present",
+    )
+    assert requirements[1].extras == {"feature"}
+    assert str(requirements[1].specifier) == ">=1"
+
+
+@pytest.mark.parametrize("kind", ("provider", "entries", "distribution"))
+def test_installed_index_rejects_metadata_collisions_without_activation(installed, kind):
+    installed.distribution(
+        "first-provider",
+        app="unimportable.app",
+        extra_points=("other.app = other.app",) if kind == "entries" else (),
+    )
+    if kind == "provider":
+        installed.distribution("second-provider", app="unimportable.app")
+    elif kind == "distribution":
+        installed.distribution("first.provider")
+    with pytest.raises(ImproperlyConfigured, match="Competing providers|one entry point|Multiple installed"):
+        installed_addons(GROUP)
+
+
+@pytest.mark.parametrize("group", ("", None, 12, False))
+def test_installed_index_requires_explicit_group(group):
+    with pytest.raises(ImproperlyConfigured, match="group"):
+        installed_addons(group)
+
+
+def test_installed_index_defers_native_app_identity_validation(installed):
+    root = installed.app("selection_root")
+    wrong = installed.app("selection_wrong")
+    installed.distribution("root-dist", app=root, entry=wrong)
+    assert installed_addons(GROUP).entry_points["root-dist"].value == wrong
+    assert wrong not in sys.modules
+    with pytest.raises(ImproperlyConfigured, match="Entry point .* selects app"):
+        enabled_apps((root,), group=GROUP)

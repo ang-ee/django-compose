@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from graphlib import CycleError, TopologicalSorter
 from importlib import metadata
+from types import MappingProxyType
 
 from django.apps import AppConfig
 from django.core.exceptions import ImproperlyConfigured
@@ -30,8 +31,42 @@ class Closure:
     addons: frozenset[str]
 
 
-def _installed(group: str) -> tuple[dict[str, metadata.Distribution], dict[str, metadata.EntryPoint]]:
-    """Index native distribution providers without loading disabled entry points."""
+@dataclass(frozen=True)
+class InstalledAddons:
+    """Read-only native metadata, indexed without importing apps or loading points.
+
+    Distributions and entry_points use canonical distribution names as keys.
+    Providers maps declared app keys to distribution names. Actual AppConfig
+    identity is checked only when enabled_apps activates the declaration. The
+    index containers are immutable; their values retain native metadata APIs.
+    """
+
+    distributions: Mapping[str, metadata.Distribution]
+    entry_points: Mapping[str, metadata.EntryPoint]
+    providers: Mapping[str, str]
+
+    def active_requirements(self, provider: str) -> tuple[Requirement, ...]:
+        """Return sorted native requirements active on this platform with extra=''.
+
+        Requested extras never activate optional requirements. Missing installed
+        dependencies are checked during activation, keeping disabled metadata inert.
+        """
+        requirements = (Requirement(value) for value in sorted(self.distributions[provider].requires or ()))
+        return tuple(
+            requirement
+            for requirement in requirements
+            if requirement.marker is None or requirement.marker.evaluate({"extra": ""})
+        )
+
+
+def installed_addons(group: str) -> InstalledAddons:
+    """Index group declarations and declared app-key collisions without imports.
+
+    Each participating distribution must declare exactly one group entry point.
+    Its value remains a native app/config string, never a loaded entry point.
+    """
+    if not isinstance(group, str) or not group:
+        raise ImproperlyConfigured("An explicit non-empty addon entry-point group is required")
     distributions: dict[str, metadata.Distribution] = {}
     points: dict[str, metadata.EntryPoint] = {}
     app_providers: dict[str, str] = {}
@@ -52,7 +87,9 @@ def _installed(group: str) -> tuple[dict[str, metadata.Distribution], dict[str, 
             )
         app_providers[point.name] = name
         points[name] = point
-    return distributions, points
+    return InstalledAddons(
+        MappingProxyType(distributions), MappingProxyType(points), MappingProxyType(app_providers)
+    )
 
 
 def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
@@ -68,8 +105,7 @@ def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
     Root configs are preselected and override dependency/default config choices.
     Conflicting dependency configs, duplicate native labels and cycles fail.
     """
-    if group is not None and (not isinstance(group, str) or not group):
-        raise ImproperlyConfigured("An explicit non-empty addon entry-point group is required")
+    installed = installed_addons(group) if group is not None else None
     root_entries = tuple(roots)
     if any(not isinstance(entry, str) for entry in root_entries):
         raise ImproperlyConfigured("Root INSTALLED_APPS entries must be native app strings")
@@ -77,12 +113,12 @@ def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
     selected = {entry.name: (entry.entry, AppConfig.create(entry.entry)) for entry in normalized_roots}
     root_names = tuple(selected)
     root_set = frozenset(root_names)
-    distributions, points = _installed(group) if group is not None else ({}, {})
-    by_app = {point.name: name for name, point in points.items()}
+    by_app = installed.providers if installed is not None else {}
     graph: dict[str, tuple[str, ...]] = {}
 
     def addon_entry(provider: str) -> str:
-        point = points[provider]
+        assert installed is not None
+        point = installed.entry_points[provider]
         config = AppConfig.create(point.value)
         if config.name != point.name:
             raise ImproperlyConfigured(
@@ -113,16 +149,14 @@ def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
         provider = by_app.get(name)
         if provider is not None:
             addon_entry(provider)
-            for requirement in sorted(distributions[provider].requires or ()):
-                parsed = Requirement(requirement)
-                if parsed.marker is not None and not parsed.marker.evaluate({"extra": ""}):
-                    continue
+            assert installed is not None
+            for parsed in installed.active_requirements(provider):
                 dependency = canonicalize_name(parsed.name)
-                if dependency not in distributions:
+                if dependency not in installed.distributions:
                     raise ImproperlyConfigured(
                         f"Addon {name!r} requires missing installed distribution {parsed.name!r}"
                     )
-                if dependency in points:
+                if dependency in installed.entry_points:
                     dependencies.append(addon_entry(dependency))
         if any(not isinstance(entry, str) for entry in dependencies):
             raise ImproperlyConfigured(f"{name}.requires_apps entries must be native app strings")
