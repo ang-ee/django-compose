@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Mapping, MutableMapping
-from copy import deepcopy
 from importlib import import_module
 from types import MappingProxyType, ModuleType
 from typing import Any
@@ -27,6 +26,21 @@ _ENVIRONMENT = "**ENVIRONMENT**"
 
 def _root(key: str) -> str:
     return key.split(":", 1)[0].split(".", 1)[0]
+
+
+def _copy_settings(value: Any) -> Any:
+    """Detach settings containers while retaining opaque native objects."""
+    if isinstance(value, Mapping):
+        return {key: _copy_settings(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_settings(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_settings(item) for item in value)
+    if isinstance(value, set):
+        return {_copy_settings(item) for item in value}
+    if isinstance(value, frozenset):
+        return frozenset(_copy_settings(item) for item in value)
+    return value
 
 
 class _Errors(logging.Handler):
@@ -125,8 +139,8 @@ class _Contributions:
                 if name in self.literal_inputs:
                     del attributes[f"{name}:raw"]
                     self.literal_inputs.remove(name)
-                django_yamlconf.set_attr_value(attributes, self.module, owner, key, deepcopy(value))
-            expanded = deepcopy(attributes)
+                django_yamlconf.set_attr_value(attributes, self.module, owner, key, _copy_settings(value))
+            expanded = _copy_settings(attributes)
             django_yamlconf.expand_attribute_refs(expanded)
             for key, info in attributes.items():
                 info["evalue"] = expanded[key]["evalue"]
@@ -171,7 +185,7 @@ class _Contributions:
             used: set[str] = set()
             wrt = {name: _Reference(data["evalue"], name, used) for name, data in attributes.items()}
             for value in (info["value"], *(value for value, _ in info["history"])):
-                django_yamlconf.expand_attr_helper(deepcopy(value), wrt=wrt)
+                django_yamlconf.expand_attr_helper(_copy_settings(value), wrt=wrt)
             for reference in sorted(used):
                 source = inspect(reference, visited)
                 if source is not None:
@@ -207,7 +221,7 @@ class _Contributions:
                 for name, value in self._namespace.items()
                 if not name.startswith("_") and name.isupper()
             }
-            result = callback(MappingProxyType(deepcopy(effective)))
+            result = callback(MappingProxyType(_copy_settings(effective)))
             if not isinstance(result, Mapping):
                 raise ImproperlyConfigured(f"{owner}.settings() must return a mapping")
             self.merge(result, owner, derived=True)

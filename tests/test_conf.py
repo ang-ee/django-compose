@@ -447,3 +447,30 @@ def test_preexisting_native_raw_marker_remains_authoritative(project):
     ns["INSTALLED_APPS"] = [app("SETTINGS = {'ITEMS:append': ['{BASE_DIR}/data']}")]
     conf.configure(ns)
     assert ns["ITEMS"] == ["{BASE_DIR}/data"]
+
+
+def test_native_logging_stream_and_opaque_values_survive_container_isolation(project):
+    app, ns = project
+    ns.update(
+        LOGGING={
+            "version": 1,
+            "handlers": {"console": {"class": "logging.StreamHandler", "stream": sys.stderr}},
+        },
+        CALLBACK_OPTIONS={"nested": [{"project"}]},
+    )
+    stream = ns["LOGGING"]["handlers"]["console"]["stream"]
+    ns["INSTALLED_APPS"] = [
+        app("""import sys
+SETTINGS = {'ADDON_VALUE': 1}
+def settings(namespace):
+    assert namespace['LOGGING']['handlers']['console']['stream'] is sys.stderr
+    namespace['LOGGING']['handlers']['console']['class'] = 'changed'
+    namespace['CALLBACK_OPTIONS']['nested'][0].add('changed')
+    return {}
+""")
+    ]
+    conf.configure(ns)
+    assert ns["LOGGING"]["handlers"]["console"]["stream"] is stream
+    assert ns["LOGGING"]["handlers"]["console"]["class"] == "logging.StreamHandler"
+    assert ns["CALLBACK_OPTIONS"] == {"nested": [{"project"}]}
+    assert ns["ADDON_VALUE"] == 1
