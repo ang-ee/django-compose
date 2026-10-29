@@ -290,7 +290,10 @@ the hook's single output root in `COMPOSE_EXTERNAL_ARTIFACT_ROOTS`. Each hook's
 render mapping is its exact file-ownership declaration; filenames may be
 computed from populated model facts in the ready phase. The build records those
 paths and hashes in `Receipt.OWNED_FILES`, which owns serving lookup and cleanup.
-Roots cannot claim native app labels, retained history or core structure. Traversal, symlinks, file/directory collisions, overwriting unowned
+Roots cannot claim generated model packages, retained or retired history roots,
+or core structure. A selected model-free app may use its own label as an artifact
+root when that label owns no generated model or history package. Traversal,
+symlinks, file/directory collisions, overwriting unowned
 files, competing hooks across either phase and migration/history collisions fail.
 Models-phase hooks receive `ModelsView`; ready-phase hooks receive the native
 registry in the final ready callback, before publication. See [build integrations](extensions.md) for an example.
