@@ -437,3 +437,31 @@ def test_closure_dependency_projection_is_immutable_and_includes_leaf_apps(insta
         closure.dependencies[root][0] = "changed"
     with pytest.raises(FrozenInstanceError):
         closure.dependencies = {}
+
+
+def test_closure_app_identities_reuse_selected_configs_without_reactivation(installed, monkeypatch):
+    from dataclasses import FrozenInstanceError
+
+    root = installed.app("canonical_native", label="custom_identity")
+    native_create = AppConfig.create
+    activations = []
+
+    def create(entry):
+        activations.append(entry)
+        return native_create(entry)
+
+    monkeypatch.setattr(AppConfig, "create", create)
+    closure = enabled_apps((root,))
+    assert activations == [root]
+    (identity,) = closure.app_entries
+    assert identity.name == root
+    assert identity.label == "custom_identity"
+    assert identity.entry == root
+    assert identity.config == f"{root}.apps.DefaultConfig"
+    assert Path(identity.path).name == root
+    assert closure.entries == (root,)
+    assert activations == [root]
+    with pytest.raises(FrozenInstanceError):
+        identity.path = "changed"
+    with pytest.raises(FrozenInstanceError):
+        closure.app_entries = ()

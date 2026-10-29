@@ -11,16 +11,15 @@ from types import MappingProxyType, ModuleType
 from typing import Any
 
 import django_yamlconf
-from django.apps import AppConfig
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.module_loading import module_has_submodule
 
 from django_compose import serving
 from django_compose.addons import enabled_apps
 from django_compose.autoreload import report_inputs, report_watch_paths
-from django_compose.snapshot import mode, snapshot, structural_settings
+from django_compose.snapshot import Entry, mode, snapshot, structural_settings
 
-_DERIVED = frozenset({"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT"})
+_DERIVED = frozenset({"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_CLOSURE"})
 _PROTECTED = _DERIVED | {"INSTALLED_APPS", "COMPOSE_OUTPUT_DIR", "COMPOSE_OUTPUT_MODULE"}
 _ATTRIBUTES = "_YAMLCONF_ATTRIBUTES"
 _ENVIRONMENT = "**ENVIRONMENT**"
@@ -225,11 +224,10 @@ class _Contributions:
                         f"the environment ({source})"
                     )
 
-    def app(self, entry: str) -> None:
-        config = AppConfig.create(entry)
-        if not module_has_submodule(config.module, "autoconfig"):
+    def app(self, entry: Entry) -> None:
+        if not module_has_submodule(import_module(entry.name), "autoconfig"):
             return
-        module = import_module(f"{config.name}.autoconfig")
+        module = import_module(f"{entry.name}.autoconfig")
         owner = module.__name__
         values = getattr(module, "SETTINGS", {})
         if not isinstance(values, Mapping):
@@ -276,13 +274,14 @@ def configure(namespace: MutableMapping[str, Any]) -> None:
     report_watch_paths(namespace.get("COMPOSE_WATCH_PATHS", ()))
     roots = tuple(namespace.get("INSTALLED_APPS", ()))
     closure = enabled_apps(roots, group=namespace.get("COMPOSE_ADDON_GROUP"))
+    namespace["COMPOSE_CLOSURE"] = closure
     contributions = _Contributions(namespace)
-    for entry in closure.entries:
+    for entry in closure.app_entries:
         contributions.app(entry)
     contributions.check_environment()
     report_watch_paths(namespace.get("COMPOSE_WATCH_PATHS", ()))
     namespace["COMPOSE_ROOTS"] = roots
-    snap = snapshot(closure.entries, namespace=namespace, dependencies=closure.dependencies)
+    snap = snapshot(closure.app_entries, namespace=namespace, dependencies=closure.dependencies)
     namespace["COMPOSE_SNAPSHOT"] = snap
     output_module = snap.settings["COMPOSE_OUTPUT_MODULE"]
     namespace["COMPOSE_OUTPUT_MODULE"] = output_module
@@ -293,10 +292,10 @@ def configure(namespace: MutableMapping[str, Any]) -> None:
             else serving.verify(snap, output_module, retain_startup=True)
         )
         if selected_mode is not None:
-            installed = closure.entries + serving.tombstones(receipt, closure.entries, output_module)
+            installed = closure.entries + serving.tombstones(receipt, closure.app_entries, output_module)
         else:
             assert receipt is not None
-            installed = serving.installed_apps(closure.entries, receipt, output_module)
+            installed = serving.installed_apps(closure.app_entries, receipt, output_module)
         namespace["MIGRATION_MODULES"] = serving.migration_modules(
             namespace.get("MIGRATION_MODULES", {}), receipt, output_module
         )

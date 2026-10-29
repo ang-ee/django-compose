@@ -24,7 +24,9 @@ from django_compose.sources import SourceResolver
 COMPILER = "django-compose:1"
 DEFAULT_EXCLUDES = ("**/__pycache__/**", "**/migrations/**", "**/tests/**")
 
-NON_INPUT_SETTINGS = frozenset({"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_COMMAND_CONTEXT"})
+NON_INPUT_SETTINGS = frozenset(
+    {"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_CLOSURE", "COMPOSE_COMMAND_CONTEXT"}
+)
 STRUCTURAL_SETTINGS = frozenset(
     {
         "INSTALLED_APPS",
@@ -103,6 +105,17 @@ class Entry:
     path: str
     entry: str
 
+    @classmethod
+    def from_config(cls, config: AppConfig, entry: str) -> Entry:
+        """Capture an already-selected native config without activating it again."""
+        return cls(
+            config.name,
+            config.label,
+            f"{type(config).__module__}.{type(config).__qualname__}",
+            config.path,
+            entry,
+        )
+
 
 @dataclass(frozen=True)
 class Snapshot:
@@ -152,13 +165,7 @@ def app_entries(entries: Iterable[str | Entry]) -> tuple[Entry, ...]:
             if not isinstance(entry, str):
                 raise ImproperlyConfigured(f"INSTALLED_APPS entry must be a string: {entry!r}")
             config = AppConfig.create(entry)
-            entry = Entry(
-                config.name,
-                config.label,
-                f"{type(config).__module__}.{type(config).__qualname__}",
-                config.path,
-                entry,
-            )
+            entry = Entry.from_config(config, entry)
         if entry.name == "django_compose":
             continue
         if entry.name in names or entry.label in labels:

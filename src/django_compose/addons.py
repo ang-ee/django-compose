@@ -13,25 +13,31 @@ from django.core.exceptions import ImproperlyConfigured
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-from django_compose.snapshot import app_entries
+from django_compose.snapshot import Entry, app_entries
 
 
 @dataclass(frozen=True)
 class Closure:
     """Native app entries and app-name membership for one resolved selection.
 
-    Entries place dependencies before their dependants. Roots preserve the
+    App_entries captures native config identities in dependency order; entries
+    projects their compatible INSTALLED_APPS strings. Roots preserve the
     project's authored order; required contains only dependency-selected apps.
     Addons contains only selected members of the requested entry-point group.
     Dependencies maps selected native app names to their direct dependencies,
     also native app names, independent of the selected config entry strings.
     """
 
-    entries: tuple[str, ...]
+    app_entries: tuple[Entry, ...]
     roots: tuple[str, ...]
     required: frozenset[str]
     addons: frozenset[str]
     dependencies: Mapping[str, tuple[str, ...]]
+
+    @property
+    def entries(self) -> tuple[str, ...]:
+        """Native INSTALLED_APPS strings, projected from canonical app identities."""
+        return tuple(entry.entry for entry in self.app_entries)
 
 
 @dataclass(frozen=True)
@@ -122,10 +128,11 @@ def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
     root_entries = tuple(roots)
     if any(not isinstance(entry, str) for entry in root_entries):
         raise ImproperlyConfigured("Root INSTALLED_APPS entries must be native app strings")
-    normalized_roots = app_entries(root_entries)
-    selected = {entry.name: (entry.entry, AppConfig.create(entry.entry)) for entry in normalized_roots}
-    root_names = tuple(selected)
+    root_configs = tuple((entry, AppConfig.create(entry)) for entry in root_entries)
+    normalized_roots = app_entries(Entry.from_config(config, entry) for entry, config in root_configs)
+    root_names = tuple(entry.name for entry in normalized_roots)
     root_set = frozenset(root_names)
+    selected = {config.name: (entry, config) for entry, config in root_configs if config.name in root_set}
     by_app = installed.providers if installed is not None else {}
     graph: dict[str, tuple[str, ...]] = {}
 
@@ -183,8 +190,7 @@ def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
         ordered = tuple(TopologicalSorter(graph).static_order())
     except CycleError as error:
         raise ImproperlyConfigured(f"App dependency cycle: {' -> '.join(error.args[1])}") from error
-    entries = tuple(selected[name][0] for name in ordered)
-    app_entries(entries)  # One shared normalizer owns native identity/label validation.
+    entries = app_entries(Entry.from_config(selected[name][1], selected[name][0]) for name in ordered)
     return Closure(
         entries,
         root_names,

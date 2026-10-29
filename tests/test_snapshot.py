@@ -553,3 +553,13 @@ def test_dependency_edges_must_match_selected_native_order(tmp_path, dependencie
     )
     with pytest.raises(ImproperlyConfigured, match="Snapshot dependenc"):
         snapshot(entries, dependencies=dependencies)
+
+
+def test_opaque_closure_is_derived_not_a_snapshot_input():
+    from django_compose.snapshot import structural_settings
+
+    plain = snapshot(())
+    with_closure = snapshot((), namespace={"COMPOSE_CLOSURE": object()})
+    assert plain.digest() == with_closure.digest()
+    assert "COMPOSE_CLOSURE" not in with_closure.settings
+    assert "COMPOSE_CLOSURE" not in structural_settings({"COMPOSE_CLOSURE": object()})

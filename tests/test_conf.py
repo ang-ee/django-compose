@@ -110,6 +110,7 @@ def settings(namespace):
         "COMPOSE_OUTPUT_OTHER",
         "COMPOSE_ROOTS:doc",
         "COMPOSE_SNAPSHOT",
+        "COMPOSE_CLOSURE:append",
     ],
 )
 def test_protected_contributions(project, key):
@@ -138,7 +139,7 @@ def test_invalid_contributions_fail(project, body, message):
         conf.configure(ns)
 
 
-@pytest.mark.parametrize("name", ["COMPOSE_ROOTS", "COMPOSE_SNAPSHOT"])
+@pytest.mark.parametrize("name", ["COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_CLOSURE"])
 def test_derived_settings_are_refused_on_entry(project, name):
     _, ns = project
     ns[name] = None
@@ -569,3 +570,50 @@ def test_configure_retains_resolved_dependencies_without_reactivation(project, m
     assert snap.dependencies[consumer] == (dependency,)
     with pytest.raises(TypeError):
         snap.dependencies[consumer] = ()
+
+
+def test_callbacks_and_runtime_share_resolved_native_closure(project, monkeypatch):
+    from pathlib import Path
+
+    from django.apps import AppConfig
+
+    app, ns = project
+    foreign = app()
+    consumer = app("""SEEN = []
+def settings(namespace):
+    closure = namespace["COMPOSE_CLOSURE"]
+    assert "COMPOSE_SNAPSHOT" not in namespace
+    SEEN.append(closure)
+    return {"APP_IDENTITIES": tuple((entry.name, entry.label, entry.path) for entry in closure.app_entries)}
+""")
+    root = Path(ns["COMPOSE_OUTPUT_DIR"]).parent
+    (root / foreign / "apps.py").write_text(
+        "from django.apps import AppConfig\n"
+        f"class ForeignConfig(AppConfig):\n    name = {foreign!r}\n    label = 'custom_foreign'\n"
+    )
+    (root / consumer / "apps.py").write_text(
+        "from django.apps import AppConfig\n"
+        f"class ConsumerConfig(AppConfig):\n    name = {consumer!r}\n    requires_apps = ({foreign!r},)\n"
+    )
+    ns["INSTALLED_APPS"] = [consumer]
+    native_create = AppConfig.create
+    activations = []
+
+    def create(entry):
+        activations.append(entry)
+        return native_create(entry)
+
+    monkeypatch.setattr(AppConfig, "create", create)
+    conf.configure(ns)
+    closure = ns["COMPOSE_CLOSURE"]
+    assert importlib.import_module(f"{consumer}.autoconfig").SEEN == [closure]
+    assert importlib.import_module(f"{consumer}.autoconfig").SEEN[0] is closure
+    assert closure.entries == (foreign, consumer)
+    assert closure.dependencies == {foreign: (), consumer: (foreign,)}
+    assert closure.app_entries == ns["COMPOSE_SNAPSHOT"].entries
+    assert ns["APP_IDENTITIES"][0] == (foreign, "custom_foreign", str(root / foreign))
+    assert closure.app_entries[0].config == f"{foreign}.apps.ForeignConfig"
+    assert activations == [consumer, foreign]
+    with pytest.raises(TypeError):
+        closure.dependencies[consumer] = ()
+    assert "COMPOSE_CLOSURE" not in ns["COMPOSE_SNAPSHOT"].settings
