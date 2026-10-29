@@ -269,3 +269,154 @@ assert not Path("database.sqlite3").exists()
 expect(CommandError, "requires --imports", lambda: call_command(
     "check_migrations", removing=["unused-provider"]))
 """)
+
+
+def installed_distribution(root, name, files):
+    directory = name.replace("-", "_") + "-1.dist-info"
+    write(root, directory + "/METADATA", f"Metadata-Version: 2.1\nName: {name}\nVersion: 1\n")
+    write(root, directory + "/RECORD", "\n".join(f"{path},," for path in files) + "\n")
+
+
+def test_import_callable_bindings_follow_python_lexical_owners(host):
+    root, run = host
+    write(root, "helper.py", "def load(value): pass\n")
+    write(root, "removed_dependency/__init__.py")
+    modules = [
+        "module_forward",
+        "class_forward",
+        "local_forward",
+        "nonlocal_forward",
+        "global_forward",
+        "class_fallback",
+    ]
+    for name in modules:
+        write(root, f"removed_dependency/{name}.py")
+    installed_distribution(root, "removed-dependency", [f"removed_dependency/{name}.py" for name in modules])
+    write(
+        root,
+        "history/beta/0001_scope.py",
+        """
+from importlib import import_module as load
+from django.db import migrations
+
+def unrelated():
+    from helper import load
+    load("not_an_import")
+
+def forwards(apps, editor):
+    load("removed_dependency.module_forward")
+
+class Helper:
+    from helper import load
+    def forwards(self):
+        load("removed_dependency.class_forward")
+
+class BeforeLocal:
+    load("removed_dependency.class_fallback")
+    from helper import load
+
+def parameter_shadow(load, __import__):
+    load("not_an_import")
+    __import__("not_an_import")
+
+def own_local():
+    from importlib import import_module as load
+    load("removed_dependency.local_forward")
+
+def global_write():
+    global load
+    from helper import load
+
+def outer():
+    from helper import load
+    def rebind():
+        nonlocal load
+        from importlib import import_module as load
+    def forward():
+        load("removed_dependency.nonlocal_forward")
+
+def global_read():
+    global load
+    load("removed_dependency.global_forward")
+
+class Migration(migrations.Migration):
+    dependencies = []
+    operations = [migrations.RunPython(forwards)]
+""",
+    )
+    run("""
+from django_compose.migration_imports import MigrationImportReport
+report = MigrationImportReport()
+items = report.collect()
+modules = {item.module for item in items}
+assert {"removed_dependency." + name for name in (
+    "module_forward", "class_forward", "local_forward", "nonlocal_forward", "global_forward", "class_fallback"
+)} <= modules
+assert "not_an_import" not in modules
+refusals = report.removal_refusals(["removed-dependency"])
+assert any("requires removed-dependency" in value for value in refusals)
+assert not report.removal_refusals(["unrelated-provider"])
+""")
+
+
+def test_native_migration_enumeration_blocks_sourceless_bytecode_without_executing_it(host):
+    import py_compile
+
+    root, run = host
+    source = write(
+        root,
+        "history/beta/0002_compiled.py",
+        """
+from pathlib import Path
+from django.db import migrations
+Path("compiled_executed").write_text("executed by native loader only")
+class Migration(migrations.Migration):
+    dependencies = []
+    operations = []
+""",
+    )
+    py_compile.compile(str(source), cfile=str(source.with_suffix(".pyc")), doraise=True)
+    source.unlink()
+    run("""
+from django_compose.migration_imports import MigrationImportReport
+report = MigrationImportReport()
+items = report.collect()
+assert not Path("compiled_executed").exists()
+assert any(item.module == "history.beta.0002_compiled" and item.kind == "unsupported" for item in items)
+assert any("unsupported" in refusal for refusal in report.removal_refusals(["unrelated"]))
+from io import StringIO
+output = StringIO()
+call_command("check_migrations", imports=True, stdout=output)
+assert "Native migration loader skipped" in output.getvalue()
+assert not Path("compiled_executed").exists()
+expect(CommandError, "Cannot remove", lambda: call_command(
+    "check_migrations", imports=True, removing=["unrelated"], stdout=StringIO()))
+assert not Path("compiled_executed").exists()
+loader = MigrationLoader(None)
+assert ("beta", "0002_compiled") in loader.disk_migrations
+assert Path("compiled_executed").exists()
+""")
+
+
+@pytest.mark.parametrize("direct_namespace", [False, True])
+def test_namespace_contributors_are_alternative_providers_not_child_requirements(host, direct_namespace):
+    root, run = host
+    for name in ("one", "two"):
+        write(root, f"shared/{name}/__init__.py")
+        write(root, f"shared/{name}/fields.py")
+        installed_distribution(
+            root, "shared-" + name, [f"shared/{name}/__init__.py", f"shared/{name}/fields.py"]
+        )
+    imports = "import shared" if direct_namespace else "from shared.one import fields"
+    write(root, "history/beta/0001_namespace.py", imports + "\n")
+    run(f"""
+from django_compose.migration_imports import MigrationImportReport
+report = MigrationImportReport()
+items = report.collect()
+namespace = next(item for item in items if item.module == "shared")
+assert namespace.kind == "namespace"
+assert namespace.distributions == ("shared-one", "shared-two")
+assert not report.removal_refusals(["shared-two"])
+assert bool(report.removal_refusals(["shared-one"])) is {not direct_namespace!r}
+assert report.removal_refusals(["shared-one", "shared-two"])
+""")

@@ -24,8 +24,10 @@ execution, routing and the recorder.
 
 `COMPOSE_TRANSITION_SOURCE` supplies ordered `{declaring_app, name, app_label, module}`
 entries, either directly or through a dotted callable safe to import before setup.
-Selected apps also contribute default `compose_migrations/<label>/<name>.py`
-transitions. Snapshot normalizes these once into immutable `transition_records`;
+When that setting is absent, selected apps contribute default
+`compose_migrations/<label>/<name>.py` transitions. An explicit setting replaces
+that discovery. Snapshot normalizes the chosen declarations once into immutable
+`transition_records`;
 build and `TransitionBinding`'s settings fallback use that same collection.
 Explicit declarations passed to `TransitionBinding` remain supported. The
 module exports native `Migration` and a pure `applies(ProjectState)` guard.
@@ -97,6 +99,12 @@ The audit enumerates selected native migration packages, including authored
 `MIGRATION_MODULES`, without relying on loaded migration objects. It parses
 imports at every depth, follows project and transition helper bodies recursively,
 and recognizes literal `import_module`, `import_string` and `__import__` targets.
+Python's native symbol tables distinguish lexical imports, including global and
+nonlocal bindings; conditional imports retain every possible callable binding.
+Native module enumeration also finds sourceless bytecode and extension migrations;
+these sources cannot be audited with AST and block removal as unsupported.
+The command skips native loader diagnostics when the report has unsupported
+entries, so it does not execute opaque sources to audit them.
 Copied transitions retain their original relative import package. Historical
 `apps.get_model()` calls remain migration-state references rather than Python
 provider lookups. The report performs no migration execution or database queries;
@@ -106,6 +114,9 @@ report when import or graph loading fails.
 Providers are classified as stdlib/built-in/frozen, exact installed-distribution
 file owners through RECORD or PEP 610 metadata, enabled-app sources, or project
 sources. It never guesses a distribution from the top-level package name.
+Namespace portions provide alternatives for namespace availability; removing an
+unrelated contributor does not make a retained child import depend on it. Removing
+all providers of a directly imported namespace is refused.
 Distribution imports are leaves except for transition helpers, whose bodies
 remain part of the audit. Unsupported non-literal dynamic imports and unresolved
 modules are visible and block removal. `--removing` also refuses a distribution

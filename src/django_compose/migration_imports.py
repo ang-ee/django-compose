@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import pkgutil
 import re
+import symtable
 from collections.abc import Iterable
 from dataclasses import dataclass
+from importlib.machinery import SOURCE_SUFFIXES
 from pathlib import Path
 
 from django.apps import apps
 from django.conf import settings
 
-from django_compose.sources import SourceResolver
+from django_compose.sources import ModuleSource, SourceResolver
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,167 @@ class HistoricalImport:
 
 def _distribution_key(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+class _ImportCalls(ast.NodeVisitor):
+    """Let Python's symbol tables own import bindings across lexical scopes.
+
+    Retain every imported candidate for a binding: conditional imports and
+    global/nonlocal rebindings cannot erase a possible native import callable.
+    Unrelated local names never replace candidates from a different scope.
+    """
+
+    def __init__(self, source: str, path: Path, package: str) -> None:
+        self.root = symtable.symtable(source, str(path), "exec")
+        self.scope = self.root
+        self.package = package
+        self.parents: dict[symtable.SymbolTable, symtable.SymbolTable] = {}
+        self.aliases: dict[symtable.SymbolTable, dict[str, set[str]]] = {}
+        self.calls: list[tuple[ast.Call, symtable.SymbolTable, frozenset[str]]] = []
+        self.masked: frozenset[str] = frozenset()
+
+    def _owner(self, scope: symtable.SymbolTable, name: str) -> symtable.SymbolTable:
+        try:
+            symbol = scope.lookup(name)
+        except KeyError:
+            return self.root
+        if symbol.is_global():
+            return self.root
+        if symbol.is_free() or symbol.is_nonlocal():
+            parent = self.parents[scope]
+            while parent is not self.root:
+                if parent.get_type() != symtable.SymbolTableType.CLASS:
+                    candidate = parent.lookup(name) if name in parent.get_identifiers() else None
+                    if candidate is not None and candidate.is_local():
+                        return parent
+                parent = self.parents[parent]
+            return self.root
+        return scope
+
+    def _bind(self, name: str, target: str) -> None:
+        owner = self._owner(self.scope, name)
+        self.aliases.setdefault(owner, {}).setdefault(name, set()).add(target)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            name = alias.asname or alias.name.split(".")[0]
+            self._bind(name, alias.name if alias.asname else name)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        base = node.module or ""
+        if node.level:
+            try:
+                base = importlib.util.resolve_name("." * node.level + base, self.package)
+            except ImportError, ValueError:
+                return  # The report separately records this invalid import.
+        for alias in node.names:
+            self._bind(alias.asname or alias.name, f"{base}.{alias.name}")
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self.calls.append((node, self.scope, self.masked))
+        self.generic_visit(node)
+
+    def _nested(self, node: ast.stmt | ast.expr, name: str, body: Iterable[ast.AST]) -> None:
+        # Type parameter tables wrap generic functions/classes in Python 3.14.
+        parent = self.scope
+        candidates = [
+            child
+            for child in parent.get_children()
+            if child.get_name() == name and child.get_lineno() == node.lineno
+        ]
+        if len(candidates) != 1:
+            raise ValueError(f"Cannot uniquely match Python lexical scope {name!r} at line {node.lineno}")
+        child = candidates[0]
+        self.parents[child] = parent
+        while child.get_type() == symtable.SymbolTableType.TYPE_PARAMETERS:
+            parent = child
+            child = next(table for table in child.get_children() if table.get_name() == name)
+            self.parents[child] = parent
+        previous, self.scope = self.scope, child
+        for statement in body:
+            self.visit(statement)
+        self.scope = previous
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for expression in (*node.decorator_list, *node.args.defaults, *node.args.kw_defaults):
+            if expression is not None:
+                self.visit(expression)
+        for argument in (
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+            *([node.args.vararg] if node.args.vararg else []),
+            *([node.args.kwarg] if node.args.kwarg else []),
+        ):
+            if argument.annotation is not None:
+                self.visit(argument.annotation)
+        if node.returns is not None:
+            self.visit(node.returns)
+        for parameter in node.type_params:
+            self.visit(parameter)
+        self._nested(node, node.name, node.body)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for expression in (*node.decorator_list, *node.bases, *node.keywords):
+            self.visit(expression)
+        self._nested(node, node.name, node.body)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for expression in (*node.args.defaults, *node.args.kw_defaults):
+            if expression is not None:
+                self.visit(expression)
+        self._nested(node, "lambda", (node.body,))
+
+    def _comprehension(self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp) -> None:
+        # Python inlines list/set/dict comprehensions; their iteration variables
+        # still shadow outer bindings. Generator expressions have a native scope.
+        self.visit(node.generators[0].iter)
+        expressions = [expression for generator in node.generators for expression in generator.ifs]
+        expressions.extend(generator.iter for generator in node.generators[1:])
+        if isinstance(node, ast.DictComp):
+            expressions.extend((node.key, node.value))
+        else:
+            expressions.append(node.elt)
+        if isinstance(node, ast.GeneratorExp):
+            self._nested(node, "genexpr", expressions)
+            return
+        previous = self.masked
+        self.masked |= frozenset(
+            target.id
+            for generator in node.generators
+            for target in ast.walk(generator.target)
+            if isinstance(target, ast.Name)
+        )
+        for expression in expressions:
+            self.visit(expression)
+        self.masked = previous
+
+    visit_ListComp = _comprehension
+    visit_SetComp = _comprehension
+    visit_DictComp = _comprehension
+    visit_GeneratorExp = _comprehension
+
+    def targets(self, node: ast.expr, scope: symtable.SymbolTable, masked: frozenset[str]) -> set[str]:
+        if isinstance(node, ast.Name):
+            if node.id in masked:
+                return set()
+            owner = self._owner(scope, node.id)
+            owners = {owner}
+            if scope.get_type() == symtable.SymbolTableType.CLASS and owner is scope:
+                # Class bodies use LOAD_NAME: an unbound local falls back to
+                # globals, unlike a function's statically local variables.
+                owners.add(self.root)
+            targets = {
+                target for table in owners for target in self.aliases.get(table, {}).get(node.id, set())
+            }
+            if node.id == "__import__" and self.root in owners:
+                targets.add("__import__")
+            return targets
+        if isinstance(node, ast.Attribute):
+            return {target + "." + node.attr for target in self.targets(node.value, scope, masked)}
+        return set()
 
 
 class MigrationImportReport:
@@ -47,9 +211,21 @@ class MigrationImportReport:
             record["module"].rpartition(".")[0] for record in getattr(snapshot, "transition_records", ())
         }
 
+    def _edge(self, path: Path, source: ModuleSource) -> HistoricalImport:
+        if source.path is not None and source.path.is_dir() and source.search_locations:
+            # A namespace executes no initializer. Its distribution portions are
+            # alternatives for availability, not independent import requirements.
+            providers = (
+                source.distributions
+                if all(self.resolver.distribution_names(location) for location in source.search_locations)
+                else ()
+            )
+            return HistoricalImport(path, source.module, providers, "namespace")
+        return HistoricalImport(path, source.module, source.distributions, source.kind)
+
     def _record(self, path: Path, module: str) -> None:
         source = self.resolver.resolve(module)
-        self.items.append(HistoricalImport(path, module, source.distributions, source.kind))
+        self.items.append(self._edge(path, source))
         if (
             source.path is not None
             and source.path.is_file()
@@ -67,7 +243,7 @@ class MigrationImportReport:
         for index in range(1, len(module.split("."))):
             parent = ".".join(module.split(".")[:index])
             parent_source = self.resolver.resolve(parent)
-            self.items.append(HistoricalImport(path, parent, parent_source.distributions, parent_source.kind))
+            self.items.append(self._edge(path, parent_source))
             if (
                 parent_source.path is not None
                 and parent_source.path.is_file()
@@ -83,13 +259,23 @@ class MigrationImportReport:
         if path in self._visited:
             return
         self._visited.add(path)
+        if path.suffix not in SOURCE_SUFFIXES:
+            self.items.append(
+                HistoricalImport(
+                    path,
+                    module,
+                    kind="unsupported",
+                    detail="migration/helper has no inspectable Python source",
+                )
+            )
+            return
         try:
-            tree = ast.parse(path.read_text(), filename=str(path))
+            source = path.read_text()
+            tree = ast.parse(source, filename=str(path))
         except (OSError, SyntaxError, UnicodeError) as error:
             self.items.append(HistoricalImport(path, module, kind="unresolved", detail=str(error)))
             return
         package = module if path.name == "__init__.py" else module.rpartition(".")[0]
-        aliases = {"__import__": "__import__"}
         # Copied transitions deliberately retain their original relative package.
         for statement in tree.body:
             if isinstance(statement, ast.Assign) and any(
@@ -98,22 +284,14 @@ class MigrationImportReport:
                 if isinstance(statement.value, ast.Constant) and isinstance(statement.value.value, str):
                     package = statement.value.value
                     self._transition_packages.add(package)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    aliases[alias.asname or alias.name.split(".")[0]] = (
-                        alias.name if alias.asname else alias.name.split(".")[0]
-                    )
-            elif isinstance(node, ast.ImportFrom):
-                base = node.module or ""
-                if node.level:
-                    try:
-                        base = importlib.util.resolve_name("." * node.level + base, package)
-                    except (ImportError, ValueError) as error:
-                        self._unsupported(path, node, str(error))
-                        continue
-                for alias in node.names:
-                    aliases[alias.asname or alias.name] = f"{base}.{alias.name}"
+        try:
+            bindings = _ImportCalls(source, path, package)
+            bindings.visit(tree)
+        except SyntaxError as error:
+            self.items.append(HistoricalImport(path, module, kind="unresolved", detail=str(error)))
+            return
+        except (ValueError, StopIteration) as error:
+            self.items.append(HistoricalImport(path, module, kind="unsupported", detail=str(error)))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -123,7 +301,8 @@ class MigrationImportReport:
                 if node.level:
                     try:
                         base = importlib.util.resolve_name("." * node.level + base, package)
-                    except ImportError, ValueError:
+                    except (ImportError, ValueError) as error:
+                        self._unsupported(path, node, str(error))
                         continue
                 if base:
                     self._record(path, base)
@@ -133,8 +312,8 @@ class MigrationImportReport:
                     child = f"{base}.{alias.name}"
                     if alias.name != "*" and self.resolver.resolve(child).kind != "unresolved":
                         self._record(path, child)
-            elif isinstance(node, ast.Call):
-                target = self._call_target(node.func, aliases)
+        for node, scope, masked in bindings.calls:
+            for target in bindings.targets(node.func, scope, masked):
                 if target not in {
                     "__import__",
                     "builtins.__import__",
@@ -224,14 +403,6 @@ class MigrationImportReport:
                         if self.resolver.resolve(child).kind != "unresolved":
                             self._record(path, child)
 
-    @staticmethod
-    def _call_target(node: ast.expr, aliases: dict[str, str]) -> str:
-        if isinstance(node, ast.Name):
-            return aliases.get(node.id, node.id)
-        if isinstance(node, ast.Attribute):
-            return MigrationImportReport._call_target(node.value, aliases) + "." + node.attr
-        return ""
-
     def collect(self) -> tuple[HistoricalImport, ...]:
         """Enumerate selected modules from native settings, never loader objects."""
         mappings = settings.MIGRATION_MODULES
@@ -256,12 +427,16 @@ class MigrationImportReport:
                     )
                 )
                 continue
-            for directory in directories:
-                for path in sorted(directory.glob("*.py")):
-                    migration_module = module if path.name == "__init__.py" else module + "." + path.stem
-                    if path.name == "__init__.py" or not path.stem.startswith(("_", "~")):
-                        self._record(path, migration_module)
-                        self._scan(path, migration_module)
+            self._record(source.path, module)
+            for _, name, is_package in sorted(
+                pkgutil.iter_modules([str(path) for path in directories]), key=lambda item: item.name
+            ):
+                if not is_package and not name.startswith(("_", "~")):
+                    migration_module = module + "." + name
+                    self._record(source.path, migration_module)
+                    migration_source = self.resolver.resolve(migration_module)
+                    if migration_source.path is not None:
+                        self._scan(migration_source.path, migration_module)
         return tuple(sorted(set(self.items), key=lambda item: (str(item.path), item.module, item.kind)))
 
     def removal_refusals(self, removing: Iterable[str]) -> tuple[str, ...]:
@@ -279,6 +454,15 @@ class MigrationImportReport:
         for item in self.items:
             if item.kind in {"unsupported", "unresolved"}:
                 refusals.append(f"{item.path}: {item.kind} {item.module}: {item.detail}")
+            if item.kind == "namespace":
+                if item.distributions and all(
+                    _distribution_key(name) in selected for name in item.distributions
+                ):
+                    refusals.append(
+                        f"{item.path}: retained namespace import {item.module} needs at least one of "
+                        + ", ".join(item.distributions)
+                    )
+                continue
             for name in item.distributions:
                 if _distribution_key(name) in selected:
                     refusals.append(f"{item.path}: retained import {item.module} requires {name}")

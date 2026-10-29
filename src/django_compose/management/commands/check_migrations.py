@@ -26,16 +26,23 @@ class Command(BaseCommand):
             raise CommandError("--removing requires --imports")
         if options.get("imports"):
             report = MigrationImportReport()
-            for item in report.collect():
+            items = report.collect()
+            for item in items:
                 providers = ", ".join(item.distributions)
                 detail = ": ".join(value for value in (item.kind, providers, item.detail) if value)
                 self.stdout.write(f"{item.path}: {item.module}: {detail}")
             loader_error = None
-            try:
-                MigrationLoader(None, ignore_no_migrations=True)
-            except Exception as error:
-                loader_error = f"Native migration loader: {type(error).__name__}: {error}"
+            if any(item.kind == "unsupported" for item in items):
+                # In particular, never execute opaque compiled migrations merely
+                # to obtain loader diagnostics for a static import report.
+                loader_error = "Native migration loader skipped: report has unsupported sources or imports"
                 self.stdout.write(loader_error)
+            else:
+                try:
+                    MigrationLoader(None, ignore_no_migrations=True)
+                except Exception as error:
+                    loader_error = f"Native migration loader: {type(error).__name__}: {error}"
+                    self.stdout.write(loader_error)
             if options.get("removing"):
                 refusals = list(report.removal_refusals(options["removing"]))
                 if loader_error:
