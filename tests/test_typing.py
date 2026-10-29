@@ -12,24 +12,38 @@ from typing_fixtures import DONOR_SOURCE, MODEL_SOURCE, NEGATIVE, POSITIVE
 SOURCE = Path(__file__).resolve().parents[1] / "src"
 
 
-def host(tmp_path: Path, *, models: bool = True) -> tuple[Path, dict[str, str]]:
-    if models:
-        app = tmp_path / "modelapp"
-        app.mkdir()
-        (app / "__init__.py").write_text("")
-        (app / "models.py").write_text(MODEL_SOURCE)
-        (app / "donors.py").write_text(DONOR_SOURCE)
+def host(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    app = tmp_path / "modelapp"
+    app.mkdir()
+    (app / "__init__.py").write_text("")
+    (app / "models.py").write_text(MODEL_SOURCE)
+    (app / "donors.py").write_text(DONOR_SOURCE)
     (tmp_path / "authored.py").write_text(
         "from pathlib import Path\nSECRET_KEY = 'typing-fixture'\n"
-        f"INSTALLED_APPS = {['modelapp'] if models else ['settingsone', 'settingstwo']!r}\n"
+        "INSTALLED_APPS = ['modelapp']\n"
         "DATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}\n"
         "DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'\n"
-        f"COMPOSE_RUNTIME_DIR = Path({str(tmp_path / 'typed_runtime')!r})\n"
-        "COMPOSE_RUNTIME_MODULE = 'typed_runtime'\n"
+        f"COMPOSE_OUTPUT_DIR = Path({str(tmp_path / 'typed_runtime')!r})\n"
+        "COMPOSE_OUTPUT_MODULE = 'typed_runtime'\n"
     )
     (tmp_path / "typing_settings.py").write_text(
-        "from authored import *\nfrom django_compose.composer import Composer\n"
-        "Composer(globals()).compose_settings()\n"
+        "from authored import *\n"
+        "from django_compose.snapshot import enabled_apps, snapshot\n"
+        "from django_compose.serving import (installed_apps, migration_modules,\n"
+        "    read_receipt, tombstones, verify)\n"
+        "import os\n"
+        "entries = enabled_apps(INSTALLED_APPS)\n"
+        "COMPOSE_SNAPSHOT = snapshot(entries, namespace=globals(), authored_migration_modules={})\n"
+        "previous = read_receipt(COMPOSE_OUTPUT_DIR)\n"
+        "if os.environ.get('DJANGO_COMPOSE_MODE'):\n"
+        "    INSTALLED_APPS = tuple(e.entry for e in entries)"
+        " + tombstones(previous, entries, COMPOSE_OUTPUT_MODULE)"
+        " + ('django_compose.apps.BuildComposeConfig',)\n"
+        "else:\n"
+        "    receipt = verify(COMPOSE_SNAPSHOT, COMPOSE_OUTPUT_MODULE)\n"
+        "    INSTALLED_APPS = installed_apps(entries, receipt, COMPOSE_OUTPUT_MODULE)"
+        " + ('django_compose.apps.ComposeConfig',)\n"
+        "MIGRATION_MODULES = migration_modules({}, previous, COMPOSE_OUTPUT_MODULE)\n"
     )
     config = tmp_path / "mypy.ini"
     config.write_text(
@@ -123,73 +137,11 @@ def test_incremental_donor_changes_removal_and_restore(tmp_path):
     assert added.returncode == 0, added.stdout + added.stderr
 
 
-DEFAULTS = """from collections.abc import Mapping
-from typing import TypedDict
-Defaults = TypedDict("Defaults", {
-    "DEMO_COUNT": int, "DEMO_MAYBE": str | None, "DEMO_VALUES": list[str], "DEMO_OVERRIDE": int,
-})
-SETTINGS: Defaults = {"DEMO_COUNT": 17, "DEMO_MAYBE": None, "DEMO_VALUES": ["base"], "DEMO_OVERRIDE": 1}
-class Derived(TypedDict):
-    DEMO_DERIVED: str | None
-
-def settings(namespace: Mapping[str, object]) -> Derived:
-    return {"DEMO_DERIVED": None}
-"""
-
-
-def test_typed_autoconfig_precedence_and_incremental_settings(tmp_path):
-    for name in ("settingsone", "settingstwo"):
-        package = tmp_path / name
-        package.mkdir()
-        (package / "__init__.py").write_text("")
-    defaults = tmp_path / "settingsone/autoconfig.py"
-    defaults.write_text(DEFAULTS)
-    (tmp_path / "settingstwo/autoconfig.py").write_text(
-        "from typing import TypedDict\n"
-        'Defaults = TypedDict("Defaults", {"DEMO_VALUES:append": list[str]})\n'
-        'SETTINGS: Defaults = {"DEMO_VALUES:append": ["extra"]}\n'
-    )
-    config, env = host(tmp_path, models=False)
-    raw = tmp_path / "authored.py"
-    raw.write_text(raw.read_text() + "DEMO_OVERRIDE = 'project'\n")
-    valid = """from typing import assert_type
-from django.conf import settings
-assert_type(settings.DEMO_COUNT, int)
-assert_type(settings.DEMO_MAYBE, str | None)
-assert_type(settings.DEMO_DERIVED, str | None)
-assert_type(settings.DEMO_VALUES, list[str])
-assert_type(settings.DEMO_OVERRIDE, str)
-"""
-    source = tmp_path / "settings_consumer.py"
-    source.write_text(valid)
-    for _ in range(2):
-        result = check(config, env, source)
-        assert result.returncode == 0, result.stdout + result.stderr
-    source.write_text(valid + "wrong: str = settings.DEMO_COUNT\nsettings.DEMO_UNKNOWN\n")
-    negative = check(config, env, source)
-    assert negative.returncode == 1, negative.stdout + negative.stderr
-    assert negative.stdout.count(": error:") == 2, negative.stdout
-    source.write_text(valid)
-    defaults.write_text(
-        DEFAULTS.replace('"DEMO_COUNT": int', '"DEMO_COUNT": str').replace(
-            '"DEMO_COUNT": 17', '"DEMO_COUNT": "changed"'
-        )
-    )
-    changed = check(config, env, source)
-    assert changed.returncode == 1, changed.stdout + changed.stderr
-    assert 'Expression is of type "str", not "int"' in changed.stdout
-    defaults.write_text(DEFAULTS.replace('"DEMO_COUNT": int, ', "").replace('"DEMO_COUNT": 17, ', ""))
-    removed = check(config, env, source)
-    assert removed.returncode == 1, removed.stdout + removed.stderr
-    assert "has no attribute 'DEMO_COUNT'" in removed.stdout
-    defaults.write_text(DEFAULTS)
-    restored = check(config, env, source)
-    assert restored.returncode == 0, restored.stdout + restored.stderr
-
-
 def test_plugin_context_does_not_mutate_native_model_classes(tmp_path):
     _config, env = host(tmp_path)
-    script = """import django
+    script = """import os
+os.environ["DJANGO_COMPOSE_MODE"] = "write"
+import django
 django.setup()
 from django.apps import apps
 from django.db import models
@@ -198,13 +150,15 @@ from modelapp.models import Entity, Child, Shared
 from modelapp.donors import Audit, Extra, GenericMethods
 from django_compose.typing import CompositionContext
 before = ProjectState.from_apps(apps)
-from unittest.mock import patch
-with patch("django_compose.model_composition.ModelComposition.discover",
-           side_effect=AssertionError("rediscovery")):
-    context = CompositionContext("typing_settings")
+context = CompositionContext("typing_settings")
+assert os.environ["DJANGO_COMPOSE_MODE"] == "write"
+os.environ.pop("DJANGO_COMPOSE_MODE")
+context = CompositionContext("typing_settings")
+assert "DJANGO_COMPOSE_MODE" not in os.environ
 concrete = apps.get_model("modelapp", "Entity")
 assert concrete().winner() == "audit"
-assert Entity.__bases__ == (models.Model,)
+from django_compose.models import Composable
+assert Entity.__bases__ == (Composable,)
 assert Audit.__bases__ == (Shared, GenericMethods)
 assert Extra.__bases__ == (Shared,)
 assert not issubclass(Child, Entity)

@@ -24,7 +24,10 @@ def run_host(
         app = tmp_path / name
         app.mkdir(exist_ok=True)
         (app / "__init__.py").write_text("", encoding="utf-8")
-        (app / "models.py").write_text("from django.db import models\n" + source, encoding="utf-8")
+        (app / "models.py").write_text(
+            "from django.db import models\nfrom django_compose.models import Composable\n" + source,
+            encoding="utf-8",
+        )
     for name, source in (files or {}).items():
         target = tmp_path / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -40,9 +43,21 @@ settings.configure(
 import django
 django.setup()
 from django.apps import apps
-from django_compose.runtime import Runtime
 from django_compose.model_composition import ModelComposition
-from django_compose.declarations import BuildIntegration, ModelDeclaration
+from django_compose.declarations import ModelDeclaration
+from django_compose.rendering import render_models
+def emit_models(composition):
+    import importlib
+    root = Path("runtime")
+    root.mkdir(exist_ok=True)
+    (root / "__init__.py").touch()
+    for label in composition.labels:
+        app = root / label
+        app.mkdir(exist_ok=True)
+        (app / "__init__.py").touch()
+        (app / "models.py").write_text(render_models(composition, label))
+    for model in composition.ordered_models:
+        importlib.import_module(f"runtime.{{model._meta.app_label}}.models")
 {code}
 """
     env = {**os.environ, "PYTHONPATH": str(SOURCE) + os.pathsep + str(tmp_path), "PYTHONHASHSEED": hash_seed}

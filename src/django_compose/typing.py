@@ -1,4 +1,4 @@
-"""Optional django-stubs extension for native composed models and app settings.
+"""Optional django-stubs extension for native composed models.
 
 Configure ``plugins = django_compose.typing`` and django-stubs' ordinary
 ``django_settings_module``. Use an isolated build settings module for analysis.
@@ -7,23 +7,20 @@ The dependency's field, queryset, manager and settings hooks remain authoritativ
 
 from __future__ import annotations
 
-import sys
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 from django.db import models
-from mypy.join import join_types
 from mypy.maptype import map_instance_to_supertype
 from mypy.mro import calculate_mro
 from mypy.nodes import (
     MDEF,
     Decorator,
     FuncDef,
-    Import,
-    ImportFrom,
-    MemberExpr,
     MypyFile,
     OverloadedFuncDef,
     PlaceholderNode,
@@ -32,22 +29,33 @@ from mypy.nodes import (
     Var,
 )
 from mypy.options import Options
-from mypy.plugin import AttributeContext, ClassDefContext, DynamicClassDefContext
+from mypy.plugin import ClassDefContext, DynamicClassDefContext
 from mypy.semanal_shared import PRIORITY_FALLBACKS, has_placeholder
 from mypy.server.trigger import make_trigger
-from mypy.types import AnyType, CallableType, Instance, Overloaded, TypedDictType, TypeType, get_proper_type
+from mypy.types import CallableType, Instance, Overloaded, TypeType, get_proper_type
 from mypy.types import Type as MypyType
 from mypy.typevars import fill_typevars
 from mypy_django_plugin.django.context import DjangoContext
-from mypy_django_plugin.lib import fullnames, helpers
+from mypy_django_plugin.lib import helpers
 from mypy_django_plugin.main import NewSemanalDjangoPlugin
 from mypy_django_plugin.transformers.managers import create_new_manager_class_from_from_queryset_method
-
-from django_compose.yamlconf import setting_name, setting_sources
 
 if TYPE_CHECKING:
     from mypy.checker import TypeChecker
     from mypy.semanal import SemanticAnalyzer
+
+
+@contextmanager
+def _compose_mode() -> Iterator[None]:
+    previous = os.environ.get("DJANGO_COMPOSE_MODE")
+    os.environ["DJANGO_COMPOSE_MODE"] = "write"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("DJANGO_COMPOSE_MODE", None)
+        else:
+            os.environ["DJANGO_COMPOSE_MODE"] = previous
 
 
 @dataclass(frozen=True)
@@ -62,33 +70,21 @@ class CompositionContext(DjangoContext):
     """Relate authored abstract names to Django's already constructed classes."""
 
     def __init__(self, django_settings_module: str) -> None:
-        super().__init__(django_settings_module)
+        with _compose_mode():
+            super().__init__(django_settings_module)
         self.composed: dict[str, type[models.Model]] = {}
         self.static_names: dict[type[models.Model], str] = {}
         self.parents: dict[str, str] = {}
-        self.required_parents: dict[type[models.Model], type[models.Model]] = {}
+        self.required_ancestors: dict[type[models.Model], type[models.Model]] = {}
         self.fields: dict[str, tuple[str, tuple[str, ...]]] = {}
         self.members: dict[str, dict[str, _Member]] = {}
         self.dependencies: dict[str, set[str]] = {}
 
-        # These are build-only imports in an explicitly requested typing plugin.
-        # isinstance also recognizes hosts' native config specializations.
-        from django_compose.apps import ComposeConfig
-        from django_compose.build import BuildComposeConfig
-        from django_compose.model_composition import ModelComposition
+        # The same discovery owner serves builds and optional static analysis.
+        from django_compose.build import discover
 
-        configs = tuple(self.apps_registry.get_app_configs())
-        lifecycle = next(
-            (config for config in configs if isinstance(config, ComposeConfig | BuildComposeConfig)), None
-        )
-        if lifecycle is None:
-            return
-        composition = (
-            lifecycle.runtime.composition
-            if isinstance(lifecycle, BuildComposeConfig)
-            else ModelComposition.discover(configs)
-        )
-        self.required_parents = composition.required_parents
+        composition = discover(tuple(self.apps_registry.get_app_configs()))
+        self.required_ancestors = composition.required_ancestors
         for source in composition.ordered_models:
             name = helpers.get_class_fullname(source)
             concrete = self.apps_registry.get_model(source._meta.app_label, source.__name__)
@@ -121,7 +117,7 @@ class CompositionContext(DjangoContext):
                 self.dependencies.setdefault(source.__module__, set()).add(owner.__module__)
                 for attribute in vars(owner):
                     selected.setdefault(attribute, member)
-        for source, parent in self.required_parents.items():
+        for source, parent in self.required_ancestors.items():
             self.parents.setdefault(helpers.get_class_fullname(source), helpers.get_class_fullname(parent))
 
     def get_model_fullname(self, model_cls: type[models.Model]) -> str:
@@ -142,7 +138,7 @@ class CompositionContext(DjangoContext):
         name: Literal["_default_manager", "_base_manager"],
     ) -> models.Manager[models.Model] | None:
         current = super().get_model_manager(api, model_cls, name)
-        parent = self.required_parents.get(model_cls)
+        parent = self.required_ancestors.get(model_cls)
         if current is None or parent is None or not self.is_fallback_manager(current):
             return current
         info = self.lookup_model_typeinfo(api, model_cls)
@@ -167,87 +163,17 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
 
     django_context: CompositionContext
     context_class: type[CompositionContext] = CompositionContext
-    default_settings_module: str | None = None
 
     def __init__(self, options: Options) -> None:
-        super().__init__(options)
-        self.django_context = self.context_class(self.plugin_config.django_settings_module)
+        with _compose_mode():
+            super().__init__(options)
+            self.django_context = self.context_class(self.plugin_config.django_settings_module)
 
     def get_additional_deps(self, file: MypyFile) -> list[tuple[int, str, int]]:
         extra = set(self.django_context.dependencies.get(file.fullname, ()))
-        imports_settings = any(
-            (isinstance(item, ImportFrom) and item.id == "django.conf")
-            or (isinstance(item, Import) and any(name == "django.conf" for name, _ in item.ids))
-            for item in file.imports
-        )
-        if imports_settings:
-            extra.update(
-                f"{config.name}.autoconfig"
-                for config in self.django_context.apps_registry.get_app_configs()
-                if f"{config.name}.autoconfig" in sys.modules
-            )
-            if self.default_settings_module and self.django_context.composed:
-                extra.add(self.default_settings_module)
         return super().get_additional_deps(file) + [
             self._new_dependency(module) for module in sorted(extra) if module != file.fullname
         ]
-
-    def get_attribute_hook(self, fullname: str) -> Callable[[AttributeContext], MypyType] | None:
-        native = super().get_attribute_hook(fullname)
-        if native is not None and fullname.rpartition(".")[0] == fullnames.DUMMY_SETTINGS_BASE_CLASS:
-            return partial(self._setting_type, native=native)
-        return native
-
-    def _setting_type(
-        self, ctx: AttributeContext, *, native: Callable[[AttributeContext], MypyType]
-    ) -> MypyType:
-        if not isinstance(ctx.context, MemberExpr):
-            return native(ctx)
-        name = ctx.context.name
-        modules = helpers.get_typechecker_api(ctx).modules
-        authored = modules.get(self.django_context.django_settings_module)
-        if authored is not None and name in authored.names:
-            return native(ctx)
-        owners = setting_sources(self.django_context.settings, name)
-        candidates: list[MypyType] = []
-        if not owners and self.default_settings_module and self.django_context.composed:
-            defaults = modules.get(self.default_settings_module)
-            symbol = defaults.names.get(name) if defaults else None
-            if symbol is not None and symbol.type is not None:
-                candidates.append(symbol.type)
-        for index, owner in enumerate(owners):
-            module = modules.get(f"{owner}.autoconfig")
-            if module is None:
-                continue
-            settings_symbol = module.names.get("SETTINGS")
-            static = get_proper_type(settings_symbol.type) if settings_symbol else None
-            values = (
-                [value for key, value in static.items.items() if setting_name(key) == name]
-                if isinstance(static, TypedDictType)
-                else []
-            )
-            if not values:
-                function = module.names.get("settings")
-                signature = get_proper_type(function.type) if function else None
-                returned = (
-                    get_proper_type(signature.ret_type) if isinstance(signature, CallableType) else None
-                )
-                if isinstance(returned, TypedDictType):
-                    values = [value for key, value in returned.items.items() if setting_name(key) == name]
-                elif (
-                    isinstance(returned, Instance)
-                    and returned.type.fullname == "builtins.dict"
-                    and index == 0
-                ):
-                    values = [returned.args[1]]
-            candidates.extend(values)
-        useful = [value for value in candidates if not isinstance(get_proper_type(value), AnyType)]
-        if not useful:
-            return native(ctx)
-        result = useful[0]
-        for value in useful[1:]:
-            result = join_types(result, value)
-        return result
 
     def get_base_class_hook(self, fullname: str) -> Callable[[ClassDefContext], None] | None:
         native = super().get_base_class_hook(fullname)

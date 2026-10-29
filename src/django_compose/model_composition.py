@@ -12,28 +12,8 @@ from typing import Any
 from django.apps import AppConfig
 from django.core.exceptions import ImproperlyConfigured
 from django.db import models
-from django.db.models.utils import make_model_tuple
 
-from django_compose.declarations import AppDeclarationSource
-
-
-def _reference(model: type[models.Model], marker: str) -> str | None:
-    value = vars(model).get(marker)
-    if value is None:
-        return None
-    if isinstance(value, str):
-        try:
-            label, name = make_model_tuple(value)
-            if label.isidentifier() and name.isidentifier() and not keyword.iskeyword(label):
-                return f"{label}.{name}"
-        except ValueError:
-            pass
-    raise ImproperlyConfigured(f"{model._meta.label}.{marker} requires an 'app_label.Model' reference")
-
-
-def extension_target(model: type[models.Model]) -> str | None:
-    """Return an own extends marker; inherited declarations never become donors."""
-    return _reference(model, "extends")
+from django_compose.models import Composable
 
 
 def _ordered(graph: Mapping[str, Iterable[str]], description: str) -> tuple[str, ...]:
@@ -67,6 +47,8 @@ class ModelComposition:
             if not label.isidentifier() or keyword.iskeyword(label):
                 raise ImproperlyConfigured(f"Invalid generated app label: {label!r}")
             for source in sources:
+                if not source.__name__.isidentifier() or keyword.iskeyword(source.__name__):
+                    raise ImproperlyConfigured(f"Invalid generated model name: {source.__name__!r}")
                 key = source._meta.label_lower
                 if key in self.models_by_label:
                     raise ImproperlyConfigured(f"Duplicate source model label {key!r}")
@@ -78,7 +60,7 @@ class ModelComposition:
                 raise ImproperlyConfigured("Addon ownership is required for extension donors")
         graph = {}
         for key, source in sorted(self.models_by_label.items()):
-            parent_ref = extension_target(source)
+            parent_ref = vars(source).get("compose_parent")
             if parent_ref is not None and parent_ref not in self.models_by_label:
                 raise ImproperlyConfigured(f"{source._meta.label} extends unknown model {parent_ref!r}")
             graph[key] = () if parent_ref is None else (parent_ref,)
@@ -103,7 +85,7 @@ class ModelComposition:
                 raise ImproperlyConfigured(
                     f"Source model {model.__module__}.{model.__name__} is not importable"
                 )
-        self.required_parents = self._requirements()
+        self.required_ancestors = self._requirements()
         self._contributions: dict[
             type[models.Model], tuple[tuple[models.Field[Any, Any], type[models.Model] | None], ...]
         ] = {}
@@ -111,21 +93,13 @@ class ModelComposition:
         self._constraints = {source: self._resolve_constraints(source) for source in self.ordered_models}
 
     @classmethod
-    def discover(
-        cls, configs: Iterable[AppConfig], *, declarations: AppDeclarationSource | None = None
-    ) -> ModelComposition:
+    def discover(cls, configs: Iterable[AppConfig]) -> ModelComposition:
         """Use native models_module exports, including custom import_models hooks."""
         configs = tuple(configs)
-        declarations = declarations if declarations is not None else AppDeclarationSource.configured()
-        migration_labels = {
-            item.get("app_label") for config in configs for item in declarations.migrations(config)
-        }
         sources: dict[str, list[type[models.Model]]] = {}
         donors: dict[str, list[type[models.Model]]] = {}
         owners: dict[type[models.Model], str] = {}
         for config in configs:
-            if config.label in migration_labels:
-                sources.setdefault(config.label, [])
             if config.models_module is None:
                 continue
             seen = set()
@@ -139,18 +113,20 @@ class ModelComposition:
                 ):
                     continue
                 seen.add(model)
+                if not issubclass(model, Composable):
+                    continue
                 own = vars(model)
-                marked = any(name in own and own[name] is not None for name in ("extends", "requires_parent"))
+                marked = any(name.startswith("compose_") for name in own)
                 if not model._meta.abstract:
-                    if marked or "runtime" in own:
+                    if marked:
                         raise ImproperlyConfigured(
                             f"{model._meta.label}: composition markers require abstract models"
                         )
                     continue
-                materialize = own.get("runtime", False)
+                materialize = own.get("compose_materialize", False)
                 if type(materialize) is not bool:
-                    raise ImproperlyConfigured(f"{model._meta.label}.runtime must be a boolean")
-                target = extension_target(model)
+                    raise ImproperlyConfigured(f"{model._meta.label}.compose_materialize must be a boolean")
+                target = own.get("compose_contributes_to")
                 if not materialize and target is None:
                     continue
                 if model._meta.app_label != config.label:
@@ -168,15 +144,19 @@ class ModelComposition:
         )
 
     def parent(self, source: type[models.Model]) -> type[models.Model] | None:
+        """Return the immediate materialized parent, or None for a root identity."""
         return self._parents[source]
 
     def donors(self, source: type[models.Model]) -> tuple[type[models.Model], ...]:
+        """Return additive donors in native enabled-app and declaration order."""
         return self.extensions.get(source._meta.label_lower, ())
 
     def contributed_fields(self, source: type[models.Model]) -> tuple[models.Field[Any, Any], ...]:
+        """Return the native fields added by donors, excluding source-owned ancestry."""
         return tuple(native for native, _ in self._contributions.get(source, ()))
 
     def contributed_field_origins(self, source: type[models.Model]) -> tuple[tuple[str, str], ...]:
+        """Return sorted (field name, declaring app name) pairs for owned additions."""
         return tuple(
             (native.name, self._owners[owner])
             for native, owner in self._contributions.get(source, ())
@@ -217,13 +197,13 @@ class ModelComposition:
                 for declaration in contributor.__mro__:
                     if not issubclass(declaration, models.Model):
                         continue
-                    reference = _reference(declaration, "requires_parent")
+                    reference = vars(declaration).get("compose_requires_ancestor")
                     if reference is None:
                         continue
                     target = self.models_by_label.get(reference)
                     if target is None or target not in ancestors:
                         raise ImproperlyConfigured(
-                            f"{source._meta.label} requires parent {reference!r} "
+                            f"{source._meta.label} requires ancestor {reference!r} "
                             f"through {declaration._meta.label}"
                         )
                     required[declaration] = target
@@ -247,6 +227,18 @@ class ModelComposition:
             local_names: dict[str, models.Field[Any, Any]] = {}
             local_columns: dict[str, models.Field[Any, Any]] = {}
             for contributor in (*self.donors(source), source):
+                if contributor is not source:
+                    authored = vars(contributor.Meta)
+                    forbidden = (set(authored) & set(models.options.DEFAULT_NAMES)) - {
+                        "abstract",
+                        "app_label",
+                        "constraints",
+                    }
+                    if forbidden:
+                        raise ImproperlyConfigured(
+                            f"{contributor._meta.label}: donor Meta authors unsupported options "
+                            f"{', '.join(sorted(forbidden))}"
+                        )
                 for native in _fields(contributor):
                     if (
                         native.name in inherited_names
@@ -279,7 +271,10 @@ class ModelComposition:
                     if manager.auto_created:
                         continue
                     previous_manager = managers.setdefault(manager.name, manager)
-                    if previous_manager.creation_counter != manager.creation_counter:
+                    if (
+                        contributor is not source
+                        and previous_manager.creation_counter != manager.creation_counter
+                    ):
                         raise ImproperlyConfigured(
                             f"{source._meta.label} composes manager {manager.name!r} twice"
                         )

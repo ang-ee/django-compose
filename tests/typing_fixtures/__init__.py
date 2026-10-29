@@ -2,17 +2,16 @@
 
 MODEL_SOURCE = """
 from __future__ import annotations
-from typing import ClassVar
 from uuid import uuid4
 from django.db import models
+from django_compose.models import Composable
 class EntityQuerySet[T: models.Model](models.QuerySet[T]):
     def tagged(self) -> EntityQuerySet[T]:
         return self
 class EntityManager[T: models.Model](models.Manager[T]):
     def label(self) -> str:
         return "entity"
-class Entity(models.Model):
-    runtime = True
+class Entity(Composable, materialize=True):
     key = models.UUIDField(primary_key=True, default=uuid4)
     title = models.CharField(max_length=30)
     objects = EntityManager.from_queryset(EntityQuerySet)()
@@ -21,51 +20,44 @@ class Entity(models.Model):
     class Meta:
         abstract = True
         base_manager_name = "objects"
-class Shared(models.Model):
+class Shared(Composable):
     shared = models.IntegerField()
     class Meta:
         abstract = True
-class Required(models.Model):
-    requires_parent: ClassVar[str] = "modelapp.Entity"
+class Required(Composable, requires_ancestor="modelapp.Entity"):
     def parent_title(self) -> str:
         return self.title
     class Meta:
         abstract = True
-class Child(Required):
-    runtime = True
-    extends: ClassVar[str] = "modelapp.Entity"
+class Child(Required, materialize=True, parent="modelapp.Entity"):
     active = models.BooleanField()
     class Meta:
         abstract = True
-class Grandchild(Required):
-    runtime = True
-    extends: ClassVar[str] = "modelapp.Child"
+class Grandchild(Required, materialize=True, parent="modelapp.Child"):
     class Meta:
         abstract = True
 class ExplicitManager[T: models.Model](models.Manager[T]):
     def alternate(self) -> int:
         return 1
-class ExplicitChild(Required):
-    runtime = True
-    extends: ClassVar[str] = "modelapp.Entity"
+class ExplicitChild(Required, materialize=True, parent="modelapp.Entity"):
     objects = ExplicitManager()
     class Meta:
         abstract = True
         base_manager_name = "objects"
-class Link(models.Model):
-    runtime = True
+class Link(Composable, materialize=True):
     entity = models.ForeignKey("modelapp.Entity", on_delete=models.CASCADE)
     entities = models.ManyToManyField("modelapp.Entity", related_name="all_links")
     class Meta:
         abstract = True
-class Ordinary(models.Model):
+class Ordinary(Composable):
     count = models.IntegerField()
 from .donors import Audit as Audit, Extra as Extra, ChildAddon as ChildAddon
 """
 
 DONOR_SOURCE = """
-from typing import ClassVar, Self, overload
+from typing import Self, overload
 from django.db import models
+from django_compose.models import Composable
 from .models import Shared
 class GenericMethods[T]:
     def echo(self, value: T) -> T:
@@ -78,8 +70,7 @@ class Descriptor:
         return "description"
     def __set__(self, row: object, value: str) -> None:
         pass
-class Audit(Shared, GenericMethods[int]):
-    extends: ClassVar[str] = "modelapp.Entity"
+class Audit(Shared, GenericMethods[int], contributes_to="modelapp.Entity"):
     rank = models.IntegerField()
     description: Descriptor = Descriptor()
     def score(self) -> int:
@@ -114,15 +105,13 @@ class Audit(Shared, GenericMethods[int]):
         return "audit"
     class Meta:
         abstract = True
-class ChildAddon(models.Model):
-    extends: ClassVar[str] = "modelapp.Child"
+class ChildAddon(Composable, contributes_to="modelapp.Child"):
     adopted = models.BooleanField()
     def ancestor_title(self) -> str:
         return self.title
     class Meta:
         abstract = True
-class Extra(Shared):
-    extends: ClassVar[str] = "modelapp.Entity"
+class Extra(Shared, contributes_to="modelapp.Entity"):
     note = models.CharField(max_length=30)
     def extra(self) -> str:
         return self.note

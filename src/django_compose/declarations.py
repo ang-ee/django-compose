@@ -1,4 +1,4 @@
-"""Explicit app adapters and literal capability contributions to one build."""
+"""Phase-2 structural integration protocols and literal model declarations."""
 
 from __future__ import annotations
 
@@ -6,48 +6,18 @@ import keyword
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.db.models.options import DEFAULT_NAMES
 from django.utils.module_loading import import_string
 
+from django_compose.models import Composable
+
 if TYPE_CHECKING:
-    from django.apps import AppConfig
     from django.db import models
 
     from django_compose.model_composition import ModelComposition
-    from django_compose.runtime import Runtime
-
-
-def _configured_class(path: Any, base: type) -> type:
-    if not isinstance(path, str):
-        raise ImproperlyConfigured(f"{base.__name__} requires a dotted class path")
-    candidate = import_string(path)
-    if not isinstance(candidate, type) or not issubclass(candidate, base):
-        raise ImproperlyConfigured(f"{path} must subclass {base.__name__}")
-    return candidate
-
-
-class AppDeclarationSource:
-    """Adapt host declarations; plain Django declares no dependency or upgrade edges."""
-
-    def dependencies(self, app: AppConfig, *, refresh: bool = False) -> tuple[str, ...]:
-        return ()
-
-    def migrations(self, app: AppConfig) -> tuple[Mapping[str, Any], ...]:
-        return ()
-
-    @staticmethod
-    def configured(namespace: Mapping[str, Any] | None = None) -> AppDeclarationSource:
-        """Resolve one explicit host adapter without importing source models."""
-        path = (
-            namespace.get("COMPOSE_APP_DECLARATIONS")
-            if namespace is not None
-            else getattr(settings, "COMPOSE_APP_DECLARATIONS", None)
-        )
-        return AppDeclarationSource() if path is None else _configured_class(path, AppDeclarationSource)()
 
 
 type DeclarationValue = (
@@ -69,32 +39,64 @@ class ModelDeclaration:
     meta_options: Mapping[str, DeclarationValue] = field(default_factory=dict)
 
 
-class BuildIntegration:
-    """Contribute capability-owned files and literals, never model construction policy."""
+@runtime_checkable
+class ModelDeclarationHook(Protocol):
+    """Project capability-owned literal attributes and custom Meta options."""
 
     def model_declaration(
         self, composition: ModelComposition, source: type[models.Model]
-    ) -> ModelDeclaration:
-        return ModelDeclaration()
+    ) -> ModelDeclaration: ...
 
-    def render_sources(self, runtime: Runtime) -> Mapping[Path, str]:
-        return {}
 
-    def runtime_imports(self, runtime: Runtime) -> tuple[str, ...]:
-        return ()
+@runtime_checkable
+class MigrationPolicy(Protocol):
+    """Supply capability-owned exemptions to destructive-change checks."""
 
-    def retired_primary_keys(self, model: type[models.Model], alias: str) -> Iterable[Any]:
-        return ()
+    def retired_primary_keys(self, model: type[models.Model], alias: str) -> Iterable[Any]: ...
 
-    @staticmethod
-    def configured() -> tuple[BuildIntegration, ...]:
-        paths = getattr(settings, "COMPOSE_INTEGRATIONS", ())
-        if not isinstance(paths, (list, tuple)):
-            raise ImproperlyConfigured("COMPOSE_INTEGRATIONS must be a list or tuple of dotted paths")
-        classes = tuple(_configured_class(path, BuildIntegration) for path in paths)
-        if len(set(classes)) != len(classes):
-            raise ImproperlyConfigured("Duplicate build integration")
-        return tuple(integration() for integration in classes)
+
+class ModelsView(Protocol):
+    """Restricted phase-2 registry access, before Django declares models ready."""
+
+    @property
+    def composition(self) -> ModelComposition: ...
+
+    def get_model(self, label: str, name: str) -> type[models.Model]: ...
+
+
+@runtime_checkable
+class ArtifactHook(Protocol):
+    """Render capability files beneath one explicitly declared output subtree."""
+
+    external_root: str
+
+    def render(self, composition: ModelComposition, models: ModelsView) -> Mapping[Path, bytes]: ...
+
+
+def resolve_integrations(paths: Iterable[str]) -> tuple[object, ...]:
+    """Instantiate explicit dotted classes once, preserving authored order.
+
+    Called only in phase 2; integration modules may freely import source models.
+    A class implements one or more independent protocols without inheritance.
+    """
+    if isinstance(paths, str) or not isinstance(paths, (list, tuple)):
+        raise ImproperlyConfigured("COMPOSE_INTEGRATIONS must be a list or tuple of dotted paths")
+    resolved: list[object] = []
+    classes: set[type] = set()
+    for path in paths:
+        if not isinstance(path, str):
+            raise ImproperlyConfigured("COMPOSE_INTEGRATIONS requires dotted class paths")
+        candidate = import_string(path)
+        if not isinstance(candidate, type):
+            raise ImproperlyConfigured(f"{path} must name an integration class")
+        if candidate in classes:
+            raise ImproperlyConfigured(f"Duplicate integration {path!r}")
+        classes.add(candidate)
+        instance = candidate()
+        if not isinstance(instance, ModelDeclarationHook | MigrationPolicy | ArtifactHook):
+            raise ImproperlyConfigured(f"{path} implements no composition integration protocol")
+        resolved.append(instance)
+    return tuple(resolved)
 
 
 def render_literal(value: DeclarationValue) -> str:
@@ -112,10 +114,11 @@ def render_literal(value: DeclarationValue) -> str:
 
 
 def model_declaration(
-    composition: ModelComposition, source: type[models.Model], integrations: tuple[BuildIntegration, ...]
+    composition: ModelComposition, source: type[models.Model], integrations: tuple[ModelDeclarationHook, ...]
 ) -> ModelDeclaration:
     """Merge disjoint feature declarations after reserving native structural names."""
-    reserved = {"Meta", "runtime", "extends", "requires_parent", "compose_contributed_field_origins"}
+    reserved = {"Meta", "compose_contributed_field_origins"}
+    reserved.update(name for name in vars(Composable) if name.startswith("compose_"))
     current: type[models.Model] | None = source
     while current is not None:
         for contributor in (current, *composition.donors(current)):
