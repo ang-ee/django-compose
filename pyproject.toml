@@ -20,7 +20,7 @@ Issues = "https://github.com/ang-ee/django-compose/issues"
 
 [project.optional-dependencies]
 typing = [
-    "angee-django-stubs[compatible-mypy]==6.1.2.post1",
+    "angee-django-stubs[compatible-mypy]==6.1.2.post3",
     "angee-django-stubs-ext==6.1.2",
     "angee-mypy==2.1.0",
 ]

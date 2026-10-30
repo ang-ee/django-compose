@@ -313,6 +313,102 @@ assert selected.creation_counter == Donor._meta.managers_map["selected"].creatio
     assert "composes manager" in result.stderr
 
 
+@pytest.mark.parametrize("inherited_kind", ["field", "manager"])
+@pytest.mark.parametrize("inherited_owner", ["source", "donor"])
+@pytest.mark.parametrize("local_owner", ["source", "donor"])
+@pytest.mark.parametrize("parent", ["Parent", "Middle"])
+def test_field_manager_collisions_include_concrete_ancestors(
+    tmp_path, inherited_kind, inherited_owner, local_owner, parent
+):
+    field = "    objects = models.CharField(max_length=20)\n"
+    manager = "    objects = models.Manager()\n"
+    inherited = field if inherited_kind == "field" else manager
+    local = manager if inherited_kind == "field" else field
+    sources = {
+        "coreapp": """
+class Parent(Composable, concrete=True):
+    entries = models.Manager()
+"""
+        + (inherited if inherited_owner == "source" else "")
+        + """
+    class Meta:
+        abstract = True
+class Middle(Composable, inherits="coreapp.Parent"):
+    class Meta:
+        abstract = True
+"""
+        + f'class Child(Composable, inherits="coreapp.{parent}"):\n'
+        + (local if local_owner == "source" else "")
+        + """
+    class Meta:
+        abstract = True
+""",
+    }
+    if inherited_owner == "donor":
+        sources["parentapp"] = (
+            'class ParentDonor(Composable, extends="coreapp.Parent"):\n'
+            + inherited
+            + "    class Meta:\n        abstract = True\n"
+        )
+    if local_owner == "donor":
+        sources["childapp"] = (
+            'class ChildDonor(Composable, extends="coreapp.Child"):\n'
+            + local
+            + "    class Meta:\n        abstract = True\n"
+        )
+    result = run_host(
+        tmp_path,
+        sources,
+        "composition = ModelComposition.discover(apps.get_app_configs())\nemit_models(composition)",
+        success=False,
+    )
+    assert "coreapp.Child composes field and manager 'objects' twice" in result.stderr
+    assert not (tmp_path / "runtime").exists()
+
+
+def test_child_managers_override_ancestor_and_source_managers(tmp_path):
+    run_host(
+        tmp_path,
+        {
+            "coreapp": BASE.replace("    title =", "    selected = models.Manager()\n    title =")
+            + """
+class Child(Composable, inherits="coreapp.Parent"):
+    selected = models.Manager()
+    class Meta:
+        abstract = True
+class Grandchild(Composable, inherits="coreapp.Child"):
+    class Meta:
+        abstract = True
+""",
+            "extraapp": """
+class Donor(Composable, extends="coreapp.Child"):
+    selected = models.Manager()
+    class Meta:
+        abstract = True
+""",
+        },
+        """
+composition = ModelComposition.discover(apps.get_app_configs())
+emit_models(composition)
+from extraapp.models import Donor
+from django.db import connection
+Parent = apps.get_model("coreapp", "Parent")
+Child = apps.get_model("coreapp", "Child")
+Grandchild = apps.get_model("coreapp", "Grandchild")
+for model in (Child, Grandchild):
+    assert model.selected.model is model
+    assert model.selected.creation_counter == Donor._meta.managers_map["selected"].creation_counter
+with connection.schema_editor() as schema:
+    for model in (Parent, Child, Grandchild):
+        schema.create_model(model)
+obj = Grandchild.selected.create(title="inherited manager")
+assert Child.selected.get(pk=obj.pk).title == "inherited manager"
+assert Parent.selected.get(pk=obj.pk).title == "inherited manager"
+assert list(Grandchild.selected.all()) == [obj]
+""",
+    )
+
+
 def test_shared_abstract_field_ancestry_has_one_declaration(tmp_path):
     run_host(
         tmp_path,
@@ -427,6 +523,49 @@ class Donor(Composable, extends="coreapp.Parent"):
         success=False,
     )
     assert "composes database column" in result.stderr
+
+
+@pytest.mark.parametrize("field_owner", ["source", "donor"])
+def test_multi_table_child_can_reuse_parent_database_column(tmp_path, field_owner):
+    field = '    child_label = models.CharField(max_length=20, db_column="value")\n'
+    sources = {
+        "coreapp": """
+class Parent(Composable, concrete=True):
+    label = models.CharField(max_length=20, db_column="value")
+    class Meta:
+        abstract = True
+class Child(Composable, inherits="coreapp.Parent"):
+"""
+        + (field if field_owner == "source" else "")
+        + "    class Meta:\n        abstract = True\n",
+    }
+    if field_owner == "donor":
+        sources["extraapp"] = (
+            'class Donor(Composable, extends="coreapp.Child"):\n'
+            + field
+            + "    class Meta:\n        abstract = True\n"
+        )
+    run_host(
+        tmp_path,
+        sources,
+        """
+composition = ModelComposition.discover(apps.get_app_configs())
+emit_models(composition)
+from django.db import connection
+Parent = apps.get_model("coreapp", "Parent")
+Child = apps.get_model("coreapp", "Child")
+assert Parent.check() == []
+assert Child.check() == []
+assert Parent._meta.get_field("label").column == Child._meta.get_field("child_label").column == "value"
+assert Parent._meta.db_table != Child._meta.db_table
+with connection.schema_editor() as schema:
+    schema.create_model(Parent)
+    schema.create_model(Child)
+obj = Child.objects.create(label="parent value", child_label="child value")
+assert Parent.objects.get(pk=obj.pk).label == "parent value"
+assert Child.objects.values_list("label", "child_label").get(pk=obj.pk) == ("parent value", "child value")
+""",
+    )
 
 
 def test_rendering_is_byte_stable_across_hash_seeds_and_source_paths(tmp_path):

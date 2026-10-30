@@ -10,9 +10,8 @@ import ast
 import hashlib
 import importlib
 import importlib.util
-import os
+import stat
 import sys
-import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,14 +28,19 @@ from django.db.migrations.autodetector import MigrationAutodetector
 from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.graph import MigrationGraph
 from django.db.migrations.loader import MigrationLoader
+from django.db.migrations.operations import fields as field_operations
+from django.db.migrations.operations import models as model_operations
+from django.db.migrations.operations.base import Operation
 from django.db.migrations.operations.fields import RemoveField
 from django.db.migrations.operations.models import DeleteModel
+from django.db.migrations.operations.special import RunPython, RunSQL, SeparateDatabaseAndState
 from django.db.migrations.recorder import MigrationRecorder
 from django.db.migrations.state import ProjectState
 from django.db.migrations.writer import MigrationWriter
 from django.db.models.expressions import DatabaseDefault
 from django.utils.module_loading import module_dir
 
+from django_compose.artifacts import atomic_write
 from django_compose.declarations import MigrationPolicy, resolve_integrations
 from django_compose.management import require_serving_mode as require_serving_mode
 from django_compose.migration_imports import HistoricalImport as HistoricalImport
@@ -87,20 +91,6 @@ def effective_states(
     before = loader.project_state()
     after = _preserve_history(before, ProjectState.from_apps(registry), purge)
     return before, after
-
-
-def _atomic(path: Path, content: bytes, *, exclusive: bool = False) -> None:
-    """Replace one file after its complete contents are on disk."""
-    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(content)
-        if exclusive:
-            os.link(temporary, path)
-        else:
-            os.replace(temporary, path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
 
 
 def _directory(label: str, *, missing: bool = False) -> Path:
@@ -480,13 +470,13 @@ class TransitionBinding:
             directory = Path(MigrationWriter(Migration("_package", label)).basedir)
             directory.mkdir(parents=True, exist_ok=True)
             if not (directory / "__init__.py").exists():
-                _atomic(directory / "__init__.py", b"", exclusive=True)
+                atomic_write(directory / "__init__.py", b"", exclusive=True)
         written = []
         try:
             for plan, content in rendered:
                 if plan.output_path.exists():
                     raise RuntimeError(f"Migration destination appeared during authoring: {plan.output_path}")
-                _atomic(plan.output_path, content, exclusive=True)
+                atomic_write(plan.output_path, content, exclusive=True)
                 written.append(plan.output_path)
             importlib.invalidate_caches()
             self.plan(apps=apps, app_labels=app_labels)
@@ -693,9 +683,10 @@ def reset_migration_history(
         raise RuntimeError("history reset requires distinct native migration packages")
     baseline = {path for directory in directories.values() for path in directory.glob("*.py")}
     original = {
-        directories[label] / f"{name}.py": (directories[label] / f"{name}.py").read_bytes()
+        path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
         for label, name in loader.disk_migrations
         if label in directories
+        for path in (directories[label] / f"{name}.py",)
     }
     try:
         for path in original:
@@ -712,7 +703,7 @@ def reset_migration_history(
         for migrations in changes.values():
             for migration in migrations:
                 writer = MigrationWriter(migration, include_header=False)
-                _atomic(Path(writer.path), writer.as_string().encode(), exclusive=True)
+                atomic_write(Path(writer.path), writer.as_string().encode(), exclusive=True)
         _forget_history(labels)
         TransitionBinding(labels=(config.label for config in global_apps.get_app_configs())).check(
             app_labels=labels
@@ -734,19 +725,18 @@ def reset_migration_history(
             for path in directory.glob("*.py"):
                 if path not in baseline:
                     path.unlink()
-        for path, content in original.items():
-            _atomic(path, content)
+        for path, (content, mode) in original.items():
+            atomic_write(path, content, mode=mode)
         _forget_history(labels)
         raise
     return labels, len(original), count
 
 
 def _history_aliases(loader: MigrationLoader, labels: set[str]) -> tuple[str, ...]:
-    """Union routes for every native historical model, including deleted models.
+    """Include historical model routes and native database-operation hints.
 
-    Intermediate operation states matter: a model may be created and deleted
-    within one migration, or change routing identity before a later deletion.
-    Native operations own those state transitions; leaf state alone loses them.
+    Follow nested database operations through their native state transitions.
+    Custom database behavior without a provable native route includes all aliases.
     """
     aliases: set[str] = set()
     model_labels: set[str] = set()
@@ -757,14 +747,42 @@ def _history_aliases(loader: MigrationLoader, labels: set[str]) -> tuple[str, ..
                 model_labels.add(model._meta.app_label)
                 aliases.update(alias for alias in connections if router.allow_migrate_model(alias, model))
 
-    for node, migration in sorted(loader.graph.nodes.items()):
-        if node[0] not in labels:
-            continue
-        state = loader.project_state(nodes=[node], at_end=False)
+    def include_operations(operations: Iterable[Operation], label: str, state: ProjectState) -> None:
         include(state)
-        for operation in migration.operations:
-            operation.state_forwards(node[0], state)
+        for operation in operations:
+            forwards = type(operation).database_forwards
+            if (
+                isinstance(operation, SeparateDatabaseAndState)
+                and forwards is SeparateDatabaseAndState.database_forwards
+            ):
+                include_operations(operation.database_operations, label, state.clone())
+            elif isinstance(operation, (RunSQL, RunPython)) and forwards in (
+                RunSQL.database_forwards,
+                RunPython.database_forwards,
+            ):
+                aliases.update(
+                    alias for alias in connections if router.allow_migrate(alias, label, **operation.hints)
+                )
+            elif (
+                not any(
+                    vars(owner).get("database_forwards") is forwards
+                    and any(
+                        getattr(module, owner.__name__, None) is owner
+                        for module in (model_operations, field_operations)
+                    )
+                    for owner in type(operation).__mro__
+                    if owner is not Operation
+                )
+                or type(operation).allow_migrate_model is not Operation.allow_migrate_model
+            ):
+                aliases.update(connections)
+            operation.state_forwards(label, state)
             include(state)
+
+    for node, migration in sorted(loader.graph.nodes.items()):
+        if node[0] in labels:
+            state = loader.project_state(nodes=[node], at_end=False)
+            include_operations(migration.operations, node[0], state)
     aliases.update(
         alias
         for alias in connections
@@ -823,12 +841,13 @@ def retire_history(label: str, *, purge: bool = False) -> None:
             changes = MigrationAutodetector(before, after).changes(
                 graph=loader.graph, trim_to_apps={label}, migration_name="compose_purge"
             )
+            _shared_table_drops(before, after, changes)
             for migration in changes.get(label, ()):
                 writer = MigrationWriter(migration, include_header=False)
                 path = Path(writer.path)
                 if path.exists():
                     raise RuntimeError(f"Refusing to overwrite native purge migration {path}")
-                _atomic(path, writer.as_string().encode(), exclusive=True)
+                atomic_write(path, writer.as_string().encode(), exclusive=True)
             _forget_history({label})
             for alias in aliases:
                 executor = MigrationExecutor(connections[alias])

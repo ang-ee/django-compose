@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Protect active shared tables during history purge and include native data-operation
+  routing hints in retirement and reset checks.
+- Preserve migration file permissions during failed history reset through the
+  common atomic writer.
+- Recover interrupted model publication through the same ownership sequence used
+  by artifact hooks.
+- Reject inherited and implicit manager/field collisions while allowing identical
+  column names in separate multi-table inheritance tables.
+- Share native relation typing for authored and generated fields, including proxy
+  relations, and call model discovery directly from its owner.
+
 ## 0.1.0.dev1
 
 - Report the composition lock path and wait duration when another reader or

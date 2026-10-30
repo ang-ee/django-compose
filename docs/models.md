@@ -83,7 +83,8 @@ There are now two concrete models and two tables:
 | `catalog.DigitalItem` | `download_url` and Django's parent link to `Item` |
 
 The generated child has an `item_ptr` parent link and inherits access to item
-fields and behavior. Its fields remain distinct from the parent's table.
+fields and behavior. Its fields remain distinct from the parent's table, so
+different field attributes may use the same `db_column` in these separate tables.
 
 `inherits` already implies a concrete model. Do not repeat `concrete=True` on
 the same declaration. `extends` merges an abstract class into an existing
@@ -175,9 +176,10 @@ options. Other native `Meta` options on extensions are refused. Constraint names
 use Django's normal interpolation, and duplicate effective names fail.
 
 Composition also refuses conflicting field names, ForeignKey attribute names
-such as `item_id`, database columns and field/manager names. A child cannot
-redeclare a field inherited from its concrete parent. Unknown targets, missing
-demanded ancestors and inheritance cycles fail before generated models are used.
+such as `item_id`, database columns within one table and field/manager names,
+including across concrete ancestors. A child cannot redeclare a field inherited
+from its concrete parent. Unknown targets, missing demanded ancestors and
+inheritance cycles fail before generated models are used.
 Move shared declarations to a common abstract base rather than repeat fields.
 
 `concrete`, `extends` and `inherits` are mutually exclusive, including an explicit

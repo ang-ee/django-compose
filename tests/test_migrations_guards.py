@@ -193,7 +193,11 @@ def test_reset_restores_every_file_and_recorder_on_failure(host, failure):
 owner().materialize(apps)
 call_command("migrate", interactive=False, verbosity=0)
 declarations.entries = []
+from stat import S_IMODE
+for name, mode in (("0001_origin.py", 0o644), ("rename.py", 0o754)):
+    Path("history/alpha", name).chmod(mode)
 before = files()
+modes = {{str(path): S_IMODE(path.stat().st_mode) for path in Path("history").rglob("*.py")}}
 from django.db.migrations.recorder import MigrationRecorder
 records = set(MigrationRecorder(connection).applied_migrations())
 if {failure!r} == "authoring":
@@ -208,6 +212,7 @@ with receipt_labels():
     with patch(target, side_effect=effect):
         expect(RuntimeError, "injected failure", lambda: reset_migration_history(("alpha",)))
 assert before == files()
+assert modes == {{str(path): S_IMODE(path.stat().st_mode) for path in Path("history").rglob("*.py")}}
 assert records == set(MigrationRecorder(connection).applied_migrations())
 """)
 

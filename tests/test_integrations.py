@@ -196,6 +196,8 @@ else:
 
 
 def test_dynamic_ready_output_refuses_existing_user_file(tmp_path):
+    from django_compose.serving import read_receipt
+
     root = host(tmp_path)
     successful(invoke(root, "compose"))
     user = root / "runtime/capability/dynamic.txt"
@@ -205,6 +207,9 @@ def test_dynamic_ready_output_refuses_existing_user_file(tmp_path):
     assert result.returncode != 0
     assert "unowned file" in result.stderr
     assert user.read_bytes() == b"user owned"
+    receipt = read_receipt(root / "runtime")
+    assert receipt is not None and receipt.IN_PROGRESS
+    assert "capability/dynamic.txt" not in receipt.OWNED_FILES
 
 
 def test_dynamic_ready_output_refuses_symlink_parent(tmp_path):

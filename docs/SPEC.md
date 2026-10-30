@@ -58,8 +58,10 @@ Generated bases are extension classes in selected app/declaration order, the
 source model, then its concrete parent. Django clones fields and resolves the
 native method-resolution order. Shared abstract ancestry contributes once. The
 first extension manager overrides a source manager; distinct extensions
-claiming one manager name fail. Field-name, attname, database-column,
-field/manager and parent-field redeclaration collisions fail. Unknown targets,
+claiming one manager name fail. Field-name, attname, same-table database-column,
+field/manager and parent-field redeclaration collisions fail. Native generated
+metadata also checks inherited and automatically created managers before callbacks.
+Unknown targets,
 parent or module dependency cycles, and unmet ancestor demands fail explicitly.
 
 The source's `Meta` is preserved. Extension classes may author native
@@ -340,7 +342,9 @@ contain no generation markers; the retained receipt and shared lock own startup
 consistency. The literal reader accepts the historical receipt field only.
 
 Every record mutation uses the common output lock. Writers invalidate first,
+validate existing ownership, record intended paths in the incomplete receipt,
 write guarded files atomically through `GeneratedTree`, then finalize last.
+A retry retains ownership of files written by an interrupted build.
 A failed build remains `IN_PROGRESS`; reverting source bytes does not revive it.
 Stale cleanup removes only previously recorded generated paths. Normal build
 and clean preserve migration directories and unowned files, and refuse foreign
@@ -397,12 +401,15 @@ integration-owned row exemptions use `MigrationPolicy`.
 
 Retirement requires consistent fully applied history across all configured
 migration-relevant aliases and refuses retained incoming cross-app dependencies.
+The alias scope includes native data-operation routing hints; custom database
+behavior that cannot establish a narrower scope requires all configured aliases.
 Optional purge authors/applies a final deletion transition on that same alias
 scope; purge alone is not retirement. Successful retirement updates the record;
 the next compose removes the history-only config. Databases absent from command
 settings lie outside that proof. Guarded history reset additionally requires a
 fully applied, model-clean graph and uses transactional recorder changes with
-filesystem rollback. Normal build and clean never reset history.
+filesystem rollback preserving original bytes and permissions. Normal build and
+clean never reset history.
 
 `check_migrations` checks native state and pending transitions.
 `check_migrations --imports` statically audits selected migration sources,
