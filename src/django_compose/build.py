@@ -162,7 +162,7 @@ class BuildPlan:
             importlib.invalidate_caches()
             for label in self.labels:
                 importlib.import_module(f"{self.output_module}.{label}.models")
-            self.composition.validate_generated(apps)
+            self.composition.validate_generated(apps, declarations)
             return self
         except BaseException:
             self.close()

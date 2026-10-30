@@ -269,6 +269,108 @@ def test_donor_analysis_preserves_native_override_diagnostics(tmp_path):
     assert "[override]" in invalid.stdout, invalid.stdout
 
 
+def test_effective_overrides_preserve_native_access_and_incremental_specialization(tmp_path):
+    config, env = host(tmp_path)
+    model = tmp_path / "modelapp/models.py"
+    model.write_text(
+        MODEL_SOURCE.replace("def winner(self) -> str:", "def winner(self) -> object:").replace(
+            '    class Meta:\n        abstract = True\n        base_manager_name = "objects"',
+            "    def echo(self, value: int) -> object:\n        return value\n"
+            "    @property\n    def display(self) -> object:\n        return self.title\n"
+            "    @classmethod\n    def origin(cls) -> object:\n        return 'source'\n"
+            '    class Meta:\n        abstract = True\n        base_manager_name = "objects"',
+            1,
+        )
+    )
+    donor = tmp_path / "modelapp/donors.py"
+    donor_source = DONOR_SOURCE.replace(
+        "class Audit(Shared, GenericMethods[int]", "class Audit(GenericMethods[int], Shared"
+    ).replace(
+        "    def winner(self) -> str:",
+        "    @classmethod\n    def origin(cls) -> str:\n        return 'donor'\n    def winner(self) -> str:",
+    )
+    donor.write_text(donor_source)
+    source = tmp_path / "consumer.py"
+    consumer = (
+        "from typing import assert_type\n"
+        "from collections.abc import Callable\n"
+        "from modelapp.models import Entity, Child\n"
+        "def consume(entity: Entity, child: Child) -> None:\n"
+        "    assert_type(entity.winner(), str)\n"
+        "    assert_type(child.winner(), str)\n"
+        "    method: Callable[[], str] = entity.winner\n"
+        "    assert_type(method(), str)\n"
+        "    assert_type(Entity.winner(entity), str)\n"
+        "    assert_type(entity.echo(1), int)\n"
+        "    assert_type(entity.display, str)\n"
+        "    assert_type(Entity.origin(), str)\n"
+        "    assert_type(entity.origin(), str)\n"
+    )
+    source.write_text(consumer)
+    runtime = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from django_compose.typing import CompositionContext; "
+            "context = CompositionContext('typing_settings'); "
+            "model = context.composed['modelapp.models.Entity']; "
+            "row = model(title='native'); "
+            "assert row.winner() == 'audit'; "
+            "assert row.echo(1) == 1; "
+            "assert row.display == 'native'; "
+            "assert model.origin() == 'donor'",
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=40,
+    )
+    assert runtime.returncode == 0, runtime.stdout + runtime.stderr
+    for _ in range(2):
+        valid = check(config, env, source)
+        assert valid.returncode == 0, valid.stdout + valid.stderr
+    donor.write_text(
+        donor_source.replace("def winner(self) -> str:", "def winner(self) -> bytes:").replace(
+            'return "audit"', 'return b"audit"'
+        )
+    )
+    changed = check(config, env, source)
+    assert changed.returncode == 1, changed.stdout + changed.stderr
+    assert 'Expression is of type "bytes", not "str"' in changed.stdout
+    donor.write_text(donor_source.replace('return "audit"', "return 1"))
+    body = check(config, env, donor)
+    assert body.returncode == 1 and "[return-value]" in body.stdout, body.stdout + body.stderr
+    donor.write_text(donor_source)
+    model.write_text(
+        model.read_text().replace(
+            'def winner(self) -> object:\n        return "source"',
+            "def winner(self) -> str:\n        return 1",
+        )
+    )
+    body = check(config, env, model)
+    assert body.returncode == 1 and "[return-value]" in body.stdout, body.stdout + body.stderr
+
+
+def test_native_c3_source_precedes_later_donor_ancestor(tmp_path):
+    config, env = host(tmp_path)
+    model = tmp_path / "modelapp/models.py"
+    model.write_text(
+        MODEL_SOURCE.replace(
+            "    def winner(self) -> str:",
+            "    def echo(self, value: int) -> object:\n        return value\n    def winner(self) -> str:",
+        )
+    )
+    source = tmp_path / "consumer.py"
+    source.write_text(
+        "from typing import assert_type\nfrom modelapp.models import Entity\n"
+        "def consume(entity: Entity) -> None:\n    assert_type(entity.echo(1), object)\n"
+    )
+    for _ in range(2):
+        result = check(config, env, source)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_context_restores_mode_when_native_setup_fails(tmp_path):
     script = """import os
 from unittest.mock import patch

@@ -7,7 +7,7 @@ import keyword
 import sys
 from collections.abc import Iterable, Mapping
 from graphlib import CycleError, TopologicalSorter
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from django.apps import AppConfig
 from django.apps.registry import Apps
@@ -15,6 +15,9 @@ from django.core.exceptions import ImproperlyConfigured
 from django.db import models
 
 from django_compose.models import Composable
+
+if TYPE_CHECKING:
+    from django_compose.declarations import ModelDeclaration
 
 
 def _ordered(graph: Mapping[str, Iterable[str]], description: str) -> tuple[str, ...]:
@@ -170,21 +173,27 @@ class ModelComposition:
         """Return one native declaration per constraint, preserving shared ancestry."""
         return self._constraints[source]
 
-    def validate_generated(self, registry: Apps) -> None:
-        """Check constructed native namespaces, including automatically created managers."""
+    def validate_generated(
+        self,
+        registry: Apps,
+        declarations: Mapping[type[models.Model], ModelDeclaration] | None = None,
+    ) -> None:
+        """Check native structural namespaces, including implicit fields and managers."""
         for source in self.ordered_models:
             model = registry.get_model(source._meta.app_label, source.__name__, require_ready=False)
+            fields = (
+                *model._meta.fields,
+                *model._meta.many_to_many,
+                *model._meta.private_fields,
+                *(field for field in model._meta.parents.values() if field is not None),
+            )
+            field_names = {name for native in fields for name in (native.name, native.get_attname())}
+            if declaration := (declarations or {}).get(source):
+                for name in sorted(field_names & declaration.attributes.keys()):
+                    raise ImproperlyConfigured(f"{model._meta.label}: cannot declare {name!r}")
             self._validate_field_managers(
                 model,
-                (
-                    name
-                    for native in (
-                        *model._meta.fields,
-                        *model._meta.many_to_many,
-                        *model._meta.private_fields,
-                    )
-                    for name in (native.name, native.attname)
-                ),
+                field_names,
                 (manager.name for manager in model._meta.managers),
             )
 

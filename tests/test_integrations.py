@@ -98,6 +98,106 @@ class CompetingCapability:
     assert read_receipt(root / "runtime").IN_PROGRESS
 
 
+@pytest.mark.parametrize("attribute", ["record_ptr", "record_ptr_id", "id"])
+def test_literals_cannot_claim_native_generated_fields_before_callbacks(tmp_path, attribute):
+    from django_compose.serving import read_receipt
+
+    root = host(tmp_path)
+    source = root / "bootapp/models.py"
+    source.write_text(
+        source.read_text()
+        + '\nclass Child(Composable, inherits="custom_boot.Record"):\n'
+        + "    class Meta:\n        abstract = True\n"
+    )
+    integration = root / "bootapp/integration.py"
+    integration.write_text(
+        integration.read_text()
+        + "\nfrom django_compose.declarations import ModelDeclaration\n"
+        + "class Literals:\n"
+        + "    def model_declaration(self, composition, source):\n"
+        + f"        return ModelDeclaration({{{attribute!r}: 99}}) if source.__name__ == 'Child' "
+        + "else ModelDeclaration()\n"
+    )
+    settings = root / "settings.py"
+    settings.write_text(
+        settings.read_text().replace(
+            '("bootapp.integration.Capability",)',
+            '("bootapp.integration.Capability", "bootapp.integration.Literals")',
+        )
+    )
+    apps = root / "bootapp/apps.py"
+    apps.write_text(
+        apps.read_text().replace(
+            '        EVENTS.append("ready")', '        raise AssertionError("ready ran")'
+        )
+    )
+    result = invoke(root, "compose")
+    assert result.returncode != 0
+    assert f"custom_boot.Child: cannot declare {attribute!r}" in result.stderr
+    assert "ready ran" not in result.stderr
+    assert not (root / "runtime/capability/ready.txt").exists()
+    assert read_receipt(root / "runtime").IN_PROGRESS
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_native_parent_links_and_harmless_literals_build_and_save(tmp_path, explicit):
+    root = host(tmp_path)
+    source = root / "bootapp/models.py"
+    source.write_text(
+        source.read_text()
+        + '\nclass Child(Composable, inherits="custom_boot.Record"):\n'
+        + (
+            '    lineage = models.OneToOneField("custom_boot.Record", parent_link=True, '
+            "on_delete=models.CASCADE)\n"
+            if explicit
+            else ""
+        )
+        + "    class Meta:\n        abstract = True\n"
+        + '\nclass Leaf(Composable, inherits="custom_boot.Child"):\n'
+        + "    class Meta:\n        abstract = True\n"
+    )
+    integration = root / "bootapp/integration.py"
+    integration.write_text(
+        integration.read_text()
+        + "\nfrom django_compose.declarations import ModelDeclaration\n"
+        + "class Literals:\n"
+        + "    def model_declaration(self, composition, source):\n"
+        + "        return ModelDeclaration({'feature': {'enabled': True}})\n"
+    )
+    settings = root / "settings.py"
+    settings.write_text(
+        settings.read_text().replace(
+            '("bootapp.integration.Capability",)',
+            '("bootapp.integration.Capability", "bootapp.integration.Literals")',
+        )
+    )
+    successful(
+        invoke(
+            root,
+            script="""
+import django
+django.setup()
+from django.apps import apps
+from django.db import connection
+from django_compose.serving import read_receipt
+from django.conf import settings
+Record, Child, Leaf = (apps.get_model('custom_boot', name) for name in ('Record', 'Child', 'Leaf'))
+assert not read_receipt(settings.COMPOSE_OUTPUT_DIR).IN_PROGRESS
+assert Child._meta.get_field(Child._meta.parents[Record].name).remote_field.parent_link
+assert Leaf._meta.get_field(Leaf._meta.parents[Child].name).remote_field.parent_link
+with connection.schema_editor() as schema:
+    for model in (Record, Child, Leaf):
+        schema.create_model(model)
+row = Leaf.objects.create(title='native')
+assert Leaf.objects.get(pk=row.pk).title == 'native'
+assert Record.objects.get(pk=row.pk).title == 'native'
+assert Leaf.feature == {'enabled': True}
+""",
+            DJANGO_COMPOSE_MODE="write",
+        )
+    )
+
+
 def ready_hook(root, body, *, external_root="capability"):
     integration = root / "bootapp/integration.py"
     integration.write_text(

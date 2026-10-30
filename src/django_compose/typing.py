@@ -26,6 +26,7 @@ from mypy.nodes import (
     MypyFile,
     OverloadedFuncDef,
     PlaceholderNode,
+    SymbolTable,
     SymbolTableNode,
     TypeInfo,
     Var,
@@ -119,7 +120,10 @@ class CompositionContext(DjangoContext):
             selected: dict[str, _Member] = {}
             self.members[name] = selected
             donor_ancestors = {base for donor in donors for base in donor.__mro__}
-            for owner in concrete.__mro__:
+            seen = set(vars(concrete))
+            for owner in concrete.__mro__[1:]:
+                attributes = set(vars(owner)) - seen
+                seen.update(vars(owner))
                 if owner in source.__mro__ or owner not in donor_ancestors:
                     continue
                 receiver = next(
@@ -127,7 +131,7 @@ class CompositionContext(DjangoContext):
                 )
                 member = _Member(helpers.get_class_fullname(owner), helpers.get_class_fullname(receiver))
                 self.dependencies.setdefault(source.__module__, set()).add(owner.__module__)
-                for attribute in vars(owner):
+                for attribute in sorted(attributes):
                     selected.setdefault(attribute, member)
         for source, parent in self.required_ancestors.items():
             self.parents.setdefault(helpers.get_class_fullname(source), helpers.get_class_fullname(parent))
@@ -175,6 +179,7 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
 
     django_context: CompositionContext
     context_class: type[CompositionContext] = CompositionContext
+    _projecting_access = False
 
     def __init__(self, options: Options) -> None:
         with _compose_mode():
@@ -191,12 +196,76 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
         }
 
     def get_attribute_hook(self, fullname: str) -> Callable[[AttributeContext], MypyType] | None:
-        """Expose configure's derived facts through native Django settings lookup."""
+        """Project effective member access and configure's native settings facts."""
 
         native = super().get_attribute_hook(fullname)
+        if projection := self._member_access_hook(fullname):
+            return projection
         if fullname.rpartition(".")[0] == fullnames.DUMMY_SETTINGS_BASE_CLASS and native is not None:
             return partial(self._derived_setting, native=native)
         return native
+
+    def get_class_attribute_hook(self, fullname: str) -> Callable[[AttributeContext], MypyType] | None:
+        return self._member_access_hook(fullname) or super().get_class_attribute_hook(fullname)
+
+    def _member_access_hook(self, fullname: str) -> Callable[[AttributeContext], MypyType] | None:
+        if self._projecting_access:
+            return None
+        owner, _, name = fullname.rpartition(".")
+        if name in self.django_context.members.get(owner, {}):
+            return partial(self._member_access, target_name=owner, name=name)
+        return None
+
+    def _member_access(self, ctx: AttributeContext, *, target_name: str, name: str) -> MypyType:
+        from mypy.checkmember import analyze_member_access
+
+        # Native override checks also use member access with a declaration as
+        # context; those must continue to compare the authored signatures.
+        if not isinstance(ctx.context, MemberExpr):
+            return ctx.default_attr_type
+        target_symbol = self.lookup_fully_qualified(target_name)
+        assert target_symbol and isinstance(target_symbol.node, TypeInfo)
+        target = target_symbol.node
+        if name not in target.metadata.get("compose_overrides", {}):
+            return ctx.default_attr_type
+        member = self.django_context.members[target.fullname][name]
+        origin = self.lookup_fully_qualified(member.owner)
+        receiver = self.lookup_fully_qualified(member.receiver)
+        assert origin and isinstance(origin.node, TypeInfo)
+        assert receiver and isinstance(receiver.node, TypeInfo)
+        symbol = origin.node.names.get(name)
+        declaration = _member_variable(symbol.node) if symbol is not None else None
+        if declaration is None or declaration.type is None:
+            return ctx.default_attr_type
+        checker = helpers.get_typechecker_api(ctx)
+        projected = self._specialize_member(
+            name, declaration, target, origin.node, receiver.node, checker.named_type("builtins.function")
+        )
+        # A native lookup view keeps authored signatures available to override
+        # and method-body analysis. Only expression access sees the donor.
+        view = TypeInfo(
+            SymbolTable({name: SymbolTableNode(MDEF, projected)}), target.defn, target.module_name
+        )
+        view._fullname = target.fullname
+        view.mro = [view, *target.mro[1:]]
+        accessed = ctx.type
+        if isinstance(accessed, CallableType | Overloaded) and accessed.is_type_obj():
+            accessed = TypeType.make_normalized(accessed.items[0].ret_type)
+        self._projecting_access = True
+        try:
+            return analyze_member_access(
+                name,
+                accessed,
+                ctx.context,
+                is_lvalue=ctx.is_lvalue,
+                is_super=False,
+                is_operator=False,
+                original_type=ctx.type,
+                chk=checker,
+                override_info=view,
+            )
+        finally:
+            self._projecting_access = False
 
     def _derived_setting(
         self, ctx: AttributeContext, *, native: Callable[[AttributeContext], MypyType]
@@ -476,8 +545,10 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
             if symbol and symbol.plugin_generated and isinstance(symbol.node, Var):
                 del target.names[name]
         emitted = target.metadata.setdefault("compose_members", {})
+        overrides = target.metadata.setdefault("compose_overrides", {})
         for name, member in self.django_context.members.get(target.fullname, {}).items():
-            if target.get(name) is not None:
+            existing = target.get(name)
+            if existing is not None and existing.plugin_generated:
                 continue
             origin = self.lookup_fully_qualified(member.owner)
             receiver = self.lookup_fully_qualified(member.receiver)
@@ -495,6 +566,17 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
             projected = self._specialize_member(
                 name, declaration, target, origin.node, receiver.node, function_type
             )
+            if existing is not None:
+                original = _member_variable(existing.node)
+                if original is not None and original.type is not None:
+                    owner = target.get_containing_type_info(name)
+                    assert owner is not None
+                    target.names[name] = SymbolTableNode(
+                        MDEF,
+                        self._specialize_member(name, original, target, owner, target, function_type),
+                    )
+                    overrides[name] = True
+                continue
             target.names[name] = SymbolTableNode(MDEF, projected, plugin_generated=True)
             emitted[name] = member.owner
 
