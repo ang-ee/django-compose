@@ -167,7 +167,8 @@ The shared `DropGuardAutodetector` requires relevant rows or columns to be empty
 before automatic field/model removal, on every configured database eligible for
 that native migration operation. Django's model options, including
 `required_db_vendor` and `required_db_features`, and routers determine eligibility.
-An excluded database is not probed; an unavailable eligible database cannot prove
+Only eligible databases are checked for stored rows; native feature eligibility
+checks may themselves connect. An unavailable eligible database cannot prove
 emptiness. Integration-owned retirement exemptions remain explicit. Implement
 required data cutovers as reviewed migrations.
 
