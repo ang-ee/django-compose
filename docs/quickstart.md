@@ -9,9 +9,12 @@ the repository checkout, base dependencies and SQLite.
 
 ## Run the example
 
-From the checkout root:
+Clone the repository, install the example's two app packages, then build and
+migrate the project:
 
 ```sh
+git clone https://github.com/ang-ee/django-compose.git
+cd django-compose
 uv sync --frozen --no-dev
 uv pip install --no-deps ./examples/shop/catalog ./examples/shop/reviews
 cd examples/shop
@@ -22,6 +25,8 @@ uv run --project ../.. --no-sync python manage.py compose --check
 uv run --project ../.. --no-sync python verify.py
 uv run --project ../.. --no-sync python manage.py shell
 ```
+
+If you already have a checkout, start at `uv sync` in its root directory.
 
 `compose` writes the concrete models. Django's `makemigrations` and `migrate`
 author and apply their schema; `compose --check` verifies the generated output
@@ -91,5 +96,5 @@ migration history when rebuilding generated files.
 
 - [Configure your project](configuration.md) for complete settings, launcher and model files.
 - [Model declarations](models.md) explains extensions, multi-table inheritance and constraints.
-- [API guide](README.md) maps commands, Python entry points and app hooks.
+- [Public API](api.md) maps commands, Python entry points and app hooks.
 - [Example details](../examples/shop/README.md) cover its settings, artifacts, URLs and ASGI hooks.

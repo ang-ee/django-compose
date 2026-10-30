@@ -1,7 +1,7 @@
 # Contributor proposals
 
 Proposals are for changes to a public invariant or extension contract. Users
-looking for the current API should start with the [documentation index](../README.md)
+looking for the current API should start with the [public API overview](../api.md)
 and [specification](../SPEC.md).
 
 Use a short numbered document that identifies the existing owner, the missing

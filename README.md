@@ -2,32 +2,18 @@
 
 Compose reusable Django apps into a runnable project.
 
-django-compose resolves the apps selected by your project's `INSTALLED_APPS`,
-combines their model declarations and settings contributions, and generates
-ordinary Django models and app configurations before startup.
+django-compose generates a project's concrete Django models and app
+configurations from the reusable apps you enable. An app can add fields and
+methods to another app's model, contribute settings, and supply optional build
+or startup hooks.
 
-Use it when several projects share reusable apps but need different combinations
-of fields and behavior. You author the project settings and launcher; Django
-continues to own the app registry, ORM, managers, querysets and migrations.
+Use it when projects share apps but need different combinations of features.
+Your project selects its root apps in `INSTALLED_APPS`; django-compose includes
+their declared app dependencies. Installing a package alone does not enable it.
 
 ```text
-installed apps + project settings → compose → generated Django package
+installed app packages + project settings → compose → Django models and app configs
 ```
-
-## What it provides
-
-- **App selection:** expand explicit roots through declared app dependencies and
-  optional installed-package metadata.
-- **Model composition:** add fields and methods to another app's model, create
-  concrete models, or declare native multi-table inheritance.
-- **Project configuration:** combine app settings and optionally collect URL,
-  ASGI and database-preparation contributions.
-- **Build output:** generate model/configuration modules and declared artifacts;
-  verify that they match the selected inputs before serving.
-
-Packages remain installed at runtime because generated classes import their
-source declarations. `compose` writes files; Django's migration commands change
-the database.
 
 ## One model, two apps
 
@@ -55,22 +41,40 @@ class Rating(Composable, extends="catalog.Item"):
         abstract = True
 ```
 
-With both apps selected, the generated `catalog.Item` has `title` and `rating` in
-one table. `Rating` adds no table of its own. After composition, migrations and
-Django setup, use `apps.get_model("catalog", "Item")` to obtain the concrete model.
+With both apps enabled, the generated `catalog.Item` has `title` and `rating` in
+one table. `Rating` adds no table of its own. After Django setup, retrieve the
+concrete class with `apps.get_model("catalog", "Item")` and use its normal manager
+and queryset. The source declarations remain abstract.
+
 The [model guide](https://github.com/ang-ee/django-compose/blob/main/docs/models.md)
-explains all four declaration keywords and lazy relations.
+also covers `inherits` for Django multi-table inheritance and `demands` for
+required ancestors.
+
+## How a project uses it
+
+Author your Django settings and `manage.py`, call `configure(globals())` at the
+end of settings, and use the django-compose command launcher. In that configured
+project:
+
+```sh
+python manage.py compose         # Generate models, app configs and declared artifacts
+python manage.py makemigrations  # Author ordinary Django migration files
+python manage.py migrate         # Apply them to the database
+python manage.py runserver       # Run Django's development server
+```
+
+Django owns the app registry, ORM, managers, querysets and migration history.
+Generated classes import the source apps, so keep their packages installed.
+Rebuild generated code as apps change; preserve and review migration files.
 
 ## Get started
 
 This is a development preview. See [compatibility and platform requirements](https://github.com/ang-ee/django-compose/blob/main/docs/dependencies.md)
 and [installation](https://github.com/ang-ee/django-compose/blob/main/docs/packaging.md).
 
-1. [Run the quick start](https://github.com/ang-ee/django-compose/blob/main/docs/quickstart.md)
-   to compose the checked-in SQLite project and query the result.
-2. [Configure your project](https://github.com/ang-ee/django-compose/blob/main/docs/configuration.md)
-   with `configure(globals())` and the command launcher.
-3. [Browse the APIs](https://github.com/ang-ee/django-compose/blob/main/docs/README.md)
-   for commands, Python entry points and app extension hooks.
+- [Quick start](https://github.com/ang-ee/django-compose/blob/main/docs/quickstart.md): run the SQLite example and query the composed model.
+- [Project setup](https://github.com/ang-ee/django-compose/blob/main/docs/configuration.md): complete settings, launcher and model files.
+- [Public API](https://github.com/ang-ee/django-compose/blob/main/docs/api.md): commands, Python entry points and app hooks.
+- [Documentation](https://github.com/ang-ee/django-compose/blob/main/docs/README.md): guides for apps, settings, migrations and deployment.
 
 Licensed under [LGPL-3.0-or-later](https://github.com/ang-ee/django-compose/blob/main/LICENSE).

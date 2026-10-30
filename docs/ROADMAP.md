@@ -1,6 +1,6 @@
 # Current scope and open work
 
-The [API guide](README.md) describes what is available; the
+The [public API](api.md) describes what is available; the
 [reference](SPEC.md) defines its contracts. Release changes belong in the
 [changelog](../CHANGELOG.md).
 

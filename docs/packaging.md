@@ -1,19 +1,20 @@
 # Installation and deployment
 
-The current version is the development preview `0.1.0.dev7`, including component
-selection, isolated inspection and native provisioning.
-Python 3.14 is the verified environment. The declared constraints are Python
-`>=3.14` and Django `>=6.1.2,<6.2`; see [dependencies](dependencies.md) and
-[supported platforms](dependencies.md#supported-platforms).
+django-compose is a development preview. Use the [compatibility guide](dependencies.md)
+for supported Python, Django and platform requirements.
 
 ## Install from PyPI
 
 ```sh
-python -m pip install django-compose==0.1.0.dev7
+python -m pip install --pre django-compose
 ```
 
-Use `django-compose[typing]==0.1.0.dev7` for the optional composition plugin and
-its published typing dependencies; see [advanced typing](dependencies.md#advanced-typing).
+`--pre` allows development releases. Pin the version you adopt in your project's
+dependency file or lockfile. Features marked **Unreleased** in the
+[changelog](../CHANGELOG.md) require a local checkout.
+
+The optional [typing extra](dependencies.md#advanced-typing) adds composed-model
+analysis and its published typing dependencies.
 
 ## Install locally
 
@@ -36,9 +37,10 @@ environment:
 # In the django-compose checkout, with uv installed:
 uv build --wheel
 # In the project environment, using the actual archive path:
-python -m pip install /path/to/django-compose/dist/django_compose-0.1.0.dev7-py3-none-any.whl
+python -m pip install "/path/to/django-compose/dist/django_compose-<version>-py3-none-any.whl"
 ```
 
+Replace `<version>` with the version in the built archive's filename.
 The base installation includes Django, packaging and django-yamlconf. Optional extras are described in
 [dependencies](dependencies.md); the advanced typing extra is unnecessary for
 the [quick start](quickstart.md). Continue with the

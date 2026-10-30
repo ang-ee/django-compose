@@ -1,7 +1,7 @@
-# Detailed API reference
+# Contract details
 
 This is the current contract for django-compose. For a compact map of commands,
-Python entry points and app hooks, start with the [API guide](README.md).
+Python entry points and app hooks, start with the [API overview](api.md).
 For runnable examples, use the [quick start](quickstart.md) and
 [project configuration](configuration.md). [Compatibility](dependencies.md)
 defines supported versions and platforms.
