@@ -119,6 +119,12 @@ def installed_components(
     )
     host = directory / "installed-host"
     host.mkdir()
+    accounts = host / "accounts"
+    accounts.mkdir()
+    (accounts / "__init__.py").write_text("")
+    (accounts / "models.py").write_text(
+        "from django.contrib.auth.models import AbstractUser\nclass User(AbstractUser):\n    pass\n"
+    )
     settings = """from pathlib import Path
 from django_compose.conf import configure
 BASE_DIR = Path(__file__).parent
@@ -127,20 +133,23 @@ DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DI
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 COMPOSE_OUTPUT_DIR = BASE_DIR / "runtime"
 COMPOSE_OUTPUT_MODULE = "runtime"
-INSTALLED_APPS = ["catalog", "reviews"]
+INSTALLED_APPS = [
+    "django.contrib.contenttypes", "django.contrib.auth", "accounts", "installed_reviews",
+]
+AUTH_USER_MODEL = "accounts.User"
+COMPOSE_COMPONENT_GROUP = "compose.smoke"
 configure(globals())
 """
-    settings = settings.replace(
-        'INSTALLED_APPS = ["catalog", "reviews"]',
-        'INSTALLED_APPS = ["installed_reviews"]\nCOMPOSE_COMPONENT_GROUP = "compose.smoke"',
-    )
     (host / "settings.py").write_text(settings)
     env = {**environment, "DJANGO_SETTINGS_MODULE": "settings"}
     compiler = [str(python), "-m", "django_compose"]
     run([*compiler, "compose"], cwd=host, env=env)
-    run([*compiler, "makemigrations", "installed_catalog", "--noinput"], cwd=host, env=env)
-    run([*compiler, "provision", "--wait-db", "0"], cwd=host, env=env)
-    run([*compiler, "provision", "--check", "--wait-db", "0"], cwd=host, env=env)
+    run([*compiler, "makemigrations", "accounts", "installed_catalog", "--noinput"], cwd=host, env=env)
+    for _ in range(2):
+        run([*compiler, "provision", "--wait-db", "0"], cwd=host, env=env)
+        run([*compiler, "provision", "--check", "--wait-db", "0"], cwd=host, env=env)
+    result = run([*compiler, "migrate", "--noinput"], cwd=host, env=env)
+    assert "No migrations to apply" in result, result
     run([*compiler, "compose", "--check"], cwd=host, env=env)
     run(
         [
@@ -153,7 +162,11 @@ django.setup()
 from django.apps import apps
 from django.db.migrations.state import ProjectState
 from django.conf import settings
-assert settings.COMPOSE_ROOTS == ("installed_reviews",)
+from django.contrib.auth import get_user_model
+from django.db import connection
+assert settings.COMPOSE_ROOTS == (
+    "django.contrib.contenttypes", "django.contrib.auth", "accounts", "installed_reviews",
+)
 assert settings.COMPOSE_CLOSURE.components == {
     "compose-smoke-catalog": "installed_catalog", "compose-smoke-reviews": "installed_reviews",
 }
@@ -161,6 +174,7 @@ from django_compose.provision import require_provisioned
 require_provisioned()
 assert settings.SMOKE_CONTRIBUTORS == ["installed_catalog", "installed_reviews"]
 assert tuple(entry.name for entry in settings.COMPOSE_SNAPSHOT.entries) == (
+    "django.contrib.contenttypes", "django.contrib.auth", "accounts",
     "installed_catalog", "installed_reviews",
 )
 Item = apps.get_model("installed_catalog", "Item")
@@ -176,6 +190,16 @@ row = Child.objects.create(title="installed component", detail="child", rating=5
 assert Item.objects.get(pk=row.pk).rating == 5
 assert Child.objects.get(pk=row.pk).reviewed is True
 state = ProjectState.from_apps(apps)
+swapped = state.apps.get_model("auth", "User")
+assert swapped._meta.swapped == "accounts.User"
+assert all(field.remote_field.through is None for field in swapped._meta.local_many_to_many)
+User = get_user_model()
+assert User._meta.label == "accounts.User"
+assert "auth_user" not in connection.introspection.table_names()
+user = User.objects.create_user(username="installed-user")
+group = apps.get_model("auth", "Group").objects.create(name="installed-group")
+user.groups.add(group)
+assert user.groups.get() == group
 assert "installed_catalog.item" in state.models["installed_catalog", "child"].bases
 assert set(state.apps.get_model("installed_catalog", "Grandchild")._meta.parents) == {
     state.apps.get_model("installed_catalog", "Child"),
@@ -387,7 +411,7 @@ assert Item.objects.get(pk=item.pk).rating == 5
     print(
         "Wheel/sdist contents and fresh installed-host build, serve, ORM, "
         "migration, provisioning, drift, cleanup, installed component closure, "
-        "MTI and import audit checks passed."
+        "custom-user provisioning, MTI and import audit checks passed."
     )
 
 
