@@ -16,8 +16,8 @@ from django.core.exceptions import ImproperlyConfigured
 from django.utils.module_loading import module_has_submodule
 
 from django_compose import serving
-from django_compose.addons import Closure, enabled_apps
 from django_compose.autoreload import report_inputs, report_watch_paths
+from django_compose.components import Closure, enabled_apps
 from django_compose.snapshot import Entry, mode, snapshot, structural_settings
 
 _DERIVED = frozenset({"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_CLOSURE"})
@@ -276,7 +276,7 @@ class _Contributions:
 def apply_app_settings(namespace: MutableMapping[str, Any], closure: Closure) -> None:
     """Apply a resolved app selection's native settings contributions once.
 
-    Pass authored settings and a Closure selected by addons.enabled_apps.
+    Pass authored settings and a Closure selected by components.enabled_apps.
     The same closure is exposed as COMPOSE_CLOSURE before callbacks; its app
     order, selected native configs, yamlconf merging, authored precedence and
     environment rules are retained. This phase requires no composition output
@@ -303,6 +303,10 @@ def configure(namespace: MutableMapping[str, Any]) -> None:
     results can refine their app's defaults but cannot replace authored values.
     Structural compiler inputs may never originate in the environment.
     """
+    if "COMPOSE_ADDON_GROUP" in namespace:
+        raise ImproperlyConfigured(
+            "COMPOSE_ADDON_GROUP was renamed to COMPOSE_COMPONENT_GROUP; migrate the authored setting"
+        )
     selected_mode = mode()
     for name in _DERIVED:
         if name in namespace:
@@ -312,7 +316,7 @@ def configure(namespace: MutableMapping[str, Any]) -> None:
     report_inputs(files=(Path(namespace["COMPOSE_OUTPUT_DIR"]) / "__init__.py",))
     report_watch_paths(namespace.get("COMPOSE_WATCH_PATHS", ()))
     roots = tuple(namespace.get("INSTALLED_APPS", ()))
-    closure = enabled_apps(roots, group=namespace.get("COMPOSE_ADDON_GROUP"))
+    closure = enabled_apps(roots, group=namespace.get("COMPOSE_COMPONENT_GROUP"))
     apply_app_settings(namespace, closure)
     report_watch_paths(namespace.get("COMPOSE_WATCH_PATHS", ()))
     namespace["COMPOSE_ROOTS"] = roots

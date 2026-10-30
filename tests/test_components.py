@@ -15,10 +15,10 @@ from django.core.exceptions import ImproperlyConfigured
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-from django_compose import addons
-from django_compose.addons import active_requirements, enabled_apps, inspect_apps, installed_addons
+from django_compose import components
+from django_compose.components import active_requirements, enabled_apps, inspect_apps, installed_components
 
-GROUP = "testsite.addons"
+GROUP = "testsite.components"
 
 
 @pytest.fixture
@@ -85,7 +85,7 @@ def test_closure_uses_provider_metadata_across_package_names_and_is_frozen(insta
     assert closure.entries == (dependency, native, root)
     assert closure.roots == (root,)
     assert closure.required == {dependency, native}
-    assert closure.addons == {root, dependency}
+    assert closure.components == {"root-provider": root, "unrelated-publisher": dependency}
     assert closure.dependencies == {root: (dependency, native), dependency: (), native: ()}
     assert not any(name.endswith(".models") for name in sys.modules if name.startswith("selection_"))
     with pytest.raises(FrozenInstanceError):
@@ -112,7 +112,7 @@ def test_roots_are_preselected_and_explicit_config_overrides_dependency_defaults
     assert closure.entries == (selected_only, explicit, root)
     assert closure.roots == (root, target)
     assert closure.required == {selected_only}
-    assert closure.addons == {root, target}
+    assert closure.components == {"root-dist": root, "target-dist": target}
     assert closure.dependencies == {root: (target,), target: (selected_only,), selected_only: ()}
 
 
@@ -125,7 +125,7 @@ def test_root_explicit_config_overrides_requires_apps_config_choice(installed):
     assert enabled_apps((root, explicit), group=GROUP).entries == (explicit, root)
 
 
-def test_markers_use_extra_empty_and_do_not_activate_installed_optional_addons(installed):
+def test_markers_use_extra_empty_and_do_not_activate_installed_optional_components(installed):
     root = installed.app("selection_root")
     installed.distribution(
         "root-dist",
@@ -148,16 +148,16 @@ def test_markers_use_extra_empty_and_do_not_activate_installed_optional_addons(i
 def test_plain_root_has_no_package_based_expansion_but_honors_native_edges(installed):
     plain = installed.app("selection_plain", requires=("selection_native",))
     native = installed.app("selection_native")
-    addon = installed.app("selection_addon")
-    installed.distribution("plain-dist", requires=("addon-dist", "absent-library"))
-    installed.distribution("addon-dist", app=addon)
+    component = installed.app("selection_component")
+    installed.distribution("plain-dist", requires=("component-dist", "absent-library"))
+    installed.distribution("component-dist", app=component)
     assert enabled_apps((plain,), group=GROUP).entries == (native, plain)
 
 
 def test_other_groups_do_not_activate_and_invalid_explicit_group_fails(installed):
     root = installed.app("selection_root")
-    installed.distribution("other-dist", app=root, requires=("missing",), group="another.addons")
-    assert enabled_apps((root,), group=GROUP).addons == frozenset()
+    installed.distribution("other-dist", app=root, requires=("missing",), group="another.components")
+    assert enabled_apps((root,), group=GROUP).components == {}
     assert enabled_apps((root,)).entries == (root,)
     with pytest.raises(ImproperlyConfigured, match="group"):
         enabled_apps((root,), group="")
@@ -183,7 +183,7 @@ def test_selected_entry_point_identity_must_match_native_config(installed, as_de
         enabled_apps((root,), group=GROUP)
 
 
-def test_unselected_addon_is_never_imported(installed):
+def test_unselected_component_is_never_imported(installed):
     root = installed.app("selection_root")
     installed.distribution("disabled-dist", app="does_not_exist", entry="does_not_exist.apps.Config")
     assert enabled_apps((root,), group=GROUP).entries == (root,)
@@ -263,10 +263,10 @@ def test_closure_runs_without_configuring_settings_in_fresh_process():
     script = (
         "import sys\n"
         "from django.conf import settings\n"
-        "from django_compose.addons import active_requirements, enabled_apps, installed_addons\n"
+        "from django_compose.components import active_requirements, enabled_apps, installed_components\n"
         "assert not settings.configured\n"
         "assert 'django.db.models' not in sys.modules\n"
-        "result = enabled_apps(('django.contrib.contenttypes',), group='independent.addons')\n"
+        "result = enabled_apps(('django.contrib.contenttypes',), group='independent.components')\n"
         "assert result.entries == ('django.contrib.contenttypes',)\n"
         "assert not settings.configured\n"
         "assert not {'django_compose.build', 'django_compose.models', "
@@ -284,7 +284,7 @@ def test_transitive_metadata_uses_entry_point_configs_without_enabling_requested
     middle = installed.app(
         "selection_middle",
         configs=(
-            "class AddonConfig(DefaultConfig):\n"
+            "class ComponentConfig(DefaultConfig):\n"
             "    default = False\n"
             "    requires_apps = ('selection_native',)\n"
         ),
@@ -296,16 +296,17 @@ def test_transitive_metadata_uses_entry_point_configs_without_enabling_requested
     installed.distribution(
         "middle-dist",
         app=middle,
-        entry=middle + ".apps.AddonConfig",
+        entry=middle + ".apps.ComponentConfig",
         requires=("leaf-dist", 'optional-dist; extra == "optional"'),
     )
     installed.distribution("leaf-dist", app=leaf)
     installed.distribution("optional-dist", app=optional)
     closure = enabled_apps((root,), group=GROUP)
-    assert closure.entries == (leaf, native, middle + ".apps.AddonConfig", root)
+    assert closure.entries == (leaf, native, middle + ".apps.ComponentConfig", root)
     assert closure.required == {leaf, native, middle}
-    assert closure.addons == {leaf, middle, root}
-    assert isinstance(closure.addons, frozenset)
+    assert closure.components == {"leaf-dist": leaf, "middle-dist": middle, "root-dist": root}
+    with pytest.raises(TypeError):
+        closure.components["other"] = root
     assert isinstance(closure.required, frozenset)
 
 
@@ -331,7 +332,7 @@ def test_unset_group_resolves_native_graph_without_distribution_access(installed
     result = enabled_apps((root, explicit))
     assert result.entries == (explicit, "selection_z", root)
     assert result.required == {"selection_z"}
-    assert result.addons == frozenset()
+    assert result.components == {}
     assert result.dependencies == {root: (target, "selection_z"), target: (), "selection_z": ()}
 
 
@@ -346,7 +347,7 @@ def test_installed_index_retains_native_metadata_without_importing_or_loading(in
 
     monkeypatch.setattr(AppConfig, "create", forbidden)
     monkeypatch.setattr(metadata.EntryPoint, "load", forbidden)
-    index = installed_addons(GROUP)
+    index = installed_components(GROUP)
     assert index.distributions == {"mixed-provider": distribution, "ordinary-library": ordinary}
     assert index.providers == {"unimportable.app": "mixed-provider"}
     point = index.entry_points["mixed-provider"]
@@ -372,7 +373,7 @@ def test_active_requirements_are_native_platform_filtered_and_extra_empty(instal
             'disjunction; extra == "feature" or python_version >= "3"',
         ),
     )
-    requirements = installed_addons(GROUP).active_requirements("root-dist")
+    requirements = installed_components(GROUP).active_requirements("root-dist")
     assert all(isinstance(requirement, Requirement) for requirement in requirements)
     assert tuple(requirement.name for requirement in requirements) == (
         "disjunction",
@@ -393,20 +394,20 @@ def test_installed_index_rejects_metadata_collisions_without_activation(installe
     if kind == "provider":
         installed.distribution("second-provider", app="unimportable.app")
     with pytest.raises(ImproperlyConfigured, match="Competing providers|one entry point"):
-        installed_addons(GROUP)
+        installed_components(GROUP)
 
 
 @pytest.mark.parametrize("group", ("", None, 12, False))
 def test_installed_index_requires_explicit_group(group):
     with pytest.raises(ImproperlyConfigured, match="group"):
-        installed_addons(group)
+        installed_components(group)
 
 
 def test_installed_index_defers_native_app_identity_validation(installed):
     root = installed.app("selection_root")
     wrong = installed.app("selection_wrong")
     installed.distribution("root-dist", app=root, entry=wrong)
-    assert installed_addons(GROUP).entry_points["root-dist"].value == wrong
+    assert installed_components(GROUP).entry_points["root-dist"].value == wrong
     assert wrong not in sys.modules
     with pytest.raises(ImproperlyConfigured, match="Entry point .* selects app"):
         enabled_apps((root,), group=GROUP)
@@ -531,7 +532,7 @@ def test_native_distribution_precedence_with_actual_dist_and_egg_info(tmp_path, 
         return native_distribution(name)
 
     monkeypatch.setattr(metadata, "distribution", distribution)
-    index = installed_addons(GROUP)
+    index = installed_components(GROUP)
     assert calls.count("compose-native-shadow") == 1
     assert calls.count("compose-unrelated-shadow") == 1
     assert index.distributions["compose-native-shadow"].requires == winner.requires
@@ -572,7 +573,7 @@ def test_isolated_selection_projects_existing_closure_and_keeps_native_configs_i
         "app_entries": [asdict(entry) for entry in expected.app_entries],
         "roots": list(expected.roots),
         "required": sorted(expected.required),
-        "addons": sorted(expected.addons),
+        "components": dict(expected.components),
         "dependencies": {name: list(edges) for name, edges in expected.dependencies.items()},
     }
     assert json.loads(json.dumps(result)) == result
@@ -590,7 +591,7 @@ def test_isolated_selection_reports_malformed_response_as_configuration_failure(
     def run(arguments, **kwargs):
         return subprocess.CompletedProcess(arguments, 0, stdout=response, stderr="")
 
-    monkeypatch.setattr(addons.subprocess, "run", run)
+    monkeypatch.setattr(components.subprocess, "run", run)
     with pytest.raises(ImproperlyConfigured, match="invalid JSON response"):
         inspect_apps(())
 
@@ -625,7 +626,7 @@ settings.configure(INSTALLED_APPS=[], SECRET_KEY='test')
 django.setup()
 os.environ['DJANGO_SETTINGS_MODULE'] = 'must_not_load_settings'
 os.environ['DJANGO_COMPOSE_MODE'] = 'write'
-from django_compose.addons import inspect_apps
+from django_compose.components import inspect_apps
 result = inspect_apps(['dormant_inspection'])
 assert result['roots'] == ['dormant_inspection']
 assert result['app_entries'][0]['config'] == 'dormant_inspection.apps.Config'
@@ -656,3 +657,61 @@ def test_isolated_selection_retains_owner_diagnostics(installed, failure):
     with pytest.raises(ImproperlyConfigured, match="cycle|missing installed distribution|group"):
         inspect_apps((root,), group=group)
     assert root not in sys.modules
+
+
+def test_resource_only_component_uses_native_default_config(installed):
+    app = installed.app("resource_component")
+    package = Path(importlib.util.find_spec(app).origin).parent
+    (package / "models.py").unlink()
+    (package / "resources").mkdir()
+    (package / "resources" / "schema.json").write_text("{}")
+    installed.distribution("Resource.Provider", app=app)
+
+    closure = enabled_apps((app,), group=GROUP)
+
+    assert closure.components == {"resource-provider": app}
+    assert type(closure.app_configs[0]) is AppConfig
+    assert closure.app_entries[0].config == "django.apps.config.AppConfig"
+    assert not (package / "apps.py").exists()
+    assert inspect_apps((app,), group=GROUP)["components"] == {"resource-provider": app}
+
+
+@pytest.mark.parametrize("timeout", (0, -1, float("inf"), float("nan"), False, "1"))
+def test_inspection_rejects_invalid_timeout_before_launch(monkeypatch, timeout):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("invalid timeout must fail before launch")
+
+    monkeypatch.setattr(components.subprocess, "run", forbidden)
+    with pytest.raises(ImproperlyConfigured, match="positive finite"):
+        inspect_apps((), timeout=timeout)
+
+
+@pytest.mark.parametrize(
+    "error, diagnostic",
+    (
+        (OSError("interpreter unavailable"), "Could not launch.*interpreter unavailable"),
+        (subprocess.TimeoutExpired("python", 0.5), "timed out after 0.5 seconds"),
+    ),
+)
+def test_inspection_wraps_interpreter_failures(monkeypatch, error, diagnostic):
+    def run(arguments, **kwargs):
+        assert kwargs["timeout"] == 0.5
+        raise error
+
+    monkeypatch.setattr(components.subprocess, "run", run)
+    with pytest.raises(ImproperlyConfigured, match=diagnostic):
+        inspect_apps((), timeout=0.5)
+
+
+def test_cli_passes_inspection_timeout_to_owner(monkeypatch, capsys):
+    from django_compose.cli import main
+
+    def inspect(roots, *, group, timeout):
+        assert roots == ["native.app"]
+        assert group == "test.components"
+        assert timeout == 2.5
+        return {"components": {"provider": "native.app"}}
+
+    monkeypatch.setattr(components, "inspect_apps", inspect)
+    assert main(["inspect-apps", "--timeout", "2.5", "--group", "test.components", "native.app"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"components": {"provider": "native.app"}}

@@ -1,8 +1,9 @@
-"""Resolve installed addon metadata into an ordered selection of native Django apps."""
+"""Resolve installed component metadata into an ordered selection of native Django apps."""
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -28,7 +29,7 @@ class Closure:
     App_entries captures native config identities in dependency order; entries
     projects their compatible INSTALLED_APPS strings. Roots preserve the
     project's authored order; required contains only dependency-selected apps.
-    Addons contains only selected members of the requested entry-point group.
+    Components maps canonical distribution names to selected native app names.
     Dependencies maps selected native app names to their direct dependencies,
     also native app names, independent of the selected config entry strings.
     App_configs retains the same selected native instances for app-owned behavior;
@@ -38,7 +39,7 @@ class Closure:
     app_entries: tuple[Entry, ...]
     roots: tuple[str, ...]
     required: frozenset[str]
-    addons: frozenset[str]
+    components: Mapping[str, str]
     dependencies: Mapping[str, tuple[str, ...]]
     app_configs: tuple[AppConfig, ...] = field(compare=False, repr=False)
 
@@ -54,11 +55,11 @@ class AppSelection(TypedDict):
     app_entries: list[dict[str, str]]
     roots: list[str]
     required: list[str]
-    addons: list[str]
+    components: dict[str, str]
     dependencies: dict[str, list[str]]
 
 
-def inspect_apps(roots: Iterable[str], *, group: str | None = None) -> AppSelection:
+def inspect_apps(roots: Iterable[str], *, group: str | None = None, timeout: float = 30.0) -> AppSelection:
     """Resolve apps in a fresh interpreter without activating them in this process.
 
     The child uses enabled_apps and ordinary pre-setup AppConfig imports. It
@@ -68,9 +69,18 @@ def inspect_apps(roots: Iterable[str], *, group: str | None = None) -> AppSelect
     modules must remain safe to import before Django setup.
 
     Identity dictionaries retain Entry's name, label, config, path and entry
-    fields in dependency order. Roots retain authored order; required and addons
-    are sorted native app names. Selection failures raise ImproperlyConfigured.
+    fields in dependency order. Roots retain authored order; required contains
+    sorted native app names; components maps canonical distribution names to apps.
+    Selection, interpreter launch and timeout failures raise ImproperlyConfigured.
+    Timeout is a positive finite number of seconds (default 30).
     """
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise ImproperlyConfigured("App inspection timeout must be a positive finite number of seconds")
     request = {"roots": list(roots), "group": group, "pythonpath": sys.path}
     environment = {
         key: value
@@ -87,7 +97,7 @@ try:
     request = json.load(sys.stdin)
     sys.path[:] = request.pop('pythonpath')
     with redirect_stdout(sys.stderr):
-        from django_compose.addons import _inspect_apps
+        from django_compose.components import _inspect_apps
         result = _inspect_apps(**request)
 except Exception as error:
     print(str(error), file=sys.stderr)
@@ -95,14 +105,20 @@ except Exception as error:
 with response:
     print(json.dumps(result, sort_keys=True), file=response)
 """
-    result = subprocess.run(
-        [sys.executable, "-B", "-c", child],
-        input=json.dumps(request),
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", child],
+            input=json.dumps(request),
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ImproperlyConfigured(f"App inspection timed out after {timeout} seconds") from error
+    except OSError as error:
+        raise ImproperlyConfigured(f"Could not launch app inspection interpreter: {error}") from error
     if result.returncode:
         raise ImproperlyConfigured(result.stderr.strip() or "App selection subprocess failed")
     if result.stderr:
@@ -119,13 +135,13 @@ def _inspect_apps(roots: Iterable[str], *, group: str | None = None) -> AppSelec
         "app_entries": [asdict(entry) for entry in closure.app_entries],
         "roots": list(closure.roots),
         "required": sorted(closure.required),
-        "addons": sorted(closure.addons),
+        "components": dict(closure.components),
         "dependencies": {name: list(dependencies) for name, dependencies in closure.dependencies.items()},
     }
 
 
 @dataclass(frozen=True)
-class InstalledAddons:
+class InstalledComponents:
     """Read-only native metadata, indexed without importing apps or loading points.
 
     Distributions and entry_points use canonical distribution names as keys.
@@ -162,7 +178,7 @@ def active_requirements(requirements: Iterable[str]) -> tuple[Requirement, ...]:
     )
 
 
-def installed_addons(group: str) -> InstalledAddons:
+def installed_components(group: str) -> InstalledComponents:
     """Index group declarations and declared app-key collisions without imports.
 
     Each participating distribution must declare exactly one group entry point.
@@ -170,7 +186,7 @@ def installed_addons(group: str) -> InstalledAddons:
     Native metadata.distribution selects the winner for same-name installations.
     """
     if not isinstance(group, str) or not group:
-        raise ImproperlyConfigured("An explicit non-empty addon entry-point group is required")
+        raise ImproperlyConfigured("An explicit non-empty component entry-point group is required")
     distributions: dict[str, metadata.Distribution] = {}
     points: dict[str, metadata.EntryPoint] = {}
     app_providers: dict[str, str] = {}
@@ -190,7 +206,7 @@ def installed_addons(group: str) -> InstalledAddons:
             )
         app_providers[point.name] = name
         points[name] = point
-    return InstalledAddons(
+    return InstalledComponents(
         MappingProxyType(distributions), MappingProxyType(points), MappingProxyType(app_providers)
     )
 
@@ -201,14 +217,14 @@ def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
     Settings are never read. Without a group, only native requires_apps edges
     apply and distribution metadata is not inspected. Its entry-point keys are
     native app names and values are native INSTALLED_APPS strings, never loaded
-    entry-point objects. An addon's active Requires-Dist edges (extra='') activate
+    entry-point objects. A component's active Requires-Dist edges (extra='') activate
     only distributions in this group. Ordinary roots have no metadata expansion.
-    Installation alone never activates an addon or an optional extra.
+    Installation alone never activates a component or an optional extra.
 
     Root configs are preselected and override dependency/default config choices.
     Conflicting dependency configs, duplicate native labels and cycles fail.
     """
-    installed = installed_addons(group) if group is not None else None
+    installed = installed_components(group) if group is not None else None
     root_entries = tuple(roots)
     if any(not isinstance(entry, str) for entry in root_entries):
         raise ImproperlyConfigured("Root INSTALLED_APPS entries must be native app strings")
@@ -220,7 +236,7 @@ def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
     by_app = installed.providers if installed is not None else {}
     graph: dict[str, tuple[str, ...]] = {}
 
-    def addon_entry(provider: str) -> str:
+    def component_entry(provider: str) -> str:
         assert installed is not None
         point = installed.entry_points[provider]
         config = AppConfig.create(point.value)
@@ -252,16 +268,16 @@ def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
         dependencies = list(required_apps)
         provider = by_app.get(name)
         if provider is not None:
-            addon_entry(provider)
+            component_entry(provider)
             assert installed is not None
             for parsed in installed.active_requirements(provider):
                 dependency = canonicalize_name(parsed.name)
                 if dependency not in installed.distributions:
                     raise ImproperlyConfigured(
-                        f"Addon {name!r} requires missing installed distribution {parsed.name!r}"
+                        f"Component {name!r} requires missing installed distribution {parsed.name!r}"
                     )
                 if dependency in installed.entry_points:
-                    dependencies.append(addon_entry(dependency))
+                    dependencies.append(component_entry(dependency))
         if any(not isinstance(entry, str) for entry in dependencies):
             raise ImproperlyConfigured(f"{name}.requires_apps entries must be native app strings")
         graph[name] = tuple(sorted({choose(entry) for entry in sorted(dependencies)}))
@@ -280,7 +296,9 @@ def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
         entries,
         root_names,
         frozenset(ordered) - root_set,
-        frozenset(ordered).intersection(by_app),
+        MappingProxyType(
+            {by_app[name]: name for name in sorted(set(ordered).intersection(by_app), key=by_app.__getitem__)}
+        ),
         MappingProxyType(graph),
         app_configs=configs,
     )

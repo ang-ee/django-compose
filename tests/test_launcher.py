@@ -112,13 +112,13 @@ def test_app_inspection_cli_empty_selection_and_owner_errors(tmp_path: Path) -> 
         "app_entries": [],
         "roots": [],
         "required": [],
-        "addons": [],
+        "components": {},
         "dependencies": {},
     }
     result = invoke(tmp_path, "inspect-apps", "--group", "")
     assert result.returncode == 1
     assert result.stdout == ""
-    assert "non-empty addon entry-point group" in result.stderr
+    assert "non-empty component entry-point group" in result.stderr
 
 
 def test_app_inspection_cli_does_not_import_native_management(tmp_path: Path) -> None:

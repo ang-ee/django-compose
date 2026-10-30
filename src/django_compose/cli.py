@@ -12,14 +12,15 @@ from django.core.exceptions import ImproperlyConfigured
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
     if arguments and arguments[0] == "inspect-apps":
-        from django_compose.addons import inspect_apps
+        from django_compose.components import inspect_apps
 
         parser = argparse.ArgumentParser(prog="django-compose inspect-apps")
-        parser.add_argument("--group", help="Installed addon entry-point group")
+        parser.add_argument("--group", help="Installed component entry-point group")
+        parser.add_argument("--timeout", type=float, default=30.0, metavar="SECONDS")
         parser.add_argument("roots", nargs="*", help="Native app or AppConfig entries")
         options = parser.parse_args(arguments[1:])
         try:
-            result = inspect_apps(options.roots, group=options.group)
+            result = inspect_apps(options.roots, group=options.group, timeout=options.timeout)
         except ImproperlyConfigured as error:
             print(str(error), file=sys.stderr)
             return 1

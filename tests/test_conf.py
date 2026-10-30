@@ -844,3 +844,12 @@ def settings(namespace):
         assert type(config).__name__ == expected
         assert ns["SELECTED_OWNER"] == expected + "1"
     assert len(created) == 2
+
+
+@pytest.mark.parametrize("legacy", (None, "legacy.components"))
+def test_authored_legacy_group_fails_before_app_selection(project, legacy):
+    _, namespace = project
+    namespace["COMPOSE_ADDON_GROUP"] = legacy
+    namespace["INSTALLED_APPS"] = ["must_not_import"]
+    with pytest.raises(ImproperlyConfigured, match="COMPOSE_ADDON_GROUP.*COMPOSE_COMPONENT_GROUP"):
+        conf.configure(namespace)
