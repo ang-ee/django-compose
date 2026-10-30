@@ -49,7 +49,7 @@ from mypy_django_plugin.transformers.managers import create_new_manager_class_fr
 from mypy_django_plugin.transformers.manytomany import M2MArguments, M2MThrough, M2MTo
 from mypy_django_plugin.transformers.models import ProcessManyToManyFields, process_model_class
 
-from django_compose.addons import Closure
+from django_compose.components import Closure
 from django_compose.snapshot import Snapshot
 
 if TYPE_CHECKING:

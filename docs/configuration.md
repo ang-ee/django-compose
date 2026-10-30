@@ -92,7 +92,7 @@ configure(globals())
 
 `configure` returns `None` and mutates this namespace. `INSTALLED_APPS` contains
 native app strings or explicit AppConfig paths. Optional
-[addon selection](addons.md) uses `COMPOSE_ADDON_GROUP`; without it, native
+[component selection](components.md) uses `COMPOSE_COMPONENT_GROUP`; without it, native
 `requires_apps` dependencies still apply. Installation alone enables no apps.
 
 The function owns derived `COMPOSE_ROOTS`, `COMPOSE_SNAPSHOT` and `COMPOSE_CLOSURE`; projects and
@@ -321,7 +321,7 @@ A Django project using ordinary authored concrete models can apply selected
 apps' settings contributions through `apply_app_settings`:
 
 ```python
-from django_compose.addons import enabled_apps
+from django_compose.components import enabled_apps
 from django_compose.conf import apply_app_settings
 
 INSTALLED_APPS = ["catalog.apps.CatalogConfig"]

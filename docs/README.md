@@ -14,10 +14,12 @@ Django continues to own model construction, queries and migrations.
 
 ## Build and run a project
 
-- [Installed addon selection](addons.md): activate installed reusable apps from
+- [Installed component selection](components.md): activate installed reusable apps from
   distribution metadata and native app dependencies.
 - [Migrations](migrations.md): author and retain native history, audit imports,
   and manage removed apps.
+- [Provisioning](provisioning.md): prepare a selected database and require durable
+  readiness for the verified composition.
 - [Packaging](packaging.md): include generated output and migration history in
   a deployable project while retaining its source-app dependencies.
 

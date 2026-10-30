@@ -15,7 +15,7 @@ class BlockImports:
             raise AssertionError(fullname)
 sys.meta_path.insert(0, BlockImports())
 from django_compose.conf import configure
-from django_compose.addons import enabled_apps
+from django_compose.components import enabled_apps
 from django.conf import settings
 assert not settings.configured
 assert enabled_apps(()).entries == ()
@@ -44,7 +44,7 @@ class BlockModels:
             raise AssertionError(fullname)
 sys.meta_path.insert(0, BlockModels())
 import importlib
-for name in ('snapshot', 'serving', 'history', 'addons', 'conf', 'autoreload', 'checks', 'apps'):
+for name in ('snapshot', 'serving', 'history', 'components', 'conf', 'autoreload', 'checks', 'apps'):
     importlib.import_module('django_compose.' + name)
 from django.apps import apps
 assert not apps.apps_ready

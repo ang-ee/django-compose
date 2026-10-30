@@ -35,7 +35,7 @@ def digest(root: Path) -> dict[str, str]:
     }
 
 
-def addon_wheel(directory: Path, package: str, *, dependency: str | None = None) -> Path:
+def component_wheel(directory: Path, package: str, *, dependency: str | None = None) -> Path:
     """Create a real installed-distribution fixture with native wheel metadata."""
     distribution = "compose-smoke-" + package.removeprefix("installed_")
     filename = distribution.replace("-", "_") + "-1.0.0"
@@ -101,12 +101,12 @@ class Detail(Required, extends="installed_catalog.Child"):
     return wheel
 
 
-def installed_addons(
+def installed_components(
     directory: Path, python: Path, uv: str, wheel: Path, environment: dict[str, str]
 ) -> None:
     """Exercise metadata closure, model declarations and imports from actual wheels."""
-    catalog = addon_wheel(directory, "installed_catalog")
-    reviews = addon_wheel(directory, "installed_reviews", dependency="compose-smoke-catalog")
+    catalog = component_wheel(directory, "installed_catalog")
+    reviews = component_wheel(directory, "installed_reviews", dependency="compose-smoke-catalog")
     run(
         [uv, "pip", "install", "--python", str(python), str(wheel), str(catalog), str(reviews)],
         cwd=directory,
@@ -127,14 +127,15 @@ configure(globals())
 """
     settings = settings.replace(
         'INSTALLED_APPS = ["catalog", "reviews"]',
-        'INSTALLED_APPS = ["installed_reviews"]\nCOMPOSE_ADDON_GROUP = "compose.smoke"',
+        'INSTALLED_APPS = ["installed_reviews"]\nCOMPOSE_COMPONENT_GROUP = "compose.smoke"',
     )
     (host / "settings.py").write_text(settings)
     env = {**environment, "DJANGO_SETTINGS_MODULE": "settings"}
     compiler = [str(python), "-m", "django_compose"]
     run([*compiler, "compose"], cwd=host, env=env)
     run([*compiler, "makemigrations", "installed_catalog", "--noinput"], cwd=host, env=env)
-    run([*compiler, "migrate", "--noinput"], cwd=host, env=env)
+    run([*compiler, "provision", "--wait-db", "0"], cwd=host, env=env)
+    run([*compiler, "provision", "--check", "--wait-db", "0"], cwd=host, env=env)
     run([*compiler, "compose", "--check"], cwd=host, env=env)
     run(
         [
@@ -148,6 +149,11 @@ from django.apps import apps
 from django.db.migrations.state import ProjectState
 from django.conf import settings
 assert settings.COMPOSE_ROOTS == ("installed_reviews",)
+assert settings.COMPOSE_CLOSURE.components == {
+    "compose-smoke-catalog": "installed_catalog", "compose-smoke-reviews": "installed_reviews",
+}
+from django_compose.provision import require_provisioned
+require_provisioned()
 assert settings.SMOKE_CONTRIBUTORS == ["installed_catalog", "installed_reviews"]
 assert tuple(entry.name for entry in settings.COMPOSE_SNAPSHOT.entries) == (
     "installed_catalog", "installed_reviews",
@@ -161,7 +167,7 @@ assert apps.get_model("installed_catalog", "Factory")._meta.parents == {}
 assert {model.__name__ for model in apps.get_app_config("installed_catalog").get_models()} == {
     "Item", "Child", "Grandchild", "Factory",
 }
-row = Child.objects.create(title="installed addon", detail="child", rating=5, reviewed=True)
+row = Child.objects.create(title="installed component", detail="child", rating=5, reviewed=True)
 assert Item.objects.get(pk=row.pk).rating == 5
 assert Child.objects.get(pk=row.pk).reviewed is True
 state = ProjectState.from_apps(apps)
@@ -204,13 +210,15 @@ def main() -> None:
             "models.py",
             "snapshot.py",
             "sources.py",
-            "addons.py",
+            "components.py",
             "conf.py",
+            "provision.py",
             "migration_imports.py",
             "serving.py",
             "build.py",
             "typing.py",
             "management/commands/makemigrations.py",
+            "management/commands/provision.py",
         ):
             assert f"django_compose/{required}" in names, required
         assert any(name.endswith("/licenses/LICENSE") for name in names)
@@ -366,10 +374,10 @@ assert Item.objects.get(pk=item.pk).rating == 5
         assert (host / "runtime/keep.txt").read_text() == "Unowned file\n"
         run([*compiler, "compose", "--settings", "settings"], cwd=host, env=environment)
         assert history == digest(host / "runtime/catalog/migrations")
-        installed_addons(directory, python, uv, wheel, environment)
+        installed_components(directory, python, uv, wheel, environment)
     print(
         "Wheel/sdist contents and fresh installed-host build, serve, ORM, "
-        "migration, drift, cleanup, installed addon closure, MTI and import audit checks passed."
+        "migration, provisioning, drift, cleanup, installed component closure, MTI and import audit checks passed."
     )
 
 

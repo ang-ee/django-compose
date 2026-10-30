@@ -18,7 +18,7 @@ from django.apps import apps
 from django.conf import settings
 from django.test import Client
 
-from django_compose.addons import installed_addons
+from django_compose.components import installed_components
 from django_compose.asgi import application
 from django_compose.serving import artifact_path, receipt_lease, verified_receipt
 
@@ -41,7 +41,7 @@ Item = apps.get_model("catalog", "Item")
 assert not Item._meta.abstract
 assert Item.schema_name == "Item"
 assert str(settings.CATALOG_PAGE_SIZE) == os.environ.get("CATALOG_PAGE_SIZE", "20")
-index = installed_addons("compose.example")
+index = installed_components("compose.example")
 assert index.providers["catalog"] == "compose-example-catalog"
 assert any(
     value.name == "compose-example-catalog" for value in index.active_requirements("compose-example-reviews")

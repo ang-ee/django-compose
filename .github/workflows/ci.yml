@@ -5,6 +5,21 @@ permissions:
 jobs:
   package:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: compose_test
+          POSTGRES_PASSWORD: compose_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U compose_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DJANGO_COMPOSE_PROVISION_POSTGRES_ENV: /tmp/compose-postgres-env.json
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -13,6 +28,17 @@ jobs:
           enable-cache: true
       - run: uv python install 3.14
       - run: make install
+      - name: Configure disposable PostgreSQL proof
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ["DJANGO_COMPOSE_PROVISION_POSTGRES_ENV"])
+          path.write_text(json.dumps({
+              "DJANGO_COMPOSE_TEST_POSTGRES_URL": "postgresql://compose_test:compose_test@localhost:5432/postgres"
+          }))
+          path.chmod(0o600)
+          PY
       - run: make check
       - run: make dist-check
       - uses: actions/upload-artifact@v4

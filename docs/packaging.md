@@ -114,7 +114,7 @@ make dist-check
 `dist-check` builds wheel and sdist through Hatchling, validates their metadata
 with Twine, inspects archive contents, and installs a wheel into a separate
 temporary environment. It exercises a plain Django project with base dependencies
-first, then actual installed addon wheels with settings contributions. Typing
+first, then actual installed component wheels with settings contributions. Typing
 is absent from that installation test. The Checks workflow uploads checked
 archives as workflow artifacts. Building a local archive does not publish it.
 

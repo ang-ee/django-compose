@@ -51,7 +51,7 @@ class Link(Composable, concrete=True):
         abstract = True
 class Ordinary(Composable):
     count = models.IntegerField()
-from .donors import Audit as Audit, Extra as Extra, ChildAddon as ChildAddon
+from .donors import Audit as Audit, Extra as Extra, ChildComponent as ChildComponent
 """
 
 DONOR_SOURCE = """
@@ -105,7 +105,7 @@ class Audit(Shared, GenericMethods[int], extends="modelapp.Entity"):
         return "audit"
     class Meta:
         abstract = True
-class ChildAddon(Composable, extends="modelapp.Child"):
+class ChildComponent(Composable, extends="modelapp.Child"):
     adopted = models.BooleanField()
     def ancestor_title(self) -> str:
         return self.title

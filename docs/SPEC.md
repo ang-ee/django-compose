@@ -17,8 +17,10 @@ to wire your own project. Planned APIs are described separately in
   a selected source model; the composition-query API calls it a *donor*.
 - A **generated model** is the concrete Django class emitted into the project's
   generated package. Application code obtains it through Django's app registry.
-- A **root app** is a project-authored `INSTALLED_APPS` entry. An **addon** is an
-  installed distribution participating in the optional app-selection group.
+- A **root app** is a project-authored `INSTALLED_APPS` entry. A **component** is an
+  installed Python distribution participating in the optional selection group.
+  Each component currently provides one Django app. Distribution names, Python
+  import paths and native app identities remain distinct.
 - A **snapshot** is the immutable set of composition inputs and their digest.
   A **build record**, represented by `serving.Receipt`, records generated-file
   hashes and retained migration labels in the generated package.
@@ -83,14 +85,15 @@ app/config strings and previously normalized `Entry` values, preserves explicit
 config classes, and rejects config instances or duplicate native identities and
 labels. It does not expand dependencies.
 
-The base `django_compose.addons.enabled_apps(roots, *, group=None) -> Closure`
+The base `django_compose.components.enabled_apps(roots, *, group=None) -> Closure`
 uses a nonempty group for distribution activation. Without a group it skips
 distribution metadata while retaining native `requires_apps` edges. An explicitly
 empty or invalid group fails. Its frozen result has
 `entries: tuple[str, ...]` in dependency order, `roots: tuple[str, ...]` of authored
-root app names, and `required`/`addons` frozensets of dependency-only app names and
-selected group members respectively. `dependencies` maps selected native app names
-to ordered direct dependency app names.
+root app names, and `required: frozenset[str]` of dependency-only app names.
+`components: Mapping[str, str]` maps selected canonical distribution names to
+their native app names. `dependencies` maps selected native app names to ordered
+direct dependency app names. These mappings are immutable.
 
 Each participating distribution declares exactly one group entry point, keyed
 by native `AppConfig.name`, whose value is a native app/config string. Active
@@ -98,14 +101,16 @@ installed `Requires-Dist` requirements evaluated with `extra=""` select provider
 in the same group. Selected configs' `requires_apps` entries are also followed.
 Explicit root configs override dependency defaults. A plain root outside the
 group has no metadata-based activation expansion. Installation alone never
-activates an addon or an optional extra.
+activates a component or an optional extra. A component can contain only resources:
+an importable app package is sufficient, with no custom AppConfig, models or hooks.
+App-less and multi-app components are outside the current selection contract.
 
 Competing providers/configs, invalid entry-point identities, duplicate labels,
 missing active installed requirements and cycles fail. The selector reads
 installed metadata; it does not install packages or compose settings. See
-[installed addons](addons.md) for complete package examples.
+[installed components](components.md) for complete package examples.
 
-`django_compose.addons.inspect_apps(roots, *, group=None) -> AppSelection`
+`django_compose.components.inspect_apps(roots, *, group=None, timeout=30.0) -> AppSelection`
 delegates the same selection to a fresh current-interpreter subprocess. It uses
 the caller's import paths, clears `DJANGO_SETTINGS_MODULE` and
 `DJANGO_COMPOSE_MODE` in the child, and disables bytecode writes. The caller's
@@ -117,12 +122,15 @@ their import behavior remains Django-owned.
 `AppSelection` is a `TypedDict` containing detached JSON-compatible facts:
 `app_entries` is a dependency-ordered list of dictionaries with the existing
 `Entry` fields (`name`, `label`, `config`, `path`, `entry`); `roots` is a list of
-native root app names in authored order; `required` and `addons` are sorted lists
-of native app names; `dependencies` maps every selected native name to its list
-of direct dependency names. No native app instance crosses the process boundary.
-Selection failures raise `ImproperlyConfigured` with the child diagnostic.
+native root app names in authored order; `required` is a sorted list of dependency
+app names; `components` maps canonical distribution names to their selected native
+app names; `dependencies` maps every selected native app name to its direct
+dependency names. No native app instance crosses the process boundary. Selection
+failures raise `ImproperlyConfigured` with the child diagnostic. A positive finite
+`timeout` bounds the child process; launch failures and timeouts raise the same
+exception without changing the caller's application state.
 
-The standalone `django-compose inspect-apps [--group GROUP] [APP_ENTRY ...]`
+The standalone `django-compose inspect-apps [--group GROUP] [--timeout SECONDS] [APP_ENTRY ...]`
 and `python -m django_compose inspect-apps ...` commands print this object as JSON
 without importing native management dispatch or project settings. Zero roots
 produce an empty selection. Import diagnostics go to stderr, separately from
@@ -130,6 +138,25 @@ JSON stdout, including native writes to file descriptor 1 and inherited subproce
 stdout. A reserved response descriptor carries only JSON; malformed or empty
 responses raise `ImproperlyConfigured`. Selection failures exit with status 1.
 This is a standalone command, not a Django management command.
+
+## Database preparation and readiness
+
+`django_compose.provision` owns database preparation for a startup-verified
+composition. The native `provision` command is registered by the existing
+ComposeConfig and supports `--database`, `--wait-db` and read-only `--check`.
+Compose continues to generate artifacts without database work.
+
+Optional `AppConfig.compose_provision(context)` hooks receive an immutable
+`ProvisionContext(database, stdout, stderr, verbosity=1)` after native migrations.
+The context's `call()` uses native management dispatch with the selected IO;
+each hook supplies its command's supported database option. Apps without hooks
+require no substitute. Resource declaration/loading policy stays with the
+selected resource-owning app.
+
+`require_provisioned(using="default", timeout=0)` verifies the current receipt
+under its lease and reads readiness and native migration state without repair.
+The single private recorder, durable failure/retry boundary, PostgreSQL lock and
+explicit `base_provision` table cutover are defined in [provisioning](provisioning.md).
 
 ## Settings and snapshots
 
@@ -201,7 +228,7 @@ keep ordering and input ownership in one place. See the
 
 | Setting | Meaning / default |
 | --- | --- |
-| `COMPOSE_ADDON_GROUP` | Optional installed entry-point group; absent means native dependencies only |
+| `COMPOSE_COMPONENT_GROUP` | Optional installed entry-point group; absent means native dependencies only |
 | `COMPOSE_ENV_PREFIXES` | Declared prefixes permitted for static contribution environment overlays; empty by default |
 | `COMPOSE_OUTPUT_DIR` | Project-selected generated package directory; required for building |
 | `COMPOSE_OUTPUT_MODULE` | Import path for that directory; defaults to `"runtime"` |
@@ -485,7 +512,7 @@ Lifespan factories enter in app order, unwind in reverse and report startup/shut
 failure. HTTP and lifespan are reserved protocols; duplicate mounts or protocol
 claims fail. These modules require completed setup and install no server policy.
 
-`addons.installed_addons(group)` indexes installed native Distribution and EntryPoint
+`components.installed_components(group)` indexes installed native Distribution and EntryPoint
 objects without importing app modules. Its read-only `distributions`, `entry_points`
 and `providers` maps use canonical distribution names/app keys as documented by the
 native owner. `active_requirements(iterable_of_strings)` and the index method

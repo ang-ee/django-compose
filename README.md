@@ -2,6 +2,10 @@
 
 Compose reusable Django apps into a runnable project.
 
+Installed Python distributions participate as **components**, each providing one
+Django app. Native package metadata supplies dependencies; `INSTALLED_APPS`
+selects the project's roots. Components can provide models, settings or resources.
+
 One app can define a model and another can add fields and behavior to it. The
 result is an ordinary concrete Django model, with Django's ORM and migrations.
 
@@ -65,6 +69,12 @@ The two apps now contribute to the same model and table. `compose` generated the
 classes; `makemigrations` and `migrate` created and applied ordinary Django
 history. Source apps remain installed when the generated project runs.
 
+Projects with database preparation hooks can use
+[`provision`](https://github.com/ang-ee/django-compose/blob/main/docs/provisioning.md)
+after composing and authoring migrations. It applies migrations, runs optional
+app hooks and records readiness for the verified composition. `compose` itself
+performs no database preparation.
+
 ## Where to go next
 
 - [Quick start](https://github.com/ang-ee/django-compose/blob/main/docs/quickstart.md): walk through the source, generated files,
@@ -73,7 +83,7 @@ history. Source apps remain installed when the generated project runs.
   native multi-table inheritance.
 - [Project configuration](https://github.com/ang-ee/django-compose/blob/main/docs/configuration.md): use django-compose in your own
   project with the current settings and `manage.py` integration.
-- [Documentation](https://github.com/ang-ee/django-compose/blob/main/docs/README.md): optional addon selection, integrations,
+- [Documentation](https://github.com/ang-ee/django-compose/blob/main/docs/README.md): optional component selection, integrations,
   migrations, packaging, API reference and current limitations.
 
 The source is licensed under [LGPL-3.0-or-later](https://github.com/ang-ee/django-compose/blob/main/LICENSE).

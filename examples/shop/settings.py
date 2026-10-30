@@ -14,7 +14,7 @@ COMPOSE_OUTPUT_DIR = BASE_DIR / "runtime"
 COMPOSE_OUTPUT_MODULE = "runtime"
 
 INSTALLED_APPS = ["reviews"]
-COMPOSE_ADDON_GROUP = "compose.example"
+COMPOSE_COMPONENT_GROUP = "compose.example"
 COMPOSE_ENV_PREFIXES = ("CATALOG_",)
 COMPOSE_COMMAND_CONTEXT = ("contexts.command_context",)
 COMPOSE_INTEGRATIONS = ("catalog.integrations.ModelSchema", "catalog.integrations.ReadySchema")

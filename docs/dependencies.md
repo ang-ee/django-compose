@@ -29,12 +29,12 @@ retain fields, validators and helper imports after an app is disabled; use the
 [migration import audit](migrations.md#disable-delete-or-uninstall) before a
 proposed provider removal.
 
-## Installed addon selection
+## Installed component selection
 
-`django_compose.addons.enabled_apps(roots, group=None)` is included in the base
+`django_compose.components.enabled_apps(roots, group=None)` is included in the base
 installation. A group enables installed-distribution activation; without it,
 only native `requires_apps` edges apply. Installing a distribution or extra never
-by itself enables an app. See [addon selection](addons.md) for package metadata
+by itself enables an app. See [component selection](components.md) for package metadata
 and native `AppConfig` examples.
 
 ## Advanced typing

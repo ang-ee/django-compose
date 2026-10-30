@@ -241,7 +241,7 @@ def test_resolved_entries_ignore_derived_roots_and_snapshot_namespace():
     )
 
 
-@pytest.mark.parametrize("key", ["AUTH_USER_MODEL", "COMPOSE_ADDON_GROUP", "COMPOSE_CUSTOM_INPUT"])
+@pytest.mark.parametrize("key", ["AUTH_USER_MODEL", "COMPOSE_COMPONENT_GROUP", "COMPOSE_CUSTOM_INPUT"])
 def test_all_structural_inputs_are_mandatory(key):
     assert snapshot(()).digest() != snapshot((), namespace={key: "changed"}).digest()
 

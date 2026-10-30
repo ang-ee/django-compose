@@ -104,7 +104,7 @@ removal after updating the app selection and composing:
 
 ```sh
 python manage.py check_migrations --imports
-python manage.py check_migrations --imports --removing old-addon historical-fields
+python manage.py check_migrations --imports --removing old-component historical-fields
 ```
 
 The second command refuses a named distribution that provides an enabled app or

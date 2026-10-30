@@ -331,7 +331,7 @@ def test_derived_settings_types_preserve_native_and_subclass_hooks(tmp_path, ext
     source = tmp_path / "consumer.py"
     source.write_text(
         "from typing import assert_type\nfrom django.conf import settings\n"
-        "from django_compose.snapshot import Snapshot\nfrom django_compose.addons import Closure\n"
+        "from django_compose.snapshot import Snapshot\nfrom django_compose.components import Closure\n"
         "assert_type(settings.COMPOSE_SNAPSHOT, Snapshot)\n"
         "assert_type(settings.COMPOSE_CLOSURE, Closure)\n"
         "assert_type(settings.COMPOSE_SNAPSHOT.digest(), str)\n"

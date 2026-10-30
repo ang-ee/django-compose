@@ -1,7 +1,8 @@
-# Select apps from installed addon packages
+# Select apps from installed component packages
 
-An **installed distribution** is a Python package installed by pip or another
-package manager. An **enabled app** is a native Django app selected for this
+An **installed distribution** is a Python project installed by pip or another
+package manager. A **component** is a participating distribution that provides
+one Django app. An **enabled app** is a native Django app selected for this
 project. A **generated model** is the concrete class composed from selected
 model declarations. These are separate choices: installing an app package does
 not enable it, and an enabled app need not declare any generated models.
@@ -13,7 +14,14 @@ It then applies selected apps' settings contributions; it never installs package
 
 The examples below are two local distributions you create, not names assumed to
 exist on a package index. Install them in the same environment as the project.
-Addon selection is included in the base installation.
+Component selection is included in the base installation.
+
+Distribution names, import paths and app names need not match. For example,
+`shop-catalog` below provides the app `shop_catalog`. Package metadata owns the
+distribution's version and requirements; Django owns its AppConfig identity.
+A component may contain only resources: its importable app package needs no
+models, custom AppConfig or provisioning hook. The selected resource consumer
+owns loading those declarations. App-less and multi-app components are deferred.
 
 ## Declare each distribution
 
@@ -118,7 +126,7 @@ and group before the existing final `configure(globals())` call:
 
 ```python
 INSTALLED_APPS = ["catalog.apps.CatalogConfig", "shop_reviews.apps.ReviewsConfig"]
-COMPOSE_ADDON_GROUP = "example.shop.apps"
+COMPOSE_COMPONENT_GROUP = "example.shop.apps"
 ```
 
 `shop_catalog` is selected through the reviews distribution's dependency. The
@@ -128,7 +136,8 @@ precedence over dependency defaults. Selected apps can contribute
 
 The low-level `enabled_apps(roots, *, group=None)` helper returns an immutable
 `Closure` with ordered native `entries`, native root names, dependency-only
-`required` names and selected group-member `addons` names. It reads no settings.
+`required` app names and a read-only `components` mapping from canonical
+distribution names to selected app names. It reads no settings.
 With no group it skips distribution discovery and follows only `requires_apps`;
 an explicitly empty or invalid group fails. `configure` uses this same helper.
 
@@ -139,7 +148,7 @@ that it has not enabled. It resolves the same native selection in a fresh
 interpreter and returns detached JSON data:
 
 ```python
-from django_compose.addons import inspect_apps
+from django_compose.components import inspect_apps
 
 selection = inspect_apps(["shop_reviews.apps.ReviewsConfig"], group="example.shop.apps")
 for app in selection["app_entries"]:
@@ -147,8 +156,8 @@ for app in selection["app_entries"]:
 ```
 
 `app_entries` retains dependency order. `roots` contains native root names in
-authored order, `required` contains sorted dependency-only names, `addons`
-contains sorted selected group members, and `dependencies` maps every selected
+authored order, `required` contains sorted dependency-only app names, `components`
+maps distribution names to app names, and `dependencies` maps every selected
 native app name to its direct dependency names. The function always launches the
 current interpreter with the caller's import paths. It clears Django settings
 and composition-mode environment selectors in that child and disables bytecode
@@ -156,6 +165,10 @@ writes. The calling application's settings, registry and imported apps stay
 unchanged. It runs no Django setup, models, settings contributions, composition
 or database work. Selected app/config imports still follow Django's ordinary
 pre-setup restrictions.
+
+The keyword `timeout=30.0` bounds inspection in seconds and must be positive and
+finite. Timeout and process-launch failures raise `ImproperlyConfigured`, just
+like selection errors. The CLI exposes the same bound with `--timeout`.
 
 The standalone launcher exposes the same operation without loading project
 settings or native management commands:
@@ -171,7 +184,7 @@ selection. This standalone command is not available through `manage.py`.
 
 ## Dependency and configuration rules
 
-For a selected addon, active installed `Requires-Dist` requirements are evaluated
+For a selected component, active installed `Requires-Dist` requirements are evaluated
 with `extra=""`. If a required distribution has an entry point in the chosen
 group, its app is selected too. Normal library dependencies do not become Django
 apps. Environment markers are honored; requirements conditional on an optional
@@ -196,7 +209,7 @@ class ReportsConfig(AppConfig):
 
 These requirements are followed for selected configs even when the app has no
 entry point in the group. Such a **plain root** otherwise has no package-metadata
-activation expansion. An unrelated installed addon is never selected solely
+activation expansion. An unrelated installed component is never selected solely
 because it shares the group.
 
 Explicit root config classes take precedence over dependency defaults. You can

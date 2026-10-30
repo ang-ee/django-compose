@@ -28,7 +28,7 @@ uv run --no-sync pytest -q tests/test_migrations.py
 
 `make dist-check` builds wheel and sdist, checks metadata and archive contents,
 and exercises a fresh wheel installation outside the checkout. The installation
-test first uses base dependencies, then installed addon wheels with settings
+test first uses base dependencies, then installed component wheels with settings
 contributions; it covers composition, native migration history, serving, ORM behavior, stale
 output refusal and retained-import reporting. CI runs the same Makefile targets.
 The Checks workflow uploads archives without publishing them. The separate

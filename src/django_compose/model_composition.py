@@ -60,7 +60,7 @@ class ModelComposition:
                     f"{', '.join(donor._meta.label for donor in donors)} extends unknown model {target!r}"
                 )
             if any(donor not in self._owners for donor in donors):
-                raise ImproperlyConfigured("Addon ownership is required for extension donors")
+                raise ImproperlyConfigured("Django app ownership is required for extension donors")
         graph = {}
         for key, source in sorted(self.models_by_label.items()):
             parent_ref = vars(source).get("compose_inherits")

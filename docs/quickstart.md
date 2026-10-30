@@ -19,7 +19,7 @@ The example already includes [settings.py](../examples/shop/settings.py) and
 from django_compose.conf import configure
 
 INSTALLED_APPS = ["reviews"]
-COMPOSE_ADDON_GROUP = "compose.example"
+COMPOSE_COMPONENT_GROUP = "compose.example"
 COMPOSE_OUTPUT_DIR = BASE_DIR / "runtime"
 COMPOSE_OUTPUT_MODULE = "runtime"
 configure(globals())
@@ -177,4 +177,4 @@ and asks you to compose again. `compose` itself does not apply database changes.
 
 To use your own apps, continue with [project configuration](configuration.md).
 For a larger collection of separately installed reusable apps, see
-[optional addon selection](addons.md).
+[optional component selection](components.md).

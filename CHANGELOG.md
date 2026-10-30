@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Use component vocabulary for installed distributions, keeping distribution and
+  Django app identities distinct in selection and isolated inspection results.
+- Bound isolated inspection and expose the strict native YAML error context.
+- Own verified database provisioning, optional app hooks and durable readiness
+  upstream, with explicit legacy-record cutover and native PostgreSQL locking.
 - Protect active shared tables during history purge and include native data-operation
   routing hints in retirement and reset checks.
 - Preserve migration file permissions during failed history reset through the
@@ -46,5 +51,5 @@
 - Compose native URL declarations, ASGI mounts/protocols and ordered lifespans.
 - Recompose before native development-server children start, report inputs before
   reads and recover after failed composition and file creation/deletion.
-- Inspect installed addon metadata without importing app modules and project
+- Inspect installed component metadata without importing app modules and project
   generated model typing in memory without rewriting source or stub files.
