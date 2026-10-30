@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Expose `index_components(distributions, *, group)` for prepared native package
+  metadata; installed discovery delegates to the same validation and index.
 - Protect quoted and schema-qualified migration storage, including implicit
   many-to-many tables, using native eligibility and per-database ownership checks.
   Keep reusable transition planning database-free.

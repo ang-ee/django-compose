@@ -141,6 +141,44 @@ distribution names to selected app names. It reads no settings.
 With no group it skips distribution discovery and follows only `requires_apps`;
 an explicitly empty or invalid group fails. `configure` uses this same helper.
 
+## Inspect package metadata without importing apps
+
+`installed_components(group)` returns an `InstalledComponents` index of native
+distribution and entry-point objects without importing apps or loading entry
+points. To inspect metadata prepared separately by a package build backend, pass
+native `Distribution` objects to the same indexing owner:
+
+```python
+from importlib.metadata import Distribution
+from pathlib import Path
+
+from django_compose.components import index_components
+
+metadata_dir = Path("build/metadata/shop_catalog-0.1.0.dist-info")
+index = index_components(
+    [Distribution.at(metadata_dir)],
+    group="example.shop.apps",
+)
+print(index.providers)  # {"shop_catalog": "shop-catalog"}
+```
+
+The metadata directory must already exist. Preparing it through the package's
+build backend, obtaining source checkouts and installing dependencies belong to
+the caller. Indexing needs neither an installed app nor an importable app package.
+It does not enable apps or validate their AppConfig identity.
+
+The read-only `distributions` map includes every supplied distribution, keyed by
+canonical distribution name. `entry_points` maps participating distributions to
+their native entry point; `providers` maps declared app keys to distribution names.
+Participating distributions must have exactly one entry point in the requested
+group, and app keys must be unique. Supplied canonical distribution names must
+also be unique, even if their versions agree. Installed discovery uses Python's
+native installed-distribution winner before delegating to this same validator.
+
+`index.active_requirements(provider)` returns native `Requirement` objects active
+with `extra=""`. Dependency presence and actual app identity are checked only when
+apps are activated. Metadata in unrelated groups stays inactive.
+
 ## Inspect a selection from a running application
 
 Use `inspect_apps` when an already populated application needs to inspect apps

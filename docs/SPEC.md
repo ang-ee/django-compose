@@ -536,10 +536,20 @@ Lifespan factories enter in app order, unwind in reverse and report startup/shut
 failure. HTTP and lifespan are reserved protocols; duplicate mounts or protocol
 claims fail. These modules require completed setup and install no server policy.
 
-`components.installed_components(group)` indexes installed native Distribution and EntryPoint
-objects without importing app modules. Its read-only `distributions`, `entry_points`
-and `providers` maps use canonical distribution names/app keys as documented by the
-native owner. `active_requirements(iterable_of_strings)` and the index method
+`components.index_components(distributions, *, group) -> InstalledComponents`
+validates an iterable of native `importlib.metadata.Distribution` objects without
+importing app modules or loading entry points. Prepared source metadata may use
+native `Distribution.at(path)` / `PathDistribution`; preparation is caller-owned.
+Each participating distribution declares exactly one group entry point. Duplicate
+canonical distribution names and competing declared app keys fail explicitly.
+Its read-only `distributions`, `entry_points` and `providers` maps retain native
+objects, with canonical distribution-name and declared app-key indexes. Libraries
+without group entries remain in `distributions`; indexing neither activates apps
+nor checks importability, actual AppConfig identity or installed dependencies.
+
+`components.installed_components(group)` selects each canonical installed name's
+native `metadata.distribution()` winner, then delegates to that same index owner.
+`active_requirements(iterable_of_strings)` and the index method
 `active_requirements(provider)` return native Requirement values active with
 `extra=""`. Metadata inspection does not activate apps.
 
