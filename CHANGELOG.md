@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0.dev4
 
 - Avoid distribution ownership scans for module-path lookups and reuse each exact
   native app configuration within one dependency selection.
