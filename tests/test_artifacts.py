@@ -167,3 +167,31 @@ def test_atomic_replacement_and_rollback_preserve_authored_permissions(tmp_path,
     atomic_write(path, original)
     assert path.read_bytes() == original
     assert stat.S_IMODE(path.stat().st_mode) == mode
+
+
+def test_atomic_exclusive_creation_preserves_existing_file_and_cleans_temporary(tmp_path):
+    path = tmp_path / "migration.py"
+    atomic_write(path, b"native history", exclusive=True)
+    path.chmod(0o640)
+
+    with pytest.raises(FileExistsError):
+        atomic_write(path, b"replacement", exclusive=True)
+
+    assert path.read_bytes() == b"native history"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    assert not tuple(tmp_path.glob(".compose-*"))
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o755])
+def test_atomic_explicit_mode_restores_deleted_original(tmp_path, mode):
+    path = tmp_path / "pyproject.toml"
+    original = b"original metadata\n"
+    path.write_bytes(original)
+    path.chmod(mode)
+    path.unlink()
+
+    atomic_write(path, original, mode=mode)
+
+    assert path.read_bytes() == original
+    assert stat.S_IMODE(path.stat().st_mode) == mode
+    assert not tuple(tmp_path.glob(".compose-*"))
