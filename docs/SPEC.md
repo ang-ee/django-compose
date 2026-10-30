@@ -1,14 +1,24 @@
-# API reference
+# Detailed API reference
 
-Compose reusable Django apps into a runnable project. django-compose generates
-ordinary concrete model classes from abstract declarations in the apps your
-project selects. Django continues to manage app population, the ORM, model
-validation and migrations.
+This is the current contract for django-compose. For a compact map of commands,
+Python entry points and app hooks, start with the [API guide](README.md).
+For runnable examples, use the [quick start](quickstart.md) and
+[project configuration](configuration.md). [Compatibility](dependencies.md)
+defines supported versions and platforms.
 
-This reference describes the current Python 3.14 / Django 6.1 API. Start with
-[the quick start](quickstart.md), then use [project configuration](configuration.md)
-to wire your own project. Planned APIs are described separately in
-[the roadmap](ROADMAP.md).
+- [Terms](#terms)
+- [Model declarations](#model-declarations)
+- [Application selection](#application-selection)
+- [Package metadata](#package-metadata)
+- [Settings and snapshots](#settings-and-snapshots)
+- [Setup lifecycle](#setup-lifecycle)
+- [Integration protocols](#integration-protocols)
+- [Generated output and freshness](#generated-output-and-freshness)
+- [Artifact access](#artifact-access)
+- [Native history and transitions](#native-history-and-transitions)
+- [Database preparation and readiness](#database-preparation-and-readiness)
+- [Serving composition](#serving-composition)
+- [Typing and import boundaries](#typing-and-import-boundaries)
 
 ## Terms
 
@@ -17,8 +27,8 @@ to wire your own project. Planned APIs are described separately in
   a selected source model; the composition-query API calls it a *donor*.
 - A **generated model** is the concrete Django class emitted into the project's
   generated package. Application code obtains it through Django's app registry.
-- A **root app** is a project-authored `INSTALLED_APPS` entry. A **component** is an
-  installed Python distribution participating in the optional selection group.
+- A **root app** is a project-authored `INSTALLED_APPS` entry. A **component** is a
+  Python distribution participating in the optional selection group.
   Each component currently provides one Django app. Distribution names, Python
   import paths and native app identities remain distinct.
 - A **snapshot** is the immutable set of composition inputs and their digest.
@@ -141,24 +151,24 @@ stdout. A reserved response descriptor carries only JSON; malformed or empty
 responses raise `ImproperlyConfigured`. Selection failures exit with status 1.
 This is a standalone command, not a Django management command.
 
-## Database preparation and readiness
+## Package metadata
 
-`django_compose.provision` owns database preparation for a startup-verified
-composition. The native `provision` command is registered by the existing
-ComposeConfig and supports `--database`, `--wait-db` and read-only `--check`.
-Compose continues to generate artifacts without database work.
+`components.index_components(distributions, *, group) -> InstalledComponents`
+validates an iterable of native `importlib.metadata.Distribution` objects without
+importing app modules or loading entry points. Prepared source metadata may use
+native `Distribution.at(path)` / `PathDistribution`; preparation is caller-owned.
+Each participating distribution declares exactly one group entry point. Duplicate
+canonical distribution names and competing declared app keys fail explicitly.
+Its read-only `distributions`, `entry_points` and `providers` maps retain native
+objects, with canonical distribution-name and declared app-key indexes. Libraries
+without group entries remain in `distributions`; indexing neither activates apps
+nor checks importability, actual AppConfig identity or installed dependencies.
 
-Optional `AppConfig.compose_provision(context)` hooks receive an immutable
-`ProvisionContext(database, stdout, stderr, verbosity=1)` after native migrations.
-The context's `call()` uses native management dispatch with the selected IO;
-each hook supplies its command's supported database option. Apps without hooks
-require no substitute. Resource declaration/loading policy stays with the
-selected resource-owning app.
-
-`require_provisioned(using="default", timeout=0)` verifies the current receipt
-under its lease and reads readiness and native migration state without repair.
-The single private recorder, durable failure/retry boundary, PostgreSQL lock and
-explicit `base_provision` table cutover are defined in [provisioning](provisioning.md).
+`components.installed_components(group)` selects each canonical installed name's
+native `metadata.distribution()` winner, then delegates to that same index owner.
+`active_requirements(iterable_of_strings)` and the index method
+`active_requirements(provider)` return native Requirement values active with
+`extra=""`. Metadata inspection does not activate apps.
 
 ## Settings and snapshots
 
@@ -421,14 +431,22 @@ no foreign marker knowledge is required. This permits a fresh clone containing
 only durable reviewed migration history to compose before serving. Check mode neither creates output nor changes
 existing bytes. Preserve native history as explained in [packaging](packaging.md).
 
+## Artifact access
+
+`serving.verified_receipt()` returns the process startup receipt;
+`serving.artifact_path(relative)` validates receipt ownership, safe
+path and current hash before returning a Path. During build-ready callbacks it
+supports models-phase artifacts before final publication.
+
 ## Native history and transitions
 
 For generated labels, history defaults to `<output_module>.<label>.migrations`.
 `serving.migration_modules(authored, receipt, output_module)` derives retained
 defaults from the record, then applies authored overrides, including `None`.
 `HISTORY_LABELS` retains model labels, previous history, on-disk migration
-packages and transition targets, minus `RETIRED_LABELS`. History-only configs
-load no old source models or app lifecycle.
+packages and transition targets, minus `RETIRED_LABELS`. History-only configs use
+`django_compose.history.History_<label>`, generated dynamically from retained
+receipt facts; they load no old source models or app lifecycle.
 
 Django owns migration detection, graphs, state, execution, recording and routers.
 `effective_states(loader, registry, purge=...)` preserves history-only models in
@@ -496,26 +514,26 @@ no migration operations. `--imports --removing DIST...` refuses enabled provider
 retained imports, unresolved/unsupported entries and loader failures; it does not
 uninstall anything. See [migration workflows](migrations.md).
 
-## Typing and import boundaries
+## Database preparation and readiness
 
-The optional `django_compose.typing` plugin extends django-stubs inference for
-composed fields, relations, managers, methods, properties, generics and ancestor
-demands, while retaining native diagnostics. Effective member access follows the
-generated class's native MRO, including an extension overriding an existing source
-member; authored bodies and override checks retain their original signatures.
-The [typing guide](dependencies.md#advanced-typing) documents the remaining
-read-only-to-writable property limitation. It tracks source dependencies for
-cold, warm and incremental analysis. Its extra pins the supported published
-fork versions; ordinary serving needs neither mypy nor django-stubs.
+`django_compose.provision` owns database preparation for a startup-verified
+composition. The native `provision` command is registered by the existing
+ComposeConfig and supports `--database`, `--wait-db` and read-only `--check`.
+Compose continues to generate artifacts without database work.
 
-App selection, snapshots and serving are usable before Django setup when the
-selected app/config modules satisfy Django's pre-setup import requirements.
-Serving never imports the compiler; model declarations depend on native Django
-models without importing build; build is loaded lazily by the build lifecycle.
-Package imports do not configure Django or load a consumer framework. Django,
-packaging and django-yamlconf are base dependencies; typing is optional.
+Optional `AppConfig.compose_provision(context)` hooks receive an immutable
+`ProvisionContext(database, stdout, stderr, verbosity=1)` after native migrations.
+The context's `call()` uses native management dispatch with the selected IO;
+each hook supplies its command's supported database option. Apps without hooks
+require no substitute. Resource declaration/loading policy stays with the
+selected resource-owning app.
 
-## Serving composition and metadata inspection
+`require_provisioned(using="default", timeout=0)` verifies the current receipt
+under its lease and reads readiness and native migration state without repair.
+The single private recorder, durable failure/retry boundary, PostgreSQL lock and
+explicit `base_provision` table cutover are defined in [provisioning](provisioning.md).
+
+## Serving composition
 
 After `django.setup()`, `django_compose.urls.urlpatterns` includes selected
 configs' optional `compose_urls` modules using `compose_url_prefix` (default empty)
@@ -536,29 +554,24 @@ Lifespan factories enter in app order, unwind in reverse and report startup/shut
 failure. HTTP and lifespan are reserved protocols; duplicate mounts or protocol
 claims fail. These modules require completed setup and install no server policy.
 
-`components.index_components(distributions, *, group) -> InstalledComponents`
-validates an iterable of native `importlib.metadata.Distribution` objects without
-importing app modules or loading entry points. Prepared source metadata may use
-native `Distribution.at(path)` / `PathDistribution`; preparation is caller-owned.
-Each participating distribution declares exactly one group entry point. Duplicate
-canonical distribution names and competing declared app keys fail explicitly.
-Its read-only `distributions`, `entry_points` and `providers` maps retain native
-objects, with canonical distribution-name and declared app-key indexes. Libraries
-without group entries remain in `distributions`; indexing neither activates apps
-nor checks importability, actual AppConfig identity or installed dependencies.
+## Typing and import boundaries
 
-`components.installed_components(group)` selects each canonical installed name's
-native `metadata.distribution()` winner, then delegates to that same index owner.
-`active_requirements(iterable_of_strings)` and the index method
-`active_requirements(provider)` return native Requirement values active with
-`extra=""`. Metadata inspection does not activate apps.
+The optional `django_compose.typing` plugin extends django-stubs inference for
+composed fields, relations, managers, methods, properties, generics and ancestor
+demands, while retaining native diagnostics. Effective member access follows the
+generated class's native MRO, including an extension overriding an existing source
+member; authored bodies and override checks retain their original signatures.
+The [typing guide](dependencies.md#advanced-typing) documents the remaining
+read-only-to-writable property limitation. It tracks source dependencies for
+cold, warm and incremental analysis. Its extra pins the supported published
+fork versions; ordinary serving needs neither mypy nor django-stubs.
 
-`serving.verified_receipt()` returns the process startup receipt;
-`serving.artifact_path(relative)` validates receipt ownership, safe
-path and current hash before returning a Path. During build-ready callbacks it
-supports models-phase artifacts before final publication. Disabled history uses
-`django_compose.history.History_<label>` native configs, generated dynamically from
-retained receipt facts, with no models loaded from the deselected source.
+App selection, snapshots and serving are usable before Django setup when the
+selected app/config modules satisfy Django's pre-setup import requirements.
+Serving never imports the compiler; model declarations depend on native Django
+models without importing build; build is loaded lazily by the build lifecycle.
+Package imports do not configure Django or load a consumer framework. Django,
+packaging and django-yamlconf are base dependencies; typing is optional.
 
 `typing.CompositionPlugin.project_model` projects native generated model classes
 into django-stubs TypeInfo in memory, including missing runtime-module symbols.

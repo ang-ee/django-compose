@@ -108,53 +108,6 @@ the selected native configs. Source packages remain required. Native app identit
 `import_models()` hooks and `ready()` callbacks remain Django-owned; callbacks
 see the generated concrete models.
 
-## App settings contributions
-
-An enabled app can provide a pre-setup-safe `autoconfig.py`:
-
-```python
-# catalog/autoconfig.py
-SETTINGS = {
-    "CATALOG_PAGE_SIZE": 20,
-    "CATALOG_OPTIONS.cache": True,
-    "COMPOSE_FINGERPRINT_GLOBS:append": ["policies/*.txt"],
-}
-
-
-def settings(namespace):
-    return {"CATALOG_LIMIT": int(namespace["CATALOG_PAGE_SIZE"]) * 2}
-```
-
-`SETTINGS` and the optional `settings(namespace)` return value must be mappings.
-They run in resolved dependency order. Each callback receives a detached,
-read-only mapping of effective public uppercase setting values, including previous
-contributions. Nested containers are detached too; changing them cannot mutate
-the project settings. The returned mapping is the callback's sole contribution.
-Plain defaults preserve project-authored values; lists and dictionaries are defaults too. Two apps
-claiming the same plain scalar default fail, naming both owners, even when the
-project overrides that value. Use native django-yamlconf dotted keys and merge
-directives such as `:append` for additive contributions. Its provenance is
-preserved, including provenance supplied by a project loader; injection errors
-fail explicitly. Contributions can reference authored project values using native
-yamlconf syntax, for example `"CATALOG_DATA_DIR": "{BASE_DIR}/catalog"`.
-Untouched project values remain literal. An explicit dotted or append contribution
-opts the affected container into normal native reference expansion.
-
-Contributions cannot choose `INSTALLED_APPS`, the output package, or derived
-composition state. Keep those project decisions above `configure`.
-
-Environment overlays require declared `COMPOSE_ENV_PREFIXES`, for example
-`("CATALOG_",)`. Only statically declared contribution settings with a matching
-prefix are overlaid before their app's callback. A callback does not see an
-ambient environment mapping: declare a prefixed setting in `SETTINGS`, or have
-the project's loader supply its value. Overlays retain native yamlconf
-provenance. Structural inputs, including custom settings named by
-`COMPOSE_FINGERPRINT_SETTINGS`, cannot come from the environment, including through
-native yamlconf reference chains. This check follows native provenance and
-references; it does not analyze arbitrary Python computations or direct
-`os.environ` reads. Load deployment secrets through the project's normal settings
-mechanism.
-
 ## shop/urls.py
 
 Define a normal Django view and URL. Model lookup happens when a request arrives,
@@ -267,6 +220,53 @@ successful Django setup and native parsing. The read-only native options include
 default and selected database choices. See the [dispatch contract](SPEC.md#setup-lifecycle)
 for custom command cooperation and native error/cleanup ownership. See the [example context](../examples/shop/contexts.py).
 
+## App settings contributions
+
+An enabled app can provide a pre-setup-safe `autoconfig.py`:
+
+```python
+# catalog/autoconfig.py
+SETTINGS = {
+    "CATALOG_PAGE_SIZE": 20,
+    "CATALOG_OPTIONS.cache": True,
+    "COMPOSE_FINGERPRINT_GLOBS:append": ["policies/*.txt"],
+}
+
+
+def settings(namespace):
+    return {"CATALOG_LIMIT": int(namespace["CATALOG_PAGE_SIZE"]) * 2}
+```
+
+`SETTINGS` and the optional `settings(namespace)` return value must be mappings.
+They run in resolved dependency order. Each callback receives a detached,
+read-only mapping of effective public uppercase setting values, including previous
+contributions. Nested containers are detached too; changing them cannot mutate
+the project settings. The returned mapping is the callback's sole contribution.
+Plain defaults preserve project-authored values; lists and dictionaries are defaults too. Two apps
+claiming the same plain scalar default fail, naming both owners, even when the
+project overrides that value. Use native django-yamlconf dotted keys and merge
+directives such as `:append` for additive contributions. Its provenance is
+preserved, including provenance supplied by a project loader; injection errors
+fail explicitly. Contributions can reference authored project values using native
+yamlconf syntax, for example `"CATALOG_DATA_DIR": "{BASE_DIR}/catalog"`.
+Untouched project values remain literal. An explicit dotted or append contribution
+opts the affected container into normal native reference expansion.
+
+Contributions cannot choose `INSTALLED_APPS`, the output package, or derived
+composition state. Keep those project decisions above `configure`.
+
+Environment overlays require declared `COMPOSE_ENV_PREFIXES`, for example
+`("CATALOG_",)`. Only statically declared contribution settings with a matching
+prefix are overlaid before their app's callback. A callback does not see an
+ambient environment mapping: declare a prefixed setting in `SETTINGS`, or have
+the project's loader supply its value. Overlays retain native yamlconf
+provenance. Structural inputs, including custom settings named by
+`COMPOSE_FINGERPRINT_SETTINGS`, cannot come from the environment, including through
+native yamlconf reference chains. This check follows native provenance and
+references; it does not analyze arbitrary Python computations or direct
+`os.environ` reads. Load deployment secrets through the project's normal settings
+mechanism.
+
 ## Choose fingerprint inputs
 
 The snapshot is immutable and `configure` creates it once after all contributions.
@@ -309,7 +309,7 @@ after setup. Ordinary project-authored URLconfs remain supported.
 The registered check `django_compose.E001` reports identical native matching
 chains and names both contributing apps. It preserves Django's ordered resolution
 for different converters or differently expressed patterns, including custom
-matchers. It does not prove all possible overlaps. The [API reference](SPEC.md#serving-composition-and-metadata-inspection)
+matchers. It does not prove all possible overlaps. The [API reference](SPEC.md#serving-composition)
 defines the exact equality boundary.
 
 ## Startup consistency

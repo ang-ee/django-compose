@@ -2,89 +2,75 @@
 
 Compose reusable Django apps into a runnable project.
 
-Installed Python distributions participate as **components**, each providing one
-Django app. Native package metadata supplies dependencies; `INSTALLED_APPS`
-selects the project's roots. Components can provide models, settings or resources.
+django-compose resolves the apps selected by your project's `INSTALLED_APPS`,
+combines their model declarations and settings contributions, and generates
+ordinary Django models and app configurations before startup.
 
-One app can define a model and another can add fields and behavior to it. The
-result is an ordinary concrete Django model, with Django's ORM and migrations.
-
-For example, `catalog` defines an item and `reviews` adds a rating:
+Use it when several projects share reusable apps but need different combinations
+of fields and behavior. You author the project settings and launcher; Django
+continues to own the app registry, ORM, managers, querysets and migrations.
 
 ```text
-catalog.Item (title) + reviews.Rating (rating, is_recommended)
-    → concrete catalog.Item → one catalog_item table
+installed apps + project settings → compose → generated Django package
 ```
 
-The reusable declarations are abstract models. An explicit `compose` command
-writes the concrete classes into a Python package before the project runs.
-Select the apps you need; the generated models reflect that selection. You
-write ordinary project settings and a command launcher; django-compose supplies
-the generated models and app configuration.
+## What it provides
 
-This is useful when several projects share a model but need different optional
-capabilities. For a single project with a fixed model structure, ordinary Django
-models and abstract bases may already be sufficient.
+- **App selection:** expand explicit roots through declared app dependencies and
+  optional installed-package metadata.
+- **Model composition:** add fields and methods to another app's model, create
+  concrete models, or declare native multi-table inheritance.
+- **Project configuration:** combine app settings and optionally collect URL,
+  ASGI and database-preparation contributions.
+- **Build output:** generate model/configuration modules and declared artifacts;
+  verify that they match the selected inputs before serving.
 
-**Status:** development preview `0.1.0.dev2`; Python 3.14 and Django 6.1 are supported.
-The base dependencies are Django, packaging and django-yamlconf.
-See [supported platforms](https://github.com/ang-ee/django-compose/blob/main/docs/dependencies.md#supported-platforms) before installing.
+Packages remain installed at runtime because generated classes import their
+source declarations. `compose` writes files; Django's migration commands change
+the database.
 
-```sh
-python -m pip install django-compose==0.1.0.dev2
-```
-
-For advanced composed-model analysis, install `django-compose[typing]==0.1.0.dev2`;
-see [typing dependencies](https://github.com/ang-ee/django-compose/blob/main/docs/dependencies.md#advanced-typing). The example below
-uses this checkout and does not require another framework.
-
-## Try the example
-
-Install [uv](https://docs.astral.sh/uv/) and run these commands from the checkout
-root. The example uses a local SQLite database.
-
-```sh
-uv sync --frozen --no-dev
-uv pip install --no-deps ./examples/shop/catalog ./examples/shop/reviews
-cd examples/shop
-uv run --project ../.. --no-sync python manage.py compose
-uv run --project ../.. --no-sync python manage.py makemigrations catalog auth contenttypes
-uv run --project ../.. --no-sync python manage.py migrate
-uv run --project ../.. --no-sync python manage.py compose --check
-uv run --project ../.. --no-sync python verify.py
-uv run --project ../.. --no-sync python manage.py shell
-```
-
-In the Django shell:
+## One model, two apps
 
 ```python
-from django.apps import apps
+# catalog/models.py
+from django.db import models
+from django_compose.models import Composable
 
-Item = apps.get_model("catalog", "Item")
-item = Item.objects.create(title="A book", rating=5)
-assert item.is_recommended()
-assert Item.objects.get(pk=item.pk).rating == 5
+class Item(Composable, concrete=True):
+    title = models.CharField(max_length=100)
+
+    class Meta:
+        abstract = True
 ```
 
-The two apps now contribute to the same model and table. `compose` generated the
-classes; `makemigrations` and `migrate` created and applied ordinary Django
-history. Source apps remain installed when the generated project runs.
+```python
+# reviews/models.py
+from django.db import models
+from django_compose.models import Composable
 
-Projects with database preparation hooks can use
-[`provision`](https://github.com/ang-ee/django-compose/blob/main/docs/provisioning.md)
-after composing and authoring migrations. It applies migrations, runs optional
-app hooks and records readiness for the verified composition. `compose` itself
-performs no database preparation.
+class Rating(Composable, extends="catalog.Item"):
+    rating = models.PositiveSmallIntegerField(default=0)
 
-## Where to go next
+    class Meta:
+        abstract = True
+```
 
-- [Quick start](https://github.com/ang-ee/django-compose/blob/main/docs/quickstart.md): walk through the source, generated files,
-  commands and ORM result.
-- [Model declarations](https://github.com/ang-ee/django-compose/blob/main/docs/models.md): add fields to one model or declare
-  native multi-table inheritance.
-- [Project configuration](https://github.com/ang-ee/django-compose/blob/main/docs/configuration.md): use django-compose in your own
-  project with the current settings and `manage.py` integration.
-- [Documentation](https://github.com/ang-ee/django-compose/blob/main/docs/README.md): optional component selection, integrations,
-  migrations, packaging, API reference and current limitations.
+With both apps selected, the generated `catalog.Item` has `title` and `rating` in
+one table. `Rating` adds no table of its own. After composition, migrations and
+Django setup, use `apps.get_model("catalog", "Item")` to obtain the concrete model.
+The [model guide](https://github.com/ang-ee/django-compose/blob/main/docs/models.md)
+explains all four declaration keywords and lazy relations.
 
-The source is licensed under [LGPL-3.0-or-later](https://github.com/ang-ee/django-compose/blob/main/LICENSE).
+## Get started
+
+This is a development preview. See [compatibility and platform requirements](https://github.com/ang-ee/django-compose/blob/main/docs/dependencies.md)
+and [installation](https://github.com/ang-ee/django-compose/blob/main/docs/packaging.md).
+
+1. [Run the quick start](https://github.com/ang-ee/django-compose/blob/main/docs/quickstart.md)
+   to compose the checked-in SQLite project and query the result.
+2. [Configure your project](https://github.com/ang-ee/django-compose/blob/main/docs/configuration.md)
+   with `configure(globals())` and the command launcher.
+3. [Browse the APIs](https://github.com/ang-ee/django-compose/blob/main/docs/README.md)
+   for commands, Python entry points and app extension hooks.
+
+Licensed under [LGPL-3.0-or-later](https://github.com/ang-ee/django-compose/blob/main/LICENSE).

@@ -20,6 +20,6 @@ registry, setting or dependency. Identical native chains remain errors,
 including duplicates reached through different reverse namespaces.
 Valid custom-converter routes previously rejected need no caller migration.
 
-The implemented contract belongs in [the API reference](../SPEC.md#serving-composition-and-metadata-inspection)
+The implemented contract belongs in [the API reference](../SPEC.md#serving-composition)
 and the native check's docstring. Django's [converter documentation](https://docs.djangoproject.com/en/6.1/topics/http/urls/#registering-custom-path-converters)
 owns matching behavior.

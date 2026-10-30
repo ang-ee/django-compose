@@ -1,36 +1,15 @@
-# Quick start: extend a reusable Django app
+# Quick start
 
-This example builds one ordinary Django model from two reusable apps. The
-`catalog` app declares `Item.title`; the `reviews` app adds `rating` and
-`is_recommended()`. Selecting both produces a concrete `catalog.Item` stored in
-one `catalog_item` table.
+Run a Django project where `catalog` declares an item and `reviews` adds a rating
+and method to it. The result is one concrete model and one `catalog_item` table.
 
-You need [uv](https://docs.astral.sh/uv/) and Python 3.14 on a
-[supported platform](dependencies.md#supported-platforms). This walkthrough uses the
-development checkout (`0.1.0.dev2`), supporting Django 6.1. The example
-needs only base dependencies and uses SQLite. The optional typing extra is unnecessary.
+You need Python 3.14 and [uv](https://docs.astral.sh/uv/) on a
+[supported platform](dependencies.md#supported-platforms). This walkthrough uses
+the repository checkout, base dependencies and SQLite.
 
-## Run the checked-in project
+## Run the example
 
-The example already includes [settings.py](../examples/shop/settings.py) and
-[manage.py](../examples/shop/manage.py). Its settings select `reviews`; the installed distribution dependency selects
-`catalog`. Generated Python files go in `runtime/`:
-
-```python
-from django_compose.conf import configure
-
-INSTALLED_APPS = ["reviews"]
-COMPOSE_COMPONENT_GROUP = "compose.example"
-COMPOSE_OUTPUT_DIR = BASE_DIR / "runtime"
-COMPOSE_OUTPUT_MODULE = "runtime"
-configure(globals())
-```
-
-The checked-in `catalog/autoconfig.py` contributes `CATALOG_PAGE_SIZE = 20` as a
-plain default. Projects can author their own value before `configure`; selected
-apps' contributions are applied before the immutable input snapshot is created.
-
-Start at the checkout root:
+From the checkout root:
 
 ```sh
 uv sync --frozen --no-dev
@@ -44,42 +23,12 @@ uv run --project ../.. --no-sync python verify.py
 uv run --project ../.. --no-sync python manage.py shell
 ```
 
-Each command has a separate job:
+`compose` writes the concrete models. Django's `makemigrations` and `migrate`
+author and apply their schema; `compose --check` verifies the generated output
+and migration state. `verify.py` exercises the example's ORM and integrations.
+Review migrations before applying them to an existing database.
 
-| Command | Result |
-| --- | --- |
-| `compose` | Writes the generated Python package for the selected apps |
-| `makemigrations catalog auth contenttypes` | Authors native Django migration files for the concrete model |
-| `migrate` | Applies those migrations to the local SQLite database |
-| `compose --check` | Checks generated output and native migration state without rewriting them |
-| `shell` | Opens Django with the generated concrete model registered |
-
-After a successful first run, the project beneath `examples/shop/` includes:
-
-```text
-shop/
-├── catalog/models.py             # reusable abstract declaration
-├── reviews/models.py             # abstract extension class
-├── settings.py                   # authored project settings
-├── manage.py                     # command launcher
-├── runtime/                      # generated Python package
-│   ├── __init__.py               # generated build metadata
-│   └── catalog/
-│       ├── __init__.py
-│       ├── apps.py               # generated app configuration
-│       ├── models.py             # concrete Item
-│       └── migrations/           # authored by makemigrations
-└── shop.sqlite3                  # local example database
-```
-
-The exact migration filename follows Django's normal numbering. The `reviews`
-app adds no model of its own, so it does not get a separate rating table.
-Generated Python files can be rebuilt; the migration files are durable project
-history. See [migrations](migrations.md) before changing or packaging that history.
-
-## Use the result
-
-In the shell opened above:
+In the shell:
 
 ```python
 from django.apps import apps
@@ -92,90 +41,55 @@ assert Item.objects.get(pk=item.pk).rating == 5
 assert Item._meta.db_table == "catalog_item"
 ```
 
-Django has already run setup in the management shell. `apps.get_model()` returns
-the registered **concrete** model, including fields and methods from both apps.
-In your own process, configure the project and run `django.setup()` before using
-the app registry; [project configuration](configuration.md) shows the setup.
+## What was composed?
 
-The checked-in project also demonstrates native auth ready callbacks, additive
-settings, both artifact phases, URL/ASGI composition, lifespan and receipt leases.
-See the [example guide](../examples/shop/README.md) for those seams.
+The source [Item](../examples/shop/catalog/models.py) uses
+`class Item(Composable, concrete=True)` and declares `title` and `describe()`.
+The [Rating extension](../examples/shop/reviews/models.py) uses
+`class Rating(Composable, extends="catalog.Item")` and contributes `rating` and
+`is_recommended()`. Both declare `Meta.abstract = True`.
 
-## Read the two declarations
-
-The checked-in [catalog model](../examples/shop/catalog/models.py) uses the
-library's abstract `Composable` base:
+The example's [settings](../examples/shop/settings.py) select the root app and
+output location before the final configuration call:
 
 ```python
-from django.db import models
-from django_compose.models import Composable
+# Extract from the complete settings.py; BASE_DIR is defined there.
+from django_compose.conf import configure
 
-
-class Item(Composable, concrete=True):
-    title = models.CharField(max_length=100)
-
-    class Meta:
-        abstract = True
-        ordering = ["title"]
-
-    def describe(self) -> str:
-        return self.title
+INSTALLED_APPS = ["reviews"]
+COMPOSE_COMPONENT_GROUP = "compose.example"
+COMPOSE_OUTPUT_DIR = BASE_DIR / "runtime"
+COMPOSE_OUTPUT_MODULE = "runtime"
+configure(globals())
 ```
 
-`concrete=True` asks django-compose to generate a concrete model from this
-abstract declaration. `Meta.abstract = True` still has its normal Django meaning:
-the authored class itself has no table.
+Installed package metadata makes `reviews` depend on `catalog`; catalog's app
+config also requires Django auth and contenttypes. Selection determines the
+contributors. The generated Item inherits their abstract declarations, and
+Django constructs the concrete fields and methods.
 
-The [reviews model](../examples/shop/reviews/models.py) names the model it
-extends using Django's familiar `app_label.Model` spelling:
-
-```python
-from django.db import models
-from django_compose.models import Composable
-
-
-class Rating(Composable, extends="catalog.Item"):
-    rating = models.PositiveSmallIntegerField(default=0)
-
-    class Meta:
-        abstract = True
-
-    def is_recommended(self) -> bool:
-        return self.rating >= 4
+```text
+examples/shop/
+├── catalog/, reviews/          # installed reusable source apps
+├── settings.py, manage.py      # authored project configuration and launcher
+├── runtime/catalog/
+│   ├── apps.py, models.py      # generated app configuration and concrete Item
+│   └── migrations/            # durable, authored Django migration history
+└── shop.sqlite3               # local database
 ```
 
-`Rating` contributes its fields and behavior to the generated `Item`; it does
-not become a second concrete model. The generated class inherits these abstract
-classes, and Django constructs its fields, managers and methods normally.
+Importing `catalog.models.Item` gives the abstract source. After Django setup,
+`apps.get_model("catalog", "Item")` gives the concrete model. Use lazy strings
+such as `models.ForeignKey("catalog.Item", on_delete=models.CASCADE)` in model
+relations. Source apps remain installed when the generated project runs.
 
-Importing `Item` from `catalog.models` gives you the abstract declaration.
-Use the app registry for the concrete model after setup. When declaring a
-relationship, prefer a lazy reference so Django resolves the concrete model:
+## Make it your own
 
-```python
-item = models.ForeignKey("catalog.Item", on_delete=models.CASCADE)
-```
+After changing a declaration, leave the shell and repeat `compose`,
+`makemigrations`, `migrate` and `compose --check` in fresh processes. Preserve
+migration history when rebuilding generated files.
 
-That field belongs inside a model declaration. The [models guide](models.md)
-shows complete declarations and explains the difference between adding fields
-to one table and creating a child model with its own table.
-
-## Change the model
-
-After changing a declaration, leave the old shell and use a new process for each
-command. From `examples/shop`, the usual schema-change sequence is:
-
-```sh
-uv run --project ../.. --no-sync python manage.py compose
-uv run --project ../.. --no-sync python manage.py makemigrations catalog auth contenttypes
-uv run --project ../.. --no-sync python manage.py migrate
-uv run --project ../.. --no-sync python manage.py compose --check
-```
-
-Review migrations before applying them to an existing database. Running the
-project uses the generated package; it refuses missing or stale generated output
-and asks you to compose again. `compose` itself does not apply database changes.
-
-To use your own apps, continue with [project configuration](configuration.md).
-For a larger collection of separately installed reusable apps, see
-[optional component selection](components.md).
+- [Configure your project](configuration.md) for complete settings, launcher and model files.
+- [Model declarations](models.md) explains extensions, multi-table inheritance and constraints.
+- [API guide](README.md) maps commands, Python entry points and app hooks.
+- [Example details](../examples/shop/README.md) cover its settings, artifacts, URLs and ASGI hooks.

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reorganize documentation around the project workflow, public APIs and app hooks,
+  with a shorter introduction and quick start.
 - Expose `index_components(distributions, *, group)` for prepared native package
   metadata; installed discovery delegates to the same validation and index.
 - Protect quoted and schema-qualified migration storage, including implicit

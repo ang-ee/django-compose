@@ -20,5 +20,5 @@ metadata parser, alternate index type or dependency is introduced.
 The API is additive. Existing installed-discovery callers need no migration;
 the previous inline index construction moves to the public owner.
 
-The public contract lives in [the API reference](../SPEC.md#serving-composition-and-metadata-inspection)
+The public contract lives in [the API reference](../SPEC.md#package-metadata)
 and the [component metadata guide](../components.md#inspect-package-metadata-without-importing-apps).

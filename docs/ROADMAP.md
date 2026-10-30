@@ -1,28 +1,17 @@
-# Current scope and planned work
+# Current scope and open work
 
-The current development preview is `0.1.0.dev2`. The
-[specification](SPEC.md) describes implemented behavior; the [quick start](quickstart.md)
-and [configuration guide](configuration.md) use that API today.
+The [API guide](README.md) describes what is available; the
+[reference](SPEC.md) defines its contracts. Release changes belong in the
+[changelog](../CHANGELOG.md).
 
-The current verification target is a plain Django project and a separately
-installed wheel. See [dependencies](dependencies.md) for the supported Python and
-Django constraints and [contributing](../CONTRIBUTING.md) for the checks.
+Current boundaries and remaining verification:
 
-## Remaining verification and release work
+- Component selection supports one Django app per participating distribution;
+  app-less and multi-app components are outside that contract. See [components](components.md).
+- Python, Django, platform and typing support follow the [compatibility guide](dependencies.md),
+  including the known property-setter typing limitation.
+- StatReloader edit, failure/recovery and file creation/deletion checks have run.
+  Watchman adapter tests cover the same declarations; acceptance against a native
+  Watchman daemon remains outstanding.
 
-URL/ASGI composition, models/ready artifact phases, receipt leases, dynamic
-history-only configurations and the managed development loop are implemented;
-see the [reference](SPEC.md), [integrations](extensions.md) and
-[configuration guide](configuration.md).
-
-The typing extra uses published forks that expose the required native extension
-APIs. Keep their compatible pins together and verify the typing matrix when
-updating them. Runtime use does not need the typing extra. See [dependencies](dependencies.md).
-
-Real StatReloader edit, failure/repair and file creation/deletion checks have run.
-Watchman adapter tests cover the same declarations, but a native Watchman daemon
-was unavailable; full backend acceptance remains outstanding. Future Django-series
-support also requires its own lifecycle, migration and typing matrix.
-
-Changes to a public contract go through the contributor
-[proposal process](proposals/README.md).
+Changes to a public contract use the [proposal process](proposals/README.md).
