@@ -603,6 +603,77 @@ def test_closure_app_identities_reuse_selected_configs_without_reactivation(inst
         closure.app_entries = ()
 
 
+@pytest.mark.parametrize("group", (None, GROUP))
+def test_closure_resolves_shared_entries_once_and_keeps_native_configs_local(installed, monkeypatch, group):
+    shared = installed.app("selection_shared")
+    left = installed.app("selection_left", requires=(shared, shared))
+    right = installed.app("selection_right", requires=(shared,))
+    root = installed.app("selection_root", requires=(left, right, shared, shared))
+    requirements = {root: (left, right, shared), left: (shared,), right: (shared,), shared: ()}
+    for name, dependencies in requirements.items():
+        installed.distribution(name, app=name, requires=dependencies)
+    native_create = AppConfig.create
+    activations = []
+
+    def create(entry):
+        config = native_create(entry)
+        activations.append((entry, config))
+        return config
+
+    monkeypatch.setattr(AppConfig, "create", create)
+    first = enabled_apps((root,), group=group)
+    assert len(activations) == len(requirements)
+    assert sorted(entry for entry, _ in activations) == sorted(requirements)
+    first_configs = dict(activations)
+    assert all(config is first_configs[config.name] for config in first.app_configs)
+    assert first.entries == (shared, left, right, root)
+    activations.clear()
+
+    second = enabled_apps((root,), group=group)
+    assert first == second
+    assert len(activations) == len(requirements)
+    assert sorted(entry for entry, _ in activations) == sorted(requirements)
+    second_configs = dict(activations)
+    assert all(config is second_configs[config.name] for config in second.app_configs)
+    assert all(second_configs[name] is not first_configs[name] for name in requirements)
+
+
+def test_closure_resolves_distinct_native_aliases_even_with_root_override(installed, monkeypatch):
+    target = installed.app(
+        "selection_target", configs="class SelectedConfig(DefaultConfig):\n    default = False\n"
+    )
+    default = target + ".apps.DefaultConfig"
+    explicit = target + ".apps.SelectedConfig"
+    root = installed.app("selection_root", requires=(target, default, target, default))
+    installed.distribution("root-provider", app=root, requires=("target-provider",))
+    installed.distribution("target-provider", app=target)
+    native_create = AppConfig.create
+    activations = []
+
+    def create(entry):
+        activations.append(entry)
+        return native_create(entry)
+
+    monkeypatch.setattr(AppConfig, "create", create)
+    closure = enabled_apps((root, explicit), group=GROUP)
+    assert closure.entries == (explicit, root)
+    assert sorted(activations) == sorted((root, target, default, explicit))
+
+
+def test_root_override_still_validates_native_dependency_config_collisions(installed):
+    target = installed.app(
+        "selection_target",
+        configs=(
+            "    default = True\n"
+            "class OtherConfig(DefaultConfig):\n    default = True\n"
+            "class SelectedConfig(DefaultConfig):\n    default = False\n"
+        ),
+    )
+    root = installed.app("selection_root", requires=(target,))
+    with pytest.raises(RuntimeError, match="more than one default AppConfig"):
+        enabled_apps((root, target + ".apps.SelectedConfig"))
+
+
 def test_closure_configs_keep_dependency_order_and_tuple_immutability(installed):
     dependency = installed.app("native_owner_dependency")
     root = installed.app("native_owner_root", requires=(dependency,))

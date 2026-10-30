@@ -240,12 +240,20 @@ def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
 
     Root configs are preselected and override dependency/default config choices.
     Conflicting dependency configs, duplicate native labels and cycles fail.
+    Each exact app/config string resolves to one native instance per call.
     """
     installed = installed_components(group) if group is not None else None
     root_entries = tuple(roots)
     if any(not isinstance(entry, str) for entry in root_entries):
         raise ImproperlyConfigured("Root INSTALLED_APPS entries must be native app strings")
-    root_configs = tuple((entry, AppConfig.create(entry)) for entry in root_entries)
+    resolved: dict[str, AppConfig] = {}
+
+    def resolve(entry: str) -> AppConfig:
+        if entry not in resolved:
+            resolved[entry] = AppConfig.create(entry)
+        return resolved[entry]
+
+    root_configs = tuple((entry, resolve(entry)) for entry in root_entries)
     normalized_roots = app_entries(Entry.from_config(config, entry) for entry, config in root_configs)
     root_names = tuple(entry.name for entry in normalized_roots)
     root_set = frozenset(root_names)
@@ -256,7 +264,7 @@ def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
     def component_entry(provider: str) -> str:
         assert installed is not None
         point = installed.entry_points[provider]
-        config = AppConfig.create(point.value)
+        config = resolve(point.value)
         if config.name != point.name:
             raise ImproperlyConfigured(
                 f"Entry point {point.name!r} from {provider!r} selects app {config.name!r}"
@@ -264,7 +272,7 @@ def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
         return point.value
 
     def choose(entry: str) -> str:
-        config = AppConfig.create(entry)
+        config = resolve(entry)
         previous = selected.get(config.name)
         if previous is None:
             selected[config.name] = (entry, config)
