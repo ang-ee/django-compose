@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0.dev2 (unreleased)
+## 0.1.0.dev2
 
 - Use component vocabulary for installed distributions, keeping distribution and
   Django app identities distinct in selection and isolated inspection results.

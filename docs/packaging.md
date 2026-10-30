@@ -1,18 +1,17 @@
 # Installation and deployment
 
-These docs describe the `0.1.0.dev2` development checkout. The published
-`0.1.0.dev1` preview predates component names and native provisioning; use a local
-checkout or wheel below when adopting those APIs.
+The current version is the development preview `0.1.0.dev2`, including component
+selection, isolated inspection and native provisioning.
 Python 3.14 is the verified environment. The declared constraints are Python
 `>=3.14` and Django `>=6.1.2,<6.2`; see [dependencies](dependencies.md).
 
 ## Install from PyPI
 
 ```sh
-python -m pip install django-compose==0.1.0.dev1
+python -m pip install django-compose==0.1.0.dev2
 ```
 
-Use `django-compose[typing]==0.1.0.dev1` for the optional composition plugin and
+Use `django-compose[typing]==0.1.0.dev2` for the optional composition plugin and
 its published typing dependencies; see [advanced typing](dependencies.md#advanced-typing).
 
 ## Install locally
