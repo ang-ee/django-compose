@@ -514,3 +514,57 @@ assert MigrationRecorder(connection).applied_migrations() == applied
 """,
         )
     )
+
+
+def test_initial_baseline_omits_custom_lifecycle_and_preserves_true_guard_lifecycle(baseline_host):
+    source = baseline_host / "alpha/compose_migrations/alpha/rename_legacy.py"
+    source.write_text(
+        source.read_text()
+        + """
+    def mutate_state(self, project_state, preserve=True):
+        raise AssertionError("baseline source state override ran")
+    def apply(self, project_state, schema_editor, collect_sql=False):
+        raise AssertionError("baseline source database override ran")
+"""
+    )
+    data = baseline_host / "alpha/compose_migrations/alpha/record_bootstrap.py"
+    data.write_text(
+        data.read_text()
+        + """
+    def mutate_state(self, project_state, preserve=True):
+        assert "value" in project_state.models[("alpha", "entry")].fields
+        return super().mutate_state(project_state, preserve)
+    def apply(self, project_state, schema_editor, collect_sql=False):
+        state = super().apply(project_state, schema_editor, collect_sql)
+        state.apps.get_model("alpha", "Entry")._base_manager.using(schema_editor.connection.alias).create(
+            value="custom lifecycle ran")
+        return state
+"""
+    )
+    successful(invoke(baseline_host, "compose"))
+    successful(
+        invoke(
+            baseline_host,
+            script="""
+import django
+django.setup()
+from django.apps import apps
+from django.core.management import call_command
+from django.db.migrations import Migration
+from django.db.migrations.loader import MigrationLoader
+call_command("makemigrations", "alpha", interactive=False, verbosity=0)
+loader = MigrationLoader(None, ignore_no_migrations=True)
+baseline = loader.disk_migrations["alpha", "rename_legacy"]
+assert baseline.operations == []
+assert type(baseline).mutate_state is Migration.mutate_state
+assert type(baseline).apply is Migration.apply
+assert Migration.operations == []
+data = loader.disk_migrations["alpha", "record_bootstrap"]
+assert type(data).mutate_state is not Migration.mutate_state
+assert type(data).apply is not Migration.apply
+call_command("migrate", "alpha", interactive=False, verbosity=0)
+assert list(apps.get_model("alpha", "Entry")._base_manager.values_list("value", flat=True)) == [
+    "transition ran", "custom lifecycle ran"]
+""",
+        )
+    )

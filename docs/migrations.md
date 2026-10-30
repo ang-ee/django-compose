@@ -191,8 +191,9 @@ Native prerequisite expansion contributes its exact newly initialized labels.
 Existing initial-looking files do not qualify, and ordinary planning/checks and
 history reset stay strict. The sealed `compose_initial_baseline = "satisfied"`
 metadata identifies satisfaction by the baseline, rather than execution of the
-original operations. Keep that native origin node after removing the declaration;
-it preserves source/body digests, imports and resolved graph edges and remains
+original operations. Planning and sealed history use a native empty migration,
+so source-class state and database lifecycle overrides are omitted too. Keep that
+native origin node after removing the declaration; it preserves source/body digests, imports and resolved graph edges and remains
 executable without the original source module. Imported helpers still need their
 providers.
 

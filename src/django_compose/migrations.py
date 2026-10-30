@@ -13,7 +13,7 @@ import importlib.util
 import stat
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -369,9 +369,14 @@ class TransitionBinding:
                 raise RuntimeError(f"{source.origin}: applies must return bool")
             baseline = not applies and source.initial_baseline and key[0] in initial_baselines
             if baseline:
-                # The graph owns this same Migration object. Substitute before
-                # computing any following transition's native ProjectState.
-                cast(list[Operation], source.migration.operations)[:] = []
+                # A native empty migration also omits source-class lifecycle
+                # overrides. Replace the graph owner before downstream state.
+                migration = Migration(key[1], key[0])
+                cast(list[Node], migration.dependencies).extend(source.migration.dependencies)
+                cast(list[Node], migration.run_before).extend(source.migration.run_before)
+                pending[key] = source = replace(source, migration=migration)
+                loader.disk_migrations[key] = migration
+                loader.graph.nodes[key] = migration
             elif not applies:
                 raise RuntimeError(
                     f"{source.origin}: false guard cannot prove a data transition completed; "
@@ -475,16 +480,19 @@ class TransitionBinding:
             body.decode()
             + MATERIALIZED_FOOTER
             + "\n"
+            + (
+                "from django.db.migrations import Migration as _ComposeInitialBaselineMigration\n"
+                "class Migration(_ComposeInitialBaselineMigration):\n"
+                "    operations = []\n"
+                if plan.initial_baseline
+                else ""
+            )
             + f"Migration.dependencies = {list(plan.dependencies)!r}\n"
             + f"Migration.run_before = {list(plan.run_before)!r}\n"
             + f"Migration.compose_origin = {plan.origin!r}\n"
             + f"Migration.compose_source_sha256 = {plan.source_sha256!r}\n"
             + f"Migration.compose_body_sha256 = {body_digest!r}\n"
-            + (
-                "Migration.operations = []\nMigration.compose_initial_baseline = 'satisfied'\n"
-                if plan.initial_baseline
-                else ""
-            )
+            + ("Migration.compose_initial_baseline = 'satisfied'\n" if plan.initial_baseline else "")
         ).encode()
         return payload + _SEAL_PREFIX + repr(hashlib.sha256(payload).hexdigest()).encode() + b"\n"
 

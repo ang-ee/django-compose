@@ -487,9 +487,10 @@ including existing rows adopted through native `migrate --fake-initial`. It does
 not assert that the original operations executed. Existing initial-looking
 files, reset-created initials and global read-only checks supply no exemption.
 True guards always retain their operations, including bootstrap and backfill
-work. A false-guard baseline binding substitutes zero native operations before
-downstream graph state calculation and seals `compose_initial_baseline =
-"satisfied"` plus the operations override in its materialization footer. This
+work. A false-guard baseline binding substitutes Django's native empty migration
+before downstream graph state calculation. Its materialization footer seals a
+native zero-operation Migration subclass and `compose_initial_baseline =
+"satisfied"`, omitting any source-class state or database lifecycle overrides. This
 durable origin must be retained like any other native history node after its
 source declaration is removed. Its source bytes and source SHA remain unchanged;
 adding the optional declaration does not rewrite or invalidate existing origins.
