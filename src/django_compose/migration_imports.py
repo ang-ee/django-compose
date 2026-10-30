@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import importlib.util
 import pkgutil
-import re
 import symtable
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -14,6 +13,7 @@ from pathlib import Path
 
 from django.apps import apps
 from django.conf import settings
+from packaging.utils import canonicalize_name
 
 from django_compose.sources import ModuleSource, SourceResolver
 
@@ -27,10 +27,6 @@ class HistoricalImport:
     distributions: tuple[str, ...] = ()
     kind: str = "unresolved"
     detail: str = ""
-
-
-def _distribution_key(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 class _ImportCalls(ast.NodeVisitor):
@@ -441,7 +437,7 @@ class MigrationImportReport:
 
     def removal_refusals(self, removing: Iterable[str]) -> tuple[str, ...]:
         """Refuse enabled providers, retained imports and unprovable dependencies."""
-        selected = {_distribution_key(name) for name in removing}
+        selected = {canonicalize_name(name) for name in removing}
         refusals = []
         for config in apps.get_app_configs():
             source = self.resolver.resolve(config.name)
@@ -449,14 +445,14 @@ class MigrationImportReport:
             config_source = self.resolver.resolve(type(config).__module__)
             providers.update(config_source.distributions)
             for name in sorted(providers):
-                if _distribution_key(name) in selected:
+                if canonicalize_name(name) in selected:
                     refusals.append(f"{name} provides enabled app {config.name}")
         for item in self.items:
             if item.kind in {"unsupported", "unresolved"}:
                 refusals.append(f"{item.path}: {item.kind} {item.module}: {item.detail}")
             if item.kind == "namespace":
                 if item.distributions and all(
-                    _distribution_key(name) in selected for name in item.distributions
+                    canonicalize_name(name) in selected for name in item.distributions
                 ):
                     refusals.append(
                         f"{item.path}: retained namespace import {item.module} needs at least one of "
@@ -464,7 +460,7 @@ class MigrationImportReport:
                     )
                 continue
             for name in item.distributions:
-                if _distribution_key(name) in selected:
+                if canonicalize_name(name) in selected:
                     refusals.append(f"{item.path}: retained import {item.module} requires {name}")
         return tuple(sorted(set(refusals)))
 

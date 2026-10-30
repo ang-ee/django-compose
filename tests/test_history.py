@@ -382,8 +382,14 @@ def test_dynamic_history_factory_preserves_native_labels_without_models(tmp_path
                 sys.modules.pop(name)
 
 
-def test_purge_refuses_table_still_owned_by_enabled_app(host):
+@pytest.mark.parametrize("quoted", [False, True])
+def test_purge_refuses_table_still_owned_by_enabled_app(host, quoted):
     root, run = host
+    if quoted:
+        initial = root / "history/alpha/0001_origin.py"
+        initial.write_text(
+            initial.read_text().replace("    ])]", "    ], options={'db_table': '\"alpha_record\"'})]")
+        )
     write(
         root,
         "beta/models.py",
@@ -586,3 +592,39 @@ assert updated.called
 assert not Path("other.sqlite3").exists()
 """
     )
+
+
+def test_history_scope_uses_native_vendor_eligibility_without_opening_databases(host):
+    root, run = host
+    initial = root / "history/alpha/0001_origin.py"
+    initial.write_text(
+        initial.read_text().replace("    ])]", "    ], options={'required_db_vendor': 'postgresql'})]")
+    )
+    run("""
+from django.db import connections
+from django_compose.migrations import _history_aliases
+connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
+with patch.object(connection, "cursor", side_effect=AssertionError("ineligible history")):
+    assert _history_aliases(MigrationLoader(None), {"alpha"}) == ()
+assert not Path("database.sqlite3").exists()
+assert not Path("other.sqlite3").exists()
+""")
+
+
+def test_history_scope_honors_native_required_database_features(host):
+    root, run = host
+    initial = root / "history/alpha/0001_origin.py"
+    initial.write_text(
+        initial.read_text().replace(
+            "    ])]", "    ], options={'required_db_features': ['compose_server_feature']})]"
+        )
+    )
+    run("""
+from django.db import connections
+from django_compose.migrations import _history_aliases
+connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
+with patch.object(connection, "cursor", side_effect=AssertionError("offline history queried")):
+    assert _history_aliases(MigrationLoader(None), {"alpha"}) == ()
+assert not Path("database.sqlite3").exists()
+assert not Path("other.sqlite3").exists()
+""")

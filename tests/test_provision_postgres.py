@@ -90,13 +90,13 @@ def _runner(database, digest, *, first, entered, release, invalidated, complete,
         connections.close_all()
 
 
-def _drive(private_environment: Path) -> None:
+def _database(private_environment: Path, *, prefix: str) -> dict[str, object]:
     environment = json.loads(private_environment.read_text())
     url = urlsplit(environment["DJANGO_COMPOSE_TEST_POSTGRES_URL"])
     assert url.scheme in {"postgres", "postgresql"}
     # The supplied base database name is deliberately never put in DATABASES.
-    unique_base = f"compose_prov_{os.getpid()}_{uuid4().hex[:10]}"
-    database = {
+    unique_base = f"{prefix}_{os.getpid()}_{uuid4().hex[:10]}"
+    return {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": unique_base,
         "USER": unquote(url.username or ""),
@@ -105,6 +105,11 @@ def _drive(private_environment: Path) -> None:
         "PORT": str(url.port or 5432),
         "OPTIONS": dict(parse_qsl(url.query)),
     }
+
+
+def _drive(private_environment: Path) -> None:
+    database = _database(private_environment, prefix="compose_prov")
+    unique_base = database["NAME"]
     _configure(database, pooled=False)
     from django.db import connections
 

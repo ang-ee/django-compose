@@ -23,6 +23,8 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management.base import CommandError
 from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, router, transaction
+from django.db.backends.base.base import BaseDatabaseWrapper
+from django.db.backends.utils import split_identifier
 from django.db.migrations import Migration
 from django.db.migrations.autodetector import MigrationAutodetector
 from django.db.migrations.executor import MigrationExecutor
@@ -488,26 +490,149 @@ class TransitionBinding:
         return tuple(written)
 
 
+def _storage_identifier(connection: BaseDatabaseWrapper, identifier: str) -> tuple[str, str]:
+    """Interpret only native Django's simple or double-quoted identifiers.
+
+    split_identifier() is not a SQL parser. Reject spellings it cannot represent
+    faithfully rather than silently turn quoted storage into an absent object.
+    """
+    namespace, name = split_identifier(identifier)
+    convert = connection.introspection.identifier_converter
+    limit = connection.ops.max_name_length()
+    if (
+        not name
+        or (limit is not None and max(len(namespace.encode()), len(name.encode())) > limit)
+        or '"' in namespace + name
+        or identifier.startswith(("`", "["))
+        or (namespace and connection.vendor != "postgresql")
+        or (
+            identifier != name
+            and convert(connection.ops.quote_name(identifier)) != convert(connection.ops.quote_name(name))
+            and not (namespace and identifier == f'"{namespace}"."{name}"')
+        )
+    ):
+        raise ImproperlyConfigured(
+            f"cannot resolve storage identifier {identifier!r} on {connection.alias!r}; "
+            "use a reviewed explicit migration for unsupported identifier syntax, length or namespace"
+        )
+    return convert(namespace), convert(name)
+
+
+def _storage_identity(connection: BaseDatabaseWrapper, table: str, cursor: Any) -> tuple[str, str] | None:
+    """Resolve physical storage through the backend's native catalog semantics."""
+    namespace, name = _storage_identifier(connection, table)
+    if connection.vendor == "postgresql":
+        cursor.execute(
+            "SELECT n.nspname, c.relname FROM pg_catalog.pg_class c "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE c.oid = pg_catalog.to_regclass(%s)",
+            [connection.ops.quote_name(table)],
+        )
+        row = cursor.fetchone()
+        return (row[0], row[1]) if row else None
+    if connection.vendor == "sqlite":
+        # SQLite resolves temp before main, and identifiers with native NOCASE.
+        # Do not substitute Python's broader Unicode case folding for that rule.
+        cursor.execute("PRAGMA database_list")
+        if any(row[1] not in {"main", "temp"} for row in cursor.fetchall()):
+            raise ImproperlyConfigured("cannot resolve storage across attached SQLite database namespaces")
+        cursor.execute(
+            "SELECT 'temp', name, 0 FROM sqlite_temp_master WHERE name = %s COLLATE NOCASE "
+            "UNION ALL SELECT 'main', name, 1 FROM sqlite_master WHERE name = %s COLLATE NOCASE "
+            "ORDER BY 3 LIMIT 1",
+            [name, name],
+        )
+        row = cursor.fetchone()
+        return (row[0], row[1]) if row else None
+    convert = connection.introspection.identifier_converter
+    tables = {convert(item) for item in connection.introspection.table_names(cursor)}
+    if name in tables:
+        return namespace, name
+    if connection.features.ignores_table_name_case:
+        raise ImproperlyConfigured(f"cannot prove case-sensitive storage identity for {table!r}")
+    return None
+
+
+def _allows_migrate_model(operation: Operation, alias: str, model: Any, *, offline: bool) -> bool:
+    # Feature properties can connect (e.g. MySQL server metadata). Offline
+    # planning must conservatively retain an alias instead of probing it.
+    if offline and model._meta.required_db_features and not model._meta.required_db_vendor:
+        return router.allow_migrate_model(alias, model)
+    return operation.allow_migrate_model(alias, model)
+
+
+def _model_storage(model: Any) -> Iterator[Any]:
+    """Native schema deletion owns implicit through tables with their model."""
+    yield model
+    for field in model._meta.local_many_to_many:
+        through = field.remote_field.through
+        if through._meta.auto_created:
+            yield through
+
+
 def _shared_table_drops(
     before: ProjectState,
     after: ProjectState,
     changes: dict[str, list[Migration]],
+    *,
+    database: bool = False,
 ) -> None:
-    owners: dict[str, set[str]] = {}
-    for model in after.apps.get_models(include_swapped=True):
-        if model._meta.managed and not model._meta.proxy:
-            owners.setdefault(model._meta.db_table, set()).add(model._meta.label_lower)
+    owners = tuple(
+        (owner, storage)
+        for owner in after.apps.get_models(include_swapped=True)
+        for storage in _model_storage(owner)
+    )
     for label, migrations in sorted(changes.items()):
         for migration in migrations:
             for operation in migration.operations:
-                if isinstance(operation, DeleteModel):
-                    model = before.apps.get_model(label, operation.name)
-                    remaining = owners.get(model._meta.db_table, set()) - {model._meta.label_lower}
-                    if model._meta.managed and not model._meta.proxy and remaining:
+                if not isinstance(operation, DeleteModel):
+                    continue
+                model = before.apps.get_model(label, operation.name)
+                for alias in sorted(connections):
+                    connection = connections[alias]
+                    try:
+                        if not _allows_migrate_model(operation, alias, model, offline=not database):
+                            continue
+                        for storage in _model_storage(model):
+                            table = storage._meta.db_table
+                            identity = _storage_identifier(connection, table)
+                            remaining = set()
+                            for owner, active_storage in owners:
+                                if (
+                                    owner._meta.label_lower == model._meta.label_lower
+                                    or not _allows_migrate_model(
+                                        operation, alias, owner, offline=not database
+                                    )
+                                ):
+                                    continue
+                                active_table = active_storage._meta.db_table
+                                other = _storage_identifier(connection, active_table)
+                                if identity == other:
+                                    remaining.add(active_storage._meta.label_lower)
+                                elif (identity[1] == other[1] and (not identity[0] or not other[0])) or (
+                                    connection.vendor in {"sqlite", "mysql"}
+                                    and identity[1].casefold() == other[1].casefold()
+                                ):
+                                    if not database:
+                                        raise ImproperlyConfigured(
+                                            f"cannot resolve shared storage {table!r} and "
+                                            f"{active_table!r} offline; use a reviewed explicit migration"
+                                        )
+                                    with connection.cursor() as cursor:
+                                        physical = _storage_identity(connection, table, cursor)
+                                        if physical is not None and physical == _storage_identity(
+                                            connection, active_table, cursor
+                                        ):
+                                            remaining.add(active_storage._meta.label_lower)
+                            if remaining:
+                                raise CommandError(
+                                    f"unsafe autodetected model deletion: table {table!r} "
+                                    f"is still owned by {', '.join(sorted(remaining))} on {alias!r}"
+                                )
+                    except (DatabaseError, ImproperlyConfigured) as error:
                         raise CommandError(
-                            f"unsafe autodetected model deletion: table {model._meta.db_table!r} "
-                            f"is still owned by {', '.join(sorted(remaining))}"
-                        )
+                            f"cannot prove shared storage safe on {alias!r}: {error}"
+                        ) from error
 
 
 class DropGuardAutodetector(MigrationAutodetector):
@@ -531,7 +656,7 @@ class DropGuardAutodetector(MigrationAutodetector):
         migration_name: str | None = None,
     ) -> dict[str, list[Migration]]:
         changes = super().changes(graph, trim_to_apps, convert_apps, migration_name)
-        _shared_table_drops(self.from_state, self.to_state, changes)
+        _shared_table_drops(self.from_state, self.to_state, changes, database=True)
         refusals: list[str] = []
         rows: Callable[[str], Any]
         for label, migrations in sorted(changes.items()):
@@ -565,11 +690,9 @@ class DropGuardAutodetector(MigrationAutodetector):
                             rows = column_rows
                         else:
                             continue
-                        refusals.extend(self._holding(model, rows, table, column))
+                        refusals.extend(self._holding(operation, model, rows, table, column))
                     elif isinstance(operation, DeleteModel):
                         model = self.from_state.apps.get_model(label, operation.name)
-                        if model._meta.proxy or not model._meta.managed or model._meta.swapped:
-                            continue
                         integrations = tuple(
                             integration
                             for integration in resolve_integrations(
@@ -590,7 +713,9 @@ class DropGuardAutodetector(MigrationAutodetector):
                             }
                             return model._base_manager.exclude(pk__in=retired)
 
-                        refusals.extend(self._holding(model, remaining_rows, model._meta.db_table, None))
+                        refusals.extend(
+                            self._holding(operation, model, remaining_rows, model._meta.db_table, None)
+                        )
         if refusals:
             raise CommandError(
                 "unsafe autodetected drop: "
@@ -601,22 +726,47 @@ class DropGuardAutodetector(MigrationAutodetector):
 
     @staticmethod
     def _holding(
+        operation: Operation,
         model: type[Any],
         rows: Callable[[str], Any],
         table: str,
         column: str | None,
     ) -> Iterator[str]:
         for alias in sorted(connections):
-            if not router.allow_migrate_model(alias, model):
-                continue
             connection = connections[alias]
             try:
+                if not operation.allow_migrate_model(alias, model):
+                    continue
                 with connection.cursor() as cursor:
-                    present = table in connection.introspection.table_names(cursor)
+                    present = _storage_identity(connection, table, cursor) is not None
                     if present and column is not None:
-                        present = column in {
-                            f.name for f in connection.introspection.get_table_description(cursor, table)
-                        }
+                        namespace, name = _storage_identifier(connection, column)
+                        if namespace:
+                            raise ImproperlyConfigured(f"column {column!r} cannot have a namespace")
+                        if connection.vendor == "sqlite":
+                            cursor.execute(
+                                "SELECT name FROM pragma_table_xinfo(%s) WHERE name = %s COLLATE NOCASE",
+                                [split_identifier(table)[1], name],
+                            )
+                            present = cursor.fetchone() is not None
+                        else:
+                            convert = connection.introspection.identifier_converter
+                            if connection.vendor == "postgresql":
+                                # Native PostgreSQL introspection only describes
+                                # visible unqualified tables; the cursor owns the
+                                # actual columns of this fully quoted relation.
+                                cursor.execute(f"SELECT * FROM {connection.ops.quote_name(table)} LIMIT 0")
+                                columns = {convert(field[0]) for field in cursor.description}
+                            else:
+                                columns = {
+                                    convert(field.name)
+                                    for field in connection.introspection.get_table_description(
+                                        cursor, split_identifier(table)[1]
+                                    )
+                                }
+                            present = name in columns
+                            if not present and connection.vendor == "mysql":
+                                raise ImproperlyConfigured(f"cannot prove column identity for {column!r}")
                 count = rows(alias).using(alias).count() if present else 0
             except (DatabaseError, ImproperlyConfigured) as error:
                 yield (
@@ -745,7 +895,9 @@ def _history_aliases(loader: MigrationLoader, labels: set[str]) -> tuple[str, ..
         for model in state.apps.get_models():
             if model._meta.app_label in labels:
                 model_labels.add(model._meta.app_label)
-                aliases.update(alias for alias in connections if router.allow_migrate_model(alias, model))
+                aliases.update(
+                    alias for alias in connections if Operation().allow_migrate_model(alias, model)
+                )
 
     def include_operations(operations: Iterable[Operation], label: str, state: ProjectState) -> None:
         include(state)
@@ -841,7 +993,7 @@ def retire_history(label: str, *, purge: bool = False) -> None:
             changes = MigrationAutodetector(before, after).changes(
                 graph=loader.graph, trim_to_apps={label}, migration_name="compose_purge"
             )
-            _shared_table_drops(before, after, changes)
+            _shared_table_drops(before, after, changes, database=True)
             for migration in changes.get(label, ()):
                 writer = MigrationWriter(migration, include_header=False)
                 path = Path(writer.path)

@@ -475,3 +475,238 @@ expect(RuntimeError, "false guard", lambda: reset_migration_history(("alpha",)))
 assert files() == before
 assert records == set(MigrationRecorder(connection).applied_migrations())
 """)
+
+
+@pytest.mark.parametrize(
+    "table,column",
+    [
+        ('"quoted_records"', "old"),
+        ("quoted_records", '"old"'),
+        ('"quoted_records"', '"old"'),
+        ("QuOtEd_ReCoRdS", "OlD"),
+    ],
+)
+@pytest.mark.parametrize("drop", ["column", "table"])
+def test_quoted_storage_cannot_hide_populated_rows(host, table, column, drop):
+    _, run = host
+    run(f"""
+from django.db.migrations.graph import MigrationGraph
+before = ProjectState()
+before.add_model(ModelState("alpha", "Item", [
+    ("id", models.AutoField(primary_key=True)),
+    ("value", models.CharField(max_length=40, db_column={column!r}, default="")),
+], options={{"db_table": {table!r}}}))
+model = before.apps.get_model("alpha", "Item")
+physical = before.clone()
+if {table!r} == "QuOtEd_ReCoRdS":
+    physical.models[("alpha", "item")].options["db_table"] = "quoted_records"
+    physical.models[("alpha", "item")].fields["value"].db_column = "old"
+with connection.schema_editor() as editor:
+    editor.create_model(physical.apps.get_model("alpha", "Item"))
+model._base_manager.create(value="valuable")
+after = before.clone()
+if {drop!r} == "column":
+    after.remove_field("alpha", "item", "value")
+else:
+    after.remove_model("alpha", "item")
+graph = MigrationGraph()
+graph.add_node(("alpha", "0001"), migrations.Migration("0001", "alpha"))
+original = files()
+expect(CommandError, "holds data", lambda: DropGuardAutodetector(before, after).changes(graph))
+assert files() == original
+assert model._base_manager.get().value == "valuable"
+""")
+
+
+@pytest.mark.parametrize("active_table", ["alpha_record", "ALPHA_RECORD"])
+def test_shared_table_identity_survives_quotes_and_sqlite_case(host, active_table):
+    _, run = host
+    run(f"""
+from django_compose.migrations import _shared_table_drops
+loader = MigrationLoader(None)
+before = loader.project_state()
+before.models[("alpha", "record")].options["db_table"] = '"alpha_record"'
+after = before.clone()
+after.remove_model("alpha", "record")
+after.add_model(ModelState("beta", "Adopted", [("id", models.AutoField(primary_key=True))],
+                           options={{"db_table": {active_table!r}}}))
+model = before.apps.get_model("alpha", "Record")
+with connection.schema_editor() as editor:
+    editor.create_model(model)
+# Even an empty shared table is protected independently of the row proof.
+expect(CommandError, "still owned", lambda: DropGuardAutodetector(before, after).changes(loader.graph))
+with patch.object(connection, "cursor", side_effect=AssertionError("offline binding queried")):
+    expected = "offline" if {active_table!r} == "ALPHA_RECORD" else "still owned"
+    changes = {{"alpha": [migrations.Migration("drop", "alpha")]}}
+    changes["alpha"][0].operations = [migrations.DeleteModel("Record")]
+    expect(CommandError, expected, lambda: _shared_table_drops(before, after, changes))
+assert model._base_manager.count() == 0
+""")
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+def test_shared_storage_is_scoped_to_native_eligible_aliases(host, overlap):
+    _, run = host
+    run(f"""
+from django.db import connections, router
+connections.settings["other"] = {{**settings.DATABASES["default"], "NAME": "other.sqlite3"}}
+loader = MigrationLoader(None)
+before = loader.project_state()
+after = before.clone()
+after.remove_model("alpha", "record")
+after.add_model(ModelState("beta", "Adopted", [("id", models.AutoField(primary_key=True))],
+                           options={{"db_table": '"alpha_record"'}}))
+class Routes:
+    def allow_migrate(self, db, app_label, **hints):
+        return db == ("other" if app_label == "beta" and not {overlap!r} else "default")
+with patch.object(router, "routers", [Routes()]):
+    action = lambda: DropGuardAutodetector(before, after).changes(loader.graph)
+    if {overlap!r}:
+        expect(CommandError, "still owned", action)
+    else:
+        assert action()["alpha"]
+assert not Path("other.sqlite3").exists()
+""")
+
+
+@pytest.mark.parametrize("restriction", ["vendor", "feature", "unmanaged"])
+@pytest.mark.parametrize("drop", ["column", "table"])
+def test_native_ineligible_models_never_probe_unavailable_database(host, restriction, drop):
+    _, run = host
+    run(f"""
+loader = MigrationLoader(None)
+before = loader.project_state()
+options = before.models[("alpha", "record")].options
+if {restriction!r} == "vendor":
+    options["required_db_vendor"] = "postgresql"
+elif {restriction!r} == "feature":
+    options["required_db_features"] = ["compose_missing_feature"]
+elif {restriction!r} == "unmanaged":
+    options["managed"] = False
+after = before.clone()
+if {drop!r} == "column":
+    after.remove_field("alpha", "record", "old")
+else:
+    after.remove_model("alpha", "record")
+with patch.object(connection, "cursor", side_effect=AssertionError("ineligible database")):
+    DropGuardAutodetector(before, after).changes(loader.graph)
+""")
+
+
+def test_drop_guard_uses_the_actual_operations_native_policy(host):
+    _, run = host
+    run("""
+loader = MigrationLoader(None)
+before = loader.project_state()
+after = before.clone()
+after.remove_field("alpha", "record", "old")
+with patch.object(migrations.RemoveField, "allow_migrate_model", return_value=False) as allowed:
+    with patch.object(connection, "cursor", side_effect=AssertionError("excluded operation")):
+        assert DropGuardAutodetector(before, after).changes(loader.graph)["alpha"]
+assert allowed.call_args.args == ("default", before.apps.get_model("alpha", "Record"))
+""")
+
+
+def test_offline_binding_keeps_uncertain_feature_routes_without_queries(host):
+    root, run = host
+    initial = root / "history/alpha/0001_origin.py"
+    initial.write_text(
+        initial.read_text().replace(
+            "    ])]", "    ], options={'required_db_features': ['compose_server_feature']})]"
+        )
+    )
+    run("""
+from unittest.mock import PropertyMock
+loader = MigrationLoader(None)
+after = loader.project_state()
+after.remove_model("alpha", "record")
+after.add_model(ModelState("beta", "Unrelated", [("id", models.AutoField(primary_key=True))]))
+with patch.object(connection, "cursor", side_effect=AssertionError("offline binding queried")):
+    with patch.object(type(connection.features), "compose_server_feature", create=True,
+                      new_callable=PropertyMock, side_effect=AssertionError("offline feature queried")):
+        assert TransitionBinding(labels=("alpha", "beta"), declarations=[]).plan(apps=after.apps) == ()
+assert not Path("database.sqlite3").exists()
+""")
+
+
+@pytest.mark.parametrize("implicit_owner", ["deleted", "active"])
+@pytest.mark.parametrize("shared_alias", [False, True])
+def test_shared_guard_protects_native_implicit_through_storage(host, implicit_owner, shared_alias):
+    _, run = host
+    run(f"""
+from django.db import connections, router
+from django.db.migrations.graph import MigrationGraph
+connections.settings["other"] = {{**settings.DATABASES["default"], "NAME": "other.sqlite3"}}
+before = ProjectState()
+before.add_model(ModelState("beta", "Tag", [("id", models.AutoField(primary_key=True))]))
+fields = [("id", models.AutoField(primary_key=True))]
+if {implicit_owner!r} == "deleted":
+    before.add_model(ModelState("alpha", "Record", fields + [
+        ("tags", models.ManyToManyField("beta.Tag", db_table='"adopted_links"')),
+    ]))
+    before.add_model(ModelState("beta", "Adopted", fields, options={{"db_table": "adopted_links"}}))
+else:
+    before.add_model(ModelState("alpha", "Record", fields, options={{"db_table": "adopted_links"}}))
+    before.add_model(ModelState("beta", "Adopted", fields + [
+        ("tags", models.ManyToManyField("beta.Tag", db_table='"adopted_links"')),
+    ]))
+after = before.clone()
+after.remove_model("alpha", "record")
+graph = MigrationGraph()
+for label in ("alpha", "beta"):
+    graph.add_node((label, "0001"), migrations.Migration("0001", label))
+if {shared_alias!r}:
+    tag = before.apps.get_model("beta", "Tag")
+    implicit = before.apps.get_model(
+        "alpha" if {implicit_owner!r} == "deleted" else "beta",
+        "Record" if {implicit_owner!r} == "deleted" else "Adopted",
+    )
+    with connection.schema_editor() as editor:
+        editor.create_model(tag)
+        editor.create_model(implicit)
+    row = implicit._base_manager.create()
+    row.tags.add(tag._base_manager.create())
+original = files()
+class Routes:
+    def allow_migrate(self, db, app_label, model_name=None, **hints):
+        # Django routes the native operation's owning model, not its implicit
+        # through model. A through-specific route must not defeat protection.
+        if model_name and model_name.endswith("_tags"):
+            raise AssertionError("independent through-model routing")
+        return db == ("default" if app_label == "alpha" or {shared_alias!r} else "other")
+with patch.object(router, "routers", [Routes()]):
+    action = lambda: DropGuardAutodetector(before, after).changes(graph)
+    if {shared_alias!r}:
+        expect(CommandError, "still owned by beta.adopted", action)
+    else:
+        assert action()["alpha"]
+assert files() == original
+if {shared_alias!r}:
+    assert row.tags.count() == 1
+assert not Path("other.sqlite3").exists()
+""")
+
+
+def test_unsupported_attached_sqlite_namespace_cannot_prove_storage_absent(host):
+    _, run = host
+    run("""
+from django.db.migrations.graph import MigrationGraph
+before = ProjectState()
+before.add_model(ModelState("alpha", "Item", [
+    ("id", models.AutoField(primary_key=True)),
+    ("value", models.CharField(max_length=40, default="")),
+], options={"db_table": "attached_records"}))
+with connection.cursor() as cursor:
+    cursor.execute("ATTACH DATABASE ':memory:' AS extra")
+    cursor.execute("CREATE TABLE extra.attached_records (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+model = before.apps.get_model("alpha", "Item")
+model._base_manager.create(value="valuable attached data")
+after = before.clone()
+after.remove_field("alpha", "item", "value")
+graph = MigrationGraph()
+graph.add_node(("alpha", "0001"), migrations.Migration("0001", "alpha"))
+original = files()
+expect(CommandError, "attached SQLite", lambda: DropGuardAutodetector(before, after).changes(graph))
+assert model._base_manager.get().value == "valuable attached data"
+assert files() == original
+""")
