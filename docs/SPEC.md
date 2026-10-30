@@ -103,6 +103,30 @@ missing active installed requirements and cycles fail. The selector reads
 installed metadata; it does not install packages or compose settings. See
 [installed addons](addons.md) for complete package examples.
 
+`django_compose.addons.inspect_apps(roots, *, group=None) -> AppSelection`
+delegates the same selection to a fresh current-interpreter subprocess. It uses
+the caller's import paths, clears `DJANGO_SETTINGS_MODULE` and
+`DJANGO_COMPOSE_MODE` in the child, and disables bytecode writes. The caller's
+registry, settings and imported app modules are unchanged. The inspector invokes
+no Django setup, model loading, app settings contributions, composition or
+database work. Selected native app/config modules must be safe before setup;
+their import behavior remains Django-owned.
+
+`AppSelection` is a `TypedDict` containing detached JSON-compatible facts:
+`app_entries` is a dependency-ordered list of dictionaries with the existing
+`Entry` fields (`name`, `label`, `config`, `path`, `entry`); `roots` is a list of
+native root app names in authored order; `required` and `addons` are sorted lists
+of native app names; `dependencies` maps every selected native name to its list
+of direct dependency names. No native app instance crosses the process boundary.
+Selection failures raise `ImproperlyConfigured` with the child diagnostic.
+
+The standalone `django-compose inspect-apps [--group GROUP] [APP_ENTRY ...]`
+and `python -m django_compose inspect-apps ...` commands print this object as JSON
+without importing native management dispatch or project settings. Zero roots
+produce an empty selection. Import diagnostics go to stderr, separately from
+JSON stdout; selection failures exit with status 1. This is a standalone command,
+not a Django management command.
+
 ## Settings and snapshots
 
 `django_compose.conf.configure(namespace) -> None` is called once at the end of
@@ -151,8 +175,12 @@ loader adapter for preserving this provenance. Loaders call it instead of
 upstream `django_yamlconf.expand_attribute_refs`, then use native `inject_attr`
 and retain `_YAMLCONF_ATTRIBUTES` in the namespace passed to `configure` once.
 It delegates native expansion while updating only `evalue` fields; `value` and
-`history` templates remain intact. Native logged errors retain upstream behavior,
-so strict loaders keep their error handler active. Ordinary upstream expansion
+`history` templates remain intact. Native logged errors retain upstream behavior;
+strict loaders use `conf.fail_on_yamlconf_errors()` around loading, expansion
+and injection. This context manager raises `ImproperlyConfigured` with the native
+message for `django_yamlconf` ERROR records, preserves normal warning behavior,
+and always removes its temporary handler. Compiler contributions use the same
+context. Ordinary upstream expansion
 mutates list/dict templates: once erased from both value and history, their
 reference origins cannot be recovered from already-expanded metadata. See the
 [native loader handoff](configuration.md#native-yamlconf-loader-handoff).

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from graphlib import CycleError, TopologicalSorter
 from importlib import metadata
 from types import MappingProxyType
+from typing import TypedDict, cast
 
 from django.apps import AppConfig
 from django.core.exceptions import ImproperlyConfigured
@@ -41,6 +46,75 @@ class Closure:
     def entries(self) -> tuple[str, ...]:
         """Native INSTALLED_APPS strings, projected from canonical app identities."""
         return tuple(entry.entry for entry in self.app_entries)
+
+
+class AppSelection(TypedDict):
+    """Detached JSON facts from a resolved Closure, without native app instances."""
+
+    app_entries: list[dict[str, str]]
+    roots: list[str]
+    required: list[str]
+    addons: list[str]
+    dependencies: dict[str, list[str]]
+
+
+def inspect_apps(roots: Iterable[str], *, group: str | None = None) -> AppSelection:
+    """Resolve apps in a fresh interpreter without activating them in this process.
+
+    The child uses enabled_apps and ordinary pre-setup AppConfig imports. It
+    inherits this interpreter's import paths, but not Django settings or compose
+    mode selectors, and writes no bytecode. It performs no setup, model loading,
+    settings contributions, composition or database work. Native app/config
+    modules must remain safe to import before Django setup.
+
+    Identity dictionaries retain Entry's name, label, config, path and entry
+    fields in dependency order. Roots retain authored order; required and addons
+    are sorted native app names. Selection failures raise ImproperlyConfigured.
+    """
+    request = {"roots": list(roots), "group": group, "pythonpath": sys.path}
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"DJANGO_SETTINGS_MODULE", "DJANGO_COMPOSE_MODE"}
+    }
+    child = """import json
+import sys
+from contextlib import redirect_stdout
+try:
+    request = json.load(sys.stdin)
+    sys.path[:] = request.pop('pythonpath')
+    with redirect_stdout(sys.stderr):
+        from django_compose.addons import _inspect_apps
+        result = _inspect_apps(**request)
+except Exception as error:
+    print(str(error), file=sys.stderr)
+    raise SystemExit(1)
+print(json.dumps(result, sort_keys=True))
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", child],
+        input=json.dumps(request),
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        raise ImproperlyConfigured(result.stderr.strip() or "App selection subprocess failed")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return cast(AppSelection, json.loads(result.stdout))
+
+
+def _inspect_apps(roots: Iterable[str], *, group: str | None = None) -> AppSelection:
+    closure = enabled_apps(roots, group=group)
+    return {
+        "app_entries": [asdict(entry) for entry in closure.app_entries],
+        "roots": list(closure.roots),
+        "required": sorted(closure.required),
+        "addons": sorted(closure.addons),
+        "dependencies": {name: list(dependencies) for name, dependencies in closure.dependencies.items()},
+    }
 
 
 @dataclass(frozen=True)

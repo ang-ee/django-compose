@@ -1,10 +1,11 @@
 """Installed native metadata drives deterministic app activation before setup."""
 
 import importlib
+import json
 import os
 import subprocess
 import sys
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, asdict
 from importlib import metadata
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from django.core.exceptions import ImproperlyConfigured
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-from django_compose.addons import active_requirements, enabled_apps, installed_addons
+from django_compose.addons import active_requirements, enabled_apps, inspect_apps, installed_addons
 
 GROUP = "testsite.addons"
 
@@ -536,3 +537,102 @@ def test_native_distribution_precedence_with_actual_dist_and_egg_info(tmp_path, 
     assert index.entry_points["compose-native-shadow"] == next(iter(winner.entry_points.select(group=GROUP)))
     assert tuple(map(str, index.active_requirements("compose-native-shadow"))) == tuple(winner.requires)
     assert not any(name.startswith("unimportable") for name in sys.modules)
+
+
+def test_isolated_selection_projects_existing_closure_and_keeps_native_configs_in_child(installed, capsys):
+    dependency = installed.app("inspected_dependency", label="custom_dependency")
+    root = installed.app("inspected_root", requires=(dependency,))
+    installed.distribution("inspected-root", app=root, requires=("inspected-dependency",))
+    installed.distribution("inspected-dependency", app=dependency)
+    installed.distribution("inspected-disabled", app="must_not_import", entry="must_not_import.apps.Config")
+    expected = enabled_apps((root,), group=GROUP)
+    for entry in expected.app_entries:
+        package = Path(entry.path)
+        config = package / "apps.py"
+        config.write_text(config.read_text() + '\nprint("native config imported")\n')
+        (package / "autoconfig.py").write_text("raise AssertionError('settings contributions loaded')\n")
+        for module in tuple(sys.modules):
+            if module == entry.name or module.startswith(entry.name + "."):
+                sys.modules.pop(module)
+    for entry in expected.app_entries:
+        for cache in Path(entry.path).rglob("*.pyc"):
+            cache.unlink()
+
+    result = inspect_apps(iter((root,)), group=GROUP)
+
+    assert result == {
+        "app_entries": [asdict(entry) for entry in expected.app_entries],
+        "roots": list(expected.roots),
+        "required": sorted(expected.required),
+        "addons": sorted(expected.addons),
+        "dependencies": {name: list(edges) for name, edges in expected.dependencies.items()},
+    }
+    assert json.loads(json.dumps(result)) == result
+    assert not any(name in sys.modules for name in (root, dependency, "must_not_import"))
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "native config imported" in output.err
+    assert not [cache for entry in expected.app_entries for cache in Path(entry.path).rglob("*.pyc")]
+
+
+def test_isolated_selection_uses_fresh_native_process_from_configured_parent(tmp_path):
+    package = tmp_path / "dormant_inspection"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "models.py").write_text("raise AssertionError('models imported')\n")
+    (package / "autoconfig.py").write_text("raise AssertionError('autoconfig imported')\n")
+    (package / "apps.py").write_text("""import os
+import sys
+from django.apps import AppConfig, apps
+from django import conf
+assert not conf.settings.configured
+assert not apps.ready
+assert 'DJANGO_SETTINGS_MODULE' not in os.environ
+assert 'DJANGO_COMPOSE_MODE' not in os.environ
+assert sys.dont_write_bytecode
+assert not {'django.db.models', 'django_compose.build', 'django_compose.artifacts',
+            'django_compose.conf', 'django_compose.management'}.intersection(sys.modules)
+class Config(AppConfig):
+    name = 'dormant_inspection'
+    def import_models(self): raise AssertionError('import_models called')
+    def ready(self): raise AssertionError('ready called')
+""")
+    script = """import os
+import sys
+import django
+from django.conf import settings
+settings.configure(INSTALLED_APPS=[], SECRET_KEY='test')
+django.setup()
+os.environ['DJANGO_SETTINGS_MODULE'] = 'must_not_load_settings'
+os.environ['DJANGO_COMPOSE_MODE'] = 'write'
+from django_compose.addons import inspect_apps
+result = inspect_apps(['dormant_inspection'])
+assert result['roots'] == ['dormant_inspection']
+assert result['app_entries'][0]['config'] == 'dormant_inspection.apps.Config'
+assert not any(name.startswith('dormant_inspection') for name in sys.modules)
+assert os.environ['DJANGO_SETTINGS_MODULE'] == 'must_not_load_settings'
+assert os.environ['DJANGO_COMPOSE_MODE'] == 'write'
+"""
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    environment = {**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), *sys.path])}
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", script],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    after = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    assert after == before
+
+
+@pytest.mark.parametrize("failure", ["cycle", "missing", "group"])
+def test_isolated_selection_retains_owner_diagnostics(installed, failure):
+    root = installed.app("inspected_failure", requires=("inspected_failure",) if failure == "cycle" else ())
+    if failure == "missing":
+        installed.distribution("inspected-failure", app=root, requires=("missing-inspection-dependency",))
+    group = "" if failure == "group" else GROUP
+    with pytest.raises(ImproperlyConfigured, match="cycle|missing installed distribution|group"):
+        inspect_apps((root,), group=group)
+    assert root not in sys.modules

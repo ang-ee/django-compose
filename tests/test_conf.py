@@ -1,6 +1,7 @@
 """Project settings compose through native app and yamlconf owners before setup."""
 
 import importlib
+import logging
 import os
 import subprocess
 import sys
@@ -598,6 +599,46 @@ def test_native_loader_adapter_preserves_opaque_values_and_template_containers()
     assert original == {"nested": ["{BASE_DIR}/data"]}
     assert attributes["CUSTOM_INPUT"]["evalue"] == {"nested": ["/project/data"]}
     assert attributes["LOGGING"]["evalue"]["stream"] is sys.stderr
+
+
+def test_public_yamlconf_error_scope_fails_native_expansion_and_preserves_provenance():
+    import django_yamlconf
+
+    attributes = {}
+    template = {"nested": ["{MISSING}"]}
+    django_yamlconf.add_attr_info(attributes, "BROKEN", template, "loader")
+    logger = logging.getLogger("django_yamlconf")
+    previous = tuple(logger.handlers)
+
+    with pytest.raises(ImproperlyConfigured, match='Undefined attribute "\\{MISSING\\}"'):
+        with conf.fail_on_yamlconf_errors():
+            conf.expand_attribute_refs(attributes)
+
+    assert tuple(logger.handlers) == previous
+    assert attributes["BROKEN"]["value"] is template
+    assert template == {"nested": ["{MISSING}"]}
+    # Without the strict scope, the adapter retains native logged-error behavior.
+    conf.expand_attribute_refs(attributes)
+
+
+def test_public_yamlconf_error_scope_preserves_warnings_and_nested_cleanup(caplog):
+    logger = logging.getLogger("django_yamlconf")
+    previous = tuple(logger.handlers)
+
+    with conf.fail_on_yamlconf_errors():
+        logger.warning("native warning remains a warning")
+        with pytest.raises(ImproperlyConfigured, match="nested failure"):
+            with conf.fail_on_yamlconf_errors():
+                logger.error("nested %s", "failure")
+        with pytest.raises(ImproperlyConfigured, match="outer scope still active"):
+            logger.error("outer scope still active")
+
+    assert "native warning remains a warning" in caplog.text
+    assert tuple(logger.handlers) == previous
+    with pytest.raises(RuntimeError, match="loader failure"):
+        with conf.fail_on_yamlconf_errors():
+            raise RuntimeError("loader failure")
+    assert tuple(logger.handlers) == previous
 
 
 @pytest.mark.parametrize(

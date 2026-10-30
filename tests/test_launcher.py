@@ -73,10 +73,74 @@ def test_native_defaults_setup_and_ordered_contexts(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.parametrize("arguments", [("help",), ("--version",), ("compose", "--help")])
+@pytest.mark.parametrize(
+    "arguments", [("help",), ("--version",), ("compose", "--help"), ("inspect-apps", "--help")]
+)
 def test_settings_free_paths(tmp_path: Path, arguments: tuple[str, ...]) -> None:
     result = invoke(tmp_path, *arguments)
     assert result.returncode == 0, result.stderr
+
+
+def test_app_inspection_cli_is_settings_free_and_separates_import_output(tmp_path: Path) -> None:
+    package = tmp_path / "inspect_cli"
+    package.mkdir()
+    (package / "__init__.py").write_text('print("native app import")\n')
+    (package / "models.py").write_text("raise AssertionError('models loaded')\n")
+    result = invoke(
+        tmp_path,
+        "inspect-apps",
+        "inspect_cli",
+        env={
+            "PYTHONPATH": os.pathsep.join([str(tmp_path), *sys.path]),
+            "DJANGO_SETTINGS_MODULE": "settings_must_not_load",
+            "DJANGO_COMPOSE_MODE": "invalid_mode_must_not_be_read",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    selection = json.loads(result.stdout)
+    assert selection["roots"] == ["inspect_cli"]
+    assert selection["dependencies"] == {"inspect_cli": []}
+    assert selection["app_entries"][0]["entry"] == "inspect_cli"
+    assert "native app import" in result.stderr
+    assert not (package / "__pycache__").exists()
+
+
+def test_app_inspection_cli_empty_selection_and_owner_errors(tmp_path: Path) -> None:
+    result = invoke(tmp_path, "inspect-apps")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "app_entries": [],
+        "roots": [],
+        "required": [],
+        "addons": [],
+        "dependencies": {},
+    }
+    result = invoke(tmp_path, "inspect-apps", "--group", "")
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "non-empty addon entry-point group" in result.stderr
+
+
+def test_app_inspection_cli_does_not_import_native_management(tmp_path: Path) -> None:
+    script = """import sys
+class NoManagement:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'django_compose.management':
+            raise AssertionError('native management imported')
+sys.meta_path.insert(0, NoManagement())
+from django_compose.cli import main
+raise SystemExit(main(['inspect-apps', 'django.contrib.contenttypes']))
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", script],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["roots"] == ["django.contrib.contenttypes"]
 
 
 def test_command_help_does_not_enter_context(tmp_path: Path) -> None:

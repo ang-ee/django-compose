@@ -132,6 +132,43 @@ The low-level `enabled_apps(roots, *, group=None)` helper returns an immutable
 With no group it skips distribution discovery and follows only `requires_apps`;
 an explicitly empty or invalid group fails. `configure` uses this same helper.
 
+## Inspect a selection from a running application
+
+Use `inspect_apps` when an already populated application needs to inspect apps
+that it has not enabled. It resolves the same native selection in a fresh
+interpreter and returns detached JSON data:
+
+```python
+from django_compose.addons import inspect_apps
+
+selection = inspect_apps(["shop_reviews.apps.ReviewsConfig"], group="example.shop.apps")
+for app in selection["app_entries"]:
+    print(app["name"], app["label"], app["config"], app["path"], app["entry"])
+```
+
+`app_entries` retains dependency order. `roots` contains native root names in
+authored order, `required` contains sorted dependency-only names, `addons`
+contains sorted selected group members, and `dependencies` maps every selected
+native app name to its direct dependency names. The function always launches the
+current interpreter with the caller's import paths. It clears Django settings
+and composition-mode environment selectors in that child and disables bytecode
+writes. The calling application's settings, registry and imported apps stay
+unchanged. It runs no Django setup, models, settings contributions, composition
+or database work. Selected app/config imports still follow Django's ordinary
+pre-setup restrictions.
+
+The standalone launcher exposes the same operation without loading project
+settings or native management commands:
+
+```sh
+python -m django_compose inspect-apps --group example.shop.apps shop_reviews.apps.ReviewsConfig
+```
+
+It prints the `AppSelection` object as JSON on stdout; native import diagnostics
+use stderr. Selection errors raise `ImproperlyConfigured` through the Python API
+and exit with status 1 through the CLI. Omitting all roots returns an empty
+selection. This standalone command is not available through `manage.py`.
+
 ## Dependency and configuration rules
 
 For a selected addon, active installed `Requires-Dist` requirements are evaluated
