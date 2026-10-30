@@ -15,7 +15,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.utils.module_loading import module_has_submodule
 
 from django_compose import serving
-from django_compose.addons import enabled_apps
+from django_compose.addons import Closure, enabled_apps
 from django_compose.autoreload import report_inputs, report_watch_paths
 from django_compose.snapshot import Entry, mode, snapshot, structural_settings
 
@@ -250,6 +250,22 @@ class _Contributions:
             self.merge(result, owner, derived=True)
 
 
+def apply_app_settings(namespace: MutableMapping[str, Any], closure: Closure) -> None:
+    """Apply a resolved app selection's native settings contributions once.
+
+    Pass authored settings and a Closure selected by addons.enabled_apps.
+    The same closure is exposed as COMPOSE_CLOSURE before callbacks; its app
+    order, selected native configs, yamlconf merging, authored precedence and
+    environment rules are retained. This phase requires no composition output
+    or mode, creates no snapshot or receipt, and leaves INSTALLED_APPS intact.
+    """
+    namespace["COMPOSE_CLOSURE"] = closure
+    contributions = _Contributions(namespace)
+    for entry in closure.app_entries:
+        contributions.app(entry)
+    contributions.check_environment()
+
+
 def configure(namespace: MutableMapping[str, Any]) -> None:
     """Resolve apps, apply contributions, freeze inputs and project startup settings.
 
@@ -274,11 +290,7 @@ def configure(namespace: MutableMapping[str, Any]) -> None:
     report_watch_paths(namespace.get("COMPOSE_WATCH_PATHS", ()))
     roots = tuple(namespace.get("INSTALLED_APPS", ()))
     closure = enabled_apps(roots, group=namespace.get("COMPOSE_ADDON_GROUP"))
-    namespace["COMPOSE_CLOSURE"] = closure
-    contributions = _Contributions(namespace)
-    for entry in closure.app_entries:
-        contributions.app(entry)
-    contributions.check_environment()
+    apply_app_settings(namespace, closure)
     report_watch_paths(namespace.get("COMPOSE_WATCH_PATHS", ()))
     namespace["COMPOSE_ROOTS"] = roots
     snap = snapshot(closure.app_entries, namespace=namespace, dependencies=closure.dependencies)
