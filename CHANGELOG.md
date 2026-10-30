@@ -1,11 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.1.0.dev5
 
 - Respect Django's swapped-model storage semantics when guarding migrations, so
   projects with a custom user model can create migrations and provision normally.
 
-## 0.1.0.dev4
+## 0.1.0.dev4 — not published
+
+The immutable tag is retained; these changes are included in dev5.
 
 - Avoid distribution ownership scans for module-path lookups and reuse each exact
   native app configuration within one dependency selection.
