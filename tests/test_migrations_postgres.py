@@ -110,6 +110,27 @@ def _drive(environment: Path) -> None:
         after = before.clone()
         after.remove_model("alpha", "record")
         assert DropGuardAutodetector(before, after).changes(graph)["alpha"]
+        # Native namespace aliases can resolve two different explicit schema
+        # names to the same empty relation. Namespace strings cannot prove
+        # independence; offline planning must refuse without a catalog query.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'CREATE TEMP TABLE "namespace_alias_records" (id integer PRIMARY KEY, "old" varchar(40))'
+            )
+            cursor.execute("SELECT nspname FROM pg_catalog.pg_namespace WHERE oid = pg_my_temp_schema()")
+            temporary_namespace = cursor.fetchone()[0]
+        before, graph = state(
+            '"pg_temp"."namespace_alias_records"',
+            f'"{temporary_namespace}"."namespace_alias_records"',
+        )
+        active = before.apps.get_model("beta", "Record")
+        assert active._base_manager.count() == 0
+        after = before.clone()
+        after.remove_model("alpha", "record")
+        refusal(lambda: DropGuardAutodetector(before, after).changes(graph), "still owned")
+        assert active._base_manager.count() == 0
+        with patch.object(connection, "cursor", side_effect=AssertionError("offline namespace query")):
+            refusal(lambda: _shared_table_drops(before, after, changes), "offline")
         # Identical names on disjoint aliases protect only their own storage.
         before, graph = state("alias_records", '"alias_records"')
         model = before.apps.get_model("alpha", "Record")

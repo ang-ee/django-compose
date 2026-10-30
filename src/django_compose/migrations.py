@@ -619,7 +619,7 @@ def _shared_table_drops(
                                 other = _storage_identifier(connection, active_table)
                                 if identity == other:
                                     remaining.add(active_storage._meta.label_lower)
-                                elif (identity[1] == other[1] and (not identity[0] or not other[0])) or (
+                                elif identity[1] == other[1] or (
                                     connection.vendor in {"sqlite", "mysql"}
                                     and identity[1].casefold() == other[1].casefold()
                                 ):
