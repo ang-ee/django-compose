@@ -172,23 +172,28 @@ data cutovers as reviewed migrations.
 `retire_history <label>` is an explicit cutoff for a history-only app. It requires
 consistent, fully applied history across the configured databases selected by
 Django routers, and no retained migrations in another app depending on the
-retired nodes. Rebase or squash incoming dependencies first. Databases absent
-from the command's settings are outside that proof.
+retired nodes. The database scope includes historical and transient model routes,
+`RunSQL`/`RunPython` hints and nested database operations. Custom operations whose
+routes cannot be inferred require every configured alias. Rebase or squash
+incoming dependencies first. Databases absent from the command's settings are
+outside that proof.
 
 Its optional `--purge` authors and applies a final native deletion migration
-across the same database scope before retirement. A failed application retains
-that migration for retry and does not mark retirement complete. Successful
-retirement updates the build record under the normal writer lock; the next
-compose removes the history-only configuration. Removing the retired migration
-package from version control is a separate coordinated cutoff decision.
+across the same database scope before retirement. It refuses deletion of tables
+still owned by active models before authoring or applying changes. A failed
+application retains that migration for retry and does not mark retirement
+complete. Successful retirement updates the build record under the normal writer
+lock; the next compose removes the history-only configuration. Removing the
+retired migration package from version control is a separate coordinated cutoff
+decision.
 
 `reset_migration_history` replaces an explicitly selected, fully applied,
 model-clean history with fresh initial migrations. It refuses unsafe cross-app
-or multi-database scope, uses transactional recorder updates, and restores files
-if authoring or recording fails. Remove completed transition declarations first;
-a declaration that would rebind is refused. Read the command's `--help` and
-review its scope before use. Neither operation is part of ordinary development,
-build cleanup or deployment.
+or multi-database scope, uses transactional recorder updates, and restores file
+bytes and modes if authoring or recording fails. Remove completed transition
+declarations first; a declaration that would rebind is refused. Read the command's
+`--help` and review its scope before use. Neither operation is part of ordinary
+development, build cleanup or deployment.
 
 A fresh clone may retain only the generated package's durable migration history.
 The [first-compose scaffold contract](SPEC.md#generated-output-and-freshness)

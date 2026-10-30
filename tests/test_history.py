@@ -380,3 +380,165 @@ def test_dynamic_history_factory_preserves_native_labels_without_models(tmp_path
         for name in tuple(sys.modules):
             if name == root.name or name.startswith(root.name + "."):
                 sys.modules.pop(name)
+
+
+def test_purge_refuses_table_still_owned_by_enabled_app(host):
+    root, run = host
+    write(
+        root,
+        "beta/models.py",
+        """
+from django.db import models
+class Adopted(models.Model):
+    id = models.AutoField(primary_key=True)
+    old = models.CharField(max_length=40, default="")
+    class Meta:
+        db_table = "alpha_record"
+""",
+    )
+    write(
+        root,
+        "history/beta/0001_adopt.py",
+        """
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    dependencies = []
+    operations = [migrations.SeparateDatabaseAndState(state_operations=[
+        migrations.CreateModel(name="Adopted", fields=[
+            ("id", models.AutoField(primary_key=True)),
+            ("old", models.CharField(max_length=40, default="")),
+        ], options={"db_table": "alpha_record"}),
+    ])]
+""",
+    )
+    run(
+        DISABLE
+        + """
+from django.db.migrations.recorder import MigrationRecorder
+executor = MigrationExecutor(connection)
+executor.migrate(executor.loader.graph.leaf_nodes())
+active = apps.get_model("beta", "Adopted")
+active._base_manager.create(old="active data")
+before = files()
+records = set(MigrationRecorder(connection).applied_migrations())
+expect(CommandError, "still owned by beta.adopted", lambda: retire_history("alpha", purge=True))
+assert files() == before
+assert records == set(MigrationRecorder(connection).applied_migrations())
+assert list(active._base_manager.values_list("old", flat=True)) == ["active data"]
+assert not updated.called
+"""
+    )
+
+
+@pytest.mark.parametrize("cutoff", ["retire", "reset"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("kind", ["sql", "python", "custom", "override"])
+def test_database_operation_routes_keep_pending_secondary_history_in_scope(host, cutoff, nested, kind):
+    root, run = host
+    operations = {
+        "sql": 'migrations.RunSQL("SELECT 1", hints={"target_db": "other"})',
+        "python": 'HintedPython(migrations.RunPython.noop, hints={"target_db": "other"})',
+        "custom": "CustomOperation()",
+        "override": "CustomPython(migrations.RunPython.noop)",
+    }
+    operation = operations[kind]
+    if nested:
+        operation = (
+            "migrations.SeparateDatabaseAndState(database_operations=["
+            "migrations.SeparateDatabaseAndState(database_operations=[" + operation + "])])"
+        )
+    write(
+        root,
+        "history/alpha/0002_auxiliary.py",
+        f"""
+from django.db import migrations
+from django.db.migrations.operations.base import Operation
+class HintedPython(migrations.RunPython):
+    pass
+class CustomOperation(Operation):
+    def state_forwards(self, app_label, state):
+        pass
+    def database_forwards(self, app_label, schema_editor, from_state, to_state):
+        schema_editor.execute("SELECT 1")
+class CustomPython(migrations.RunPython):
+    def database_forwards(self, app_label, schema_editor, from_state, to_state):
+        schema_editor.execute("SELECT 1")
+class Migration(migrations.Migration):
+    dependencies = [("alpha", "0001_origin")]
+    operations = [{operation}]
+""",
+    )
+    run(
+        DISABLE
+        + f"""
+from django.db import connections, router
+from django.db.migrations.recorder import MigrationRecorder
+from django_compose.migrations import _history_aliases
+connections.settings["other"] = {{**settings.DATABASES["default"], "NAME": "other.sqlite3"}}
+connections.settings["unrelated"] = {{**settings.DATABASES["default"], "NAME": "unrelated.sqlite3"}}
+class HintRouter:
+    def allow_migrate(self, db, app_label, model_name=None, **hints):
+        if app_label == "alpha":
+            return db == hints.get("target_db", "default")
+        return None
+with patch.object(router, "routers", [HintRouter()]):
+    executor = MigrationExecutor(connection)
+    executor.migrate(executor.loader.graph.leaf_nodes())
+    secondary = MigrationExecutor(connections["other"])
+    secondary.migrate([("alpha", "0001_origin")])
+    expected = ("default", "other")
+    if {kind!r} in ("custom", "override"):
+        expected += ("unrelated",)
+    assert _history_aliases(MigrationLoader(None), {{"alpha"}}) == expected
+    before = files()
+    records = {{alias: set(MigrationRecorder(connections[alias]).applied_migrations())
+               for alias in ("default", "other")}}
+    if {cutoff!r} == "retire":
+        expect(RuntimeError, "database 'other'", lambda: retire_history("alpha"))
+    else:
+        expect(RuntimeError, "also routed", lambda: reset_migration_history(("alpha",)))
+    assert files() == before
+    assert not updated.called
+    for alias in records:
+        assert set(MigrationRecorder(connections[alias]).applied_migrations()) == records[alias]
+    assert not Path("unrelated.sqlite3").exists()
+"""
+    )
+
+
+def test_nested_database_operations_keep_transient_model_routes_in_scope(host):
+    root, run = host
+    write(
+        root,
+        "history/alpha/0002_auxiliary.py",
+        """
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    dependencies = [("alpha", "0001_origin")]
+    operations = [migrations.SeparateDatabaseAndState(database_operations=[
+        migrations.SeparateDatabaseAndState(database_operations=[
+            migrations.CreateModel(name="Legacy", fields=[("id", models.AutoField(primary_key=True))]),
+            migrations.DeleteModel(name="Legacy"),
+        ]),
+    ])]
+""",
+    )
+    run(
+        DISABLE
+        + """
+from django.db import connections, router
+from django_compose.migrations import _history_aliases
+connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
+class ModelRouter:
+    def allow_migrate(self, db, app_label, model_name=None, **hints):
+        if app_label == "alpha":
+            return db == ("other" if model_name == "legacy" else "default")
+        return None
+with patch.object(router, "routers", [ModelRouter()]):
+    executor = MigrationExecutor(connection)
+    executor.migrate(executor.loader.graph.leaf_nodes())
+    assert _history_aliases(MigrationLoader(None), {"alpha"}) == ("default", "other")
+    expect(RuntimeError, "database 'other'", lambda: retire_history("alpha"))
+assert not updated.called
+"""
+    )
