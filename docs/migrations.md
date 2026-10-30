@@ -202,8 +202,9 @@ keep that work in a separate native transition whose guard is true on the final
 schema and whose operations handle both empty and preexisting tables. True guards
 always run their original operations, even when the declaration has this option.
 
-Only a declared false guard targeting a label actually initialized by this
-command's native initial-authoring phase becomes a sealed zero-operation origin.
+During ordinary `makemigrations`, only a declared false guard targeting a label
+actually initialized by its native initial-authoring phase becomes a sealed
+zero-operation origin.
 Native prerequisite expansion contributes its exact newly initialized labels.
 Existing initial-looking files do not qualify, and ordinary planning/checks and
 history reset stay strict. The sealed `compose_initial_baseline = "satisfied"`
@@ -225,6 +226,58 @@ New bindings use `compose_*` metadata. Existing `angee_origin` and
 `angee_source_sha256` metadata remain readable for historical compatibility;
 there is no need to rewrite old migration files. Check and dry-run paths do not
 create migration packages or files.
+
+### Adopt an explicit retained initial baseline
+
+A project may already retain a native initial authored from its final schema,
+while an opted-in reusable transition is still pending with a false guard.
+Ordinary `makemigrations` and checks stay strict in this situation. After reviewing
+the transition owner's `initial_baseline: "satisfied"` assertion, explicitly
+attest that the retained initial is the baseline covered by that assertion:
+
+```sh
+python manage.py compose
+python manage.py adopt_transition inventory:rename_legacy --baseline inventory.0001_initial --dry-run
+python manage.py adopt_transition inventory:rename_legacy --baseline inventory.0001_initial
+python manage.py makemigrations
+python manage.py migrate
+```
+
+This action names one declared origin and one exact retained native initial.
+It appends a sealed empty origin after the current target leaf; it does not
+rewrite the initial, other migrations or applied-history records. The transition
+record and source hash must match the frozen snapshot. The owner assertion must
+cover every adopting database, including existing rows and native fake-initial
+adoption, as described above. Neither the initial flag nor a false guard proves
+that original operations ran or that historical data work is complete; invoking
+the command is the caller's baseline attestation.
+
+The anchor must be in active disk-backed native history for the same target app,
+an ancestor of its unique current leaf, and native initial (`initial=True`, or
+`initial=None` at a same-app graph root). The root test is this action's
+conservative scope, not Django's fake-initial detector. Guards must be false both
+after the named anchor and at the actual binding pre-state. True-guard work stays
+ordinary migration work, and unrelated model changes remain for
+`makemigrations`.
+
+Native dependencies and `run_before` edges remain authoritative. Author/adopt
+explicit prerequisites first; missing pending prerequisites or successors,
+cycles and ambiguous graphs refuse. Only the named pending origin is loaded and
+authored. Other pending sources are neither imported nor implicitly adopted.
+
+Dry-run validates the same inputs without writing. An exact repeat verifies the
+retained origin's source, named anchor and anchor file hash and writes nothing,
+even after later native descendants. It does not convert an existing ordinary
+or first-authoring origin into an adoption. Keep the sealed origin in native
+history after removing its source declaration. The footer records
+`compose_adopted_baseline` and `compose_adopted_baseline_sha256` alongside the
+existing immutable seals and native empty-migration marker.
+
+Adoption authoring is database-free and uses the existing exclusive publication
+and exception rollback. It makes no readiness claim about any deployment
+connection. Apply the appended no-op with Django's ordinary `migrate`; existing
+table adoption and `--fake-initial` remain Django's separate application policy.
+See the [canonical adoption API](SPEC.md#native-history-and-transitions).
 
 ## Advanced: destructive changes and history cutoffs
 

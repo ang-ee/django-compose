@@ -154,6 +154,8 @@ class TransitionPlan:
     run_before: tuple[Node, ...]
     source_package: str
     initial_baseline: bool = False
+    adopted_baseline: Node | None = None
+    adopted_baseline_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -167,13 +169,58 @@ class _Source:
     package: str
     initial_baseline: bool
 
+    def applies_to(self, state: ProjectState) -> bool:
+        try:
+            applies = self.guard(state.clone())
+        except Exception as error:
+            raise RuntimeError(f"{self.origin}: applies(project_state) failed") from error
+        if not isinstance(applies, bool):
+            raise RuntimeError(f"{self.origin}: applies must return bool")
+        return applies
+
+    def satisfied(self) -> _Source:
+        """Omit source operations and lifecycle overrides through native Django."""
+        migration = Migration(self.migration.name, self.migration.app_label)
+        cast(list[Node], migration.dependencies).extend(self.migration.dependencies)
+        cast(list[Node], migration.run_before).extend(self.migration.run_before)
+        return replace(self, migration=migration)
+
+    def plan(
+        self,
+        path: Path,
+        *,
+        initial_baseline: bool = False,
+        adopted_baseline: Node | None = None,
+        adopted_baseline_sha256: str | None = None,
+    ) -> TransitionPlan:
+        if path.exists():
+            raise RuntimeError(f"{self.origin}: migration destination already exists: {path}")
+        return TransitionPlan(
+            self.origin,
+            self.migration.app_label,
+            self.migration.name,
+            self.path,
+            self.text,
+            path,
+            self.digest,
+            tuple(self.migration.dependencies),
+            tuple(self.migration.run_before),
+            self.package,
+            initial_baseline,
+            adopted_baseline,
+            adopted_baseline_sha256,
+        )
+
 
 class _BindingLoader(MigrationLoader):
     """Supply pending native Migration objects at Django's disk-loading hook."""
 
     def __init__(self, pending: Mapping[Node, _Source]) -> None:
         self.pending = pending
-        super().__init__(None, ignore_no_migrations=True)
+        try:
+            super().__init__(None, ignore_no_migrations=True)
+        except Exception as error:
+            raise RuntimeError(f"authored migration graph is invalid: {error}") from error
 
     def load_disk(self) -> None:
         super().load_disk()
@@ -211,8 +258,9 @@ class TransitionBinding:
 
     Origins and snapshots are immutable, including after declaration removal.
     A false guard never establishes that a data operation has run. Only an
-    explicit declaration can assert satisfaction by a newly authored initial
-    baseline. Completed transitions remain in native history and squash chains.
+    explicit declaration can assert baseline satisfaction, through first
+    authoring or a named retained-initial adoption. Origins remain in native
+    history and squash chains.
     """
 
     def __init__(
@@ -336,10 +384,7 @@ class TransitionBinding:
         """Validate the complete graph and selected prerequisite closure, without writes."""
         existing = MigrationLoader(None, ignore_no_migrations=True)
         pending = self._pending(existing)
-        try:
-            loader = _BindingLoader(pending)
-        except Exception as error:
-            raise RuntimeError(f"authored migration graph is invalid: {error}") from error
+        loader = _BindingLoader(pending)
         selected = None if app_labels is None else set(app_labels)
         ordered = dict.fromkeys(
             key
@@ -361,22 +406,14 @@ class TransitionBinding:
                 continue
             source = pending[key]
             state = loader.project_state(nodes=[key], at_end=False)
-            try:
-                applies = source.guard(state.clone())
-            except Exception as error:
-                raise RuntimeError(f"{source.origin}: applies(project_state) failed") from error
-            if not isinstance(applies, bool):
-                raise RuntimeError(f"{source.origin}: applies must return bool")
+            applies = source.applies_to(state)
             baseline = not applies and source.initial_baseline and key[0] in initial_baselines
             if baseline:
                 # A native empty migration also omits source-class lifecycle
                 # overrides. Replace the graph owner before downstream state.
-                migration = Migration(key[1], key[0])
-                cast(list[Node], migration.dependencies).extend(source.migration.dependencies)
-                cast(list[Node], migration.run_before).extend(source.migration.run_before)
-                pending[key] = source = replace(source, migration=migration)
-                loader.disk_migrations[key] = migration
-                loader.graph.nodes[key] = migration
+                pending[key] = source = source.satisfied()
+                loader.disk_migrations[key] = source.migration
+                loader.graph.nodes[key] = source.migration
             elif not applies:
                 raise RuntimeError(
                     f"{source.origin}: false guard cannot prove a data transition completed; "
@@ -387,24 +424,10 @@ class TransitionBinding:
             except Exception as error:
                 raise RuntimeError(f"{source.origin}: invalid migration state transition") from error
             path = _directory(key[0], missing=allow_missing_packages) / f"{key[1]}.py"
-            if path.exists() or path.resolve() in destinations:
+            if path.resolve() in destinations:
                 raise RuntimeError(f"{source.origin}: migration destination already exists: {path}")
             destinations.add(path.resolve())
-            result.append(
-                TransitionPlan(
-                    source.origin,
-                    key[0],
-                    key[1],
-                    source.path,
-                    source.text,
-                    path,
-                    source.digest,
-                    tuple(source.migration.dependencies),
-                    tuple(source.migration.run_before),
-                    source.package,
-                    baseline,
-                )
-            )
+            result.append(source.plan(path, initial_baseline=baseline))
         if apps is not None and not defer_drop_check:
             # This check compares state only. DropGuardAutodetector's row proofs
             # belong exclusively to explicit native authoring and migrate.
@@ -416,6 +439,110 @@ class TransitionBinding:
             )
             _shared_table_drops(before, after, changes)
         return tuple(result)
+
+    def adoption_plan(self, origin: str, baseline: Node) -> TransitionPlan | None:
+        """Plan one declared origin satisfied by an explicit retained initial.
+
+        The caller attests that this retained initial is covered by the owner's
+        satisfaction assertion; native structure and guards do not prove prior
+        data work. The anchor must remain an active native initial and ancestor of
+        the unique target leaf. A matching sealed adoption is an immutable,
+        idempotent result even after later native descendants are authored.
+        """
+        declaration = next(
+            (
+                record
+                for record in self.declarations
+                if f"{record['declaring_app']}:{record['name']}" == origin
+            ),
+            None,
+        )
+        if declaration is None:
+            raise RuntimeError(f"{origin}: unknown selected transition origin")
+        snap = getattr(settings, "COMPOSE_SNAPSHOT", None)
+        frozen = next(
+            (
+                record
+                for record in getattr(snap, "transition_records", ())
+                if f"{record['declaring_app']}:{record['name']}" == origin
+            ),
+            None,
+        )
+        frozen_digest = dict(getattr(snap, "transitions", ())).get(origin)
+        if declaration != frozen or frozen_digest is None:
+            raise RuntimeError(f"{origin}: selected declaration must match the frozen snapshot")
+        if declaration.get("initial_baseline") != "satisfied":
+            raise RuntimeError(f"{origin}: adoption requires initial_baseline='satisfied'")
+        baseline = _node(baseline, origin, "baseline")
+        label = declaration["app_label"]
+        if baseline[0] != label:
+            raise RuntimeError(f"{origin}: baseline must target app {label!r}")
+        # Scope before loading source modules. Other pending declarations are
+        # neither prerequisites inferred by this action nor implicit adoptions.
+        selected = TransitionBinding(labels=self.labels, declarations=(declaration,))
+        existing = MigrationLoader(None, ignore_no_migrations=True)
+        if baseline not in existing.disk_migrations or baseline not in existing.graph.nodes:
+            raise RuntimeError(f"{origin}: baseline must be retained native disk and active graph history")
+        native = existing.disk_migrations[baseline]
+        if native.initial is not True and not (
+            native.initial is None and baseline in existing.graph.root_nodes(label)
+        ):
+            raise RuntimeError(f"{origin}: baseline must be a native initial migration")
+        leaves = existing.graph.leaf_nodes(label)
+        if len(leaves) != 1:
+            raise RuntimeError(f"{origin}: adoption requires one native target leaf")
+        if baseline not in existing.graph.forwards_plan(leaves[0]):
+            raise RuntimeError(f"{origin}: baseline is not an ancestor of the native target leaf")
+        baseline_digest = hashlib.sha256((_directory(label) / f"{baseline[1]}.py").read_bytes()).hexdigest()
+        pending = selected._pending(existing)
+        history = selected._history(existing)
+        if origin in history:
+            key, migration = history[origin]
+            if (
+                key not in existing.graph.nodes
+                or baseline not in existing.graph.forwards_plan(key)
+                or _metadata(migration, "source_sha256") != frozen_digest
+                or _metadata(migration, "initial_baseline") != "satisfied"
+                or _metadata(migration, "adopted_baseline") != baseline
+                or _metadata(migration, "adopted_baseline_sha256") != baseline_digest
+                or migration.operations
+                or type(migration).apply is not Migration.apply
+                or type(migration).mutate_state is not Migration.mutate_state
+            ):
+                raise RuntimeError(f"{origin}: existing origin is not the matching sealed baseline adoption")
+            return None
+        key = label, declaration["name"]
+        source = pending[key]
+        if source.digest != frozen_digest:
+            raise RuntimeError(f"{origin}: source digest does not match the frozen snapshot")
+        if source.applies_to(existing.project_state(nodes=[baseline])):
+            raise RuntimeError(f"{origin}: true guard at baseline; author the ordinary transition")
+        loader = _BindingLoader(pending)
+        relevant = {node[0] for node in loader.graph.forwards_plan(key)}
+        conflicts = {app: names for app, names in loader.detect_conflicts().items() if app in relevant}
+        if conflicts:
+            raise RuntimeError(f"multiple migration leaves: {conflicts}")
+        if source.applies_to(loader.project_state(nodes=[key], at_end=False)):
+            raise RuntimeError(f"{origin}: true guard at binding state; author the ordinary transition")
+        return source.satisfied().plan(
+            _directory(label) / f"{key[1]}.py",
+            initial_baseline=True,
+            adopted_baseline=baseline,
+            adopted_baseline_sha256=baseline_digest,
+        )
+
+    def adopt(self, origin: str, baseline: Node, *, dry_run: bool = False) -> tuple[Path, ...]:
+        """Append one sealed native empty origin without changing retained history.
+
+        Dry-run validates the same inputs and returns the prospective path.
+        An exact previously sealed adoption returns no paths and writes nothing.
+        """
+        plan = self.adoption_plan(origin, baseline)
+        if plan is None:
+            return ()
+        if dry_run:
+            return (plan.output_path,)
+        return self._materialize((plan,), lambda: self.adoption_plan(origin, baseline))
 
     def check(self, app_labels: Iterable[str] | None = None) -> None:
         """Refuse unmaterialized declarations without creating packages or history."""
@@ -493,6 +620,12 @@ class TransitionBinding:
             + f"Migration.compose_source_sha256 = {plan.source_sha256!r}\n"
             + f"Migration.compose_body_sha256 = {body_digest!r}\n"
             + ("Migration.compose_initial_baseline = 'satisfied'\n" if plan.initial_baseline else "")
+            + (
+                f"Migration.compose_adopted_baseline = {plan.adopted_baseline!r}\n"
+                f"Migration.compose_adopted_baseline_sha256 = {plan.adopted_baseline_sha256!r}\n"
+                if plan.adopted_baseline is not None
+                else ""
+            )
         ).encode()
         return payload + _SEAL_PREFIX + repr(hashlib.sha256(payload).hexdigest()).encode() + b"\n"
 
@@ -517,6 +650,18 @@ class TransitionBinding:
             allow_missing_packages=True,
             initial_baselines=initial_baselines,
         )
+        return self._materialize(
+            plans, lambda: self.plan(apps=apps, app_labels=app_labels), written_files=written_files
+        )
+
+    def _materialize(
+        self,
+        plans: tuple[TransitionPlan, ...],
+        validate: Callable[[], object],
+        *,
+        written_files: list[Path] | None = None,
+    ) -> tuple[Path, ...]:
+        """Publish validated native origins through one exclusive rollback owner."""
         rendered = [(plan, self._render(plan)) for plan in plans]
         packages = [
             directory / "__init__.py"
@@ -544,7 +689,7 @@ class TransitionBinding:
                         written_files.pop()
                     raise
             importlib.invalidate_caches()
-            self.plan(apps=apps, app_labels=app_labels)
+            validate()
         except BaseException:
             for path in written:
                 path.unlink(missing_ok=True)

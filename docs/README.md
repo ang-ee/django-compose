@@ -29,6 +29,7 @@ Use the [django-compose launcher](configuration.md#managepy) in `manage.py`.
 | `makemigrations`, `migrate` | Author and apply ordinary Django migration history | [Migrations](migrations.md) |
 | `runserver` | Recompose before Django's development-server reloads | [Development](configuration.md#serve-the-project) |
 | `provision` | Apply migrations and optional app hooks; `--check` verifies readiness | [Provisioning](provisioning.md) |
+| `adopt_transition` | Attest that an opted-in transition is satisfied by a named retained initial and append its empty native origin; `--dry-run` validates without writes | [Baseline adoption](migrations.md#adopt-an-explicit-retained-initial-baseline) |
 | `check_migrations` | Compare model/history state; `--imports` audits retained Python dependencies | [History checks](migrations.md#disable-delete-or-uninstall) |
 | `retire_history`, `reset_migration_history` | Perform explicit, guarded history maintenance | [Advanced migrations](migrations.md#advanced-destructive-changes-and-history-cutoffs) |
 
@@ -53,6 +54,7 @@ validation and lifecycle rules live in the [API reference](SPEC.md).
 | `components.active_requirements(requirements)` | Return native `Requirement` values active on this platform with `extra=""` |
 | `conf.apply_app_settings(namespace, closure)` | Apply app settings to a project using ordinary authored concrete models |
 | `snapshot.discover_transitions(entries)` | Read default transition records from resolved app identities for an integration to annotate without importing migration code |
+| `migrations.TransitionBinding.adoption_plan(origin, baseline)` / `.adopt(origin, baseline, dry_run=False)` | Validate or author one explicit retained-baseline adoption through native migration history |
 | `provision.require_provisioned(using="default", timeout=0)` | Require recorded database readiness for the verified build |
 | `serving.artifact_path(relative)` | Locate and verify a generated artifact |
 | `serving.receipt_lease()` / `verified_receipt()` | Hold a shared build-record lease / read the startup-verified record |

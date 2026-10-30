@@ -488,8 +488,8 @@ not crash-atomic publication of multiple files.
 `TransitionBinding` uses frozen snapshot records by default, or explicit
 `declarations=`. It binds native migration origins `<declaring_app>:<name>` to
 the project's actual graph leaves. Each source provides a native `Migration`
-and a pure `applies(ProjectState) -> bool` guard. A pending false guard is refused
-unless its owner declares `initial_baseline: "satisfied"` and the label acquired
+and a pure `applies(ProjectState) -> bool` guard. Ordinary planning and
+`makemigrations` refuse a pending false guard unless its owner declares `initial_baseline: "satisfied"` and the label acquired
 its first native disk nodes in this successful command's initial-authoring phase,
 including native prerequisite expansion. The assertion means the final-schema
 initial baseline satisfies this transition on every database adopting it,
@@ -511,6 +511,46 @@ missing prerequisites and cycles fail. Dry-run/check never author history.
 Legacy `angee_origin` and `angee_source_sha256` metadata is read only for
 historical adoption; new metadata uses `compose_origin` and
 `compose_source_sha256`.
+
+Explicit existing-baseline adoption uses
+`TransitionBinding.adoption_plan(origin, baseline)` and
+`TransitionBinding.adopt(origin, baseline, *, dry_run=False)`, or the thin
+`adopt_transition DECLARING_APP:NAME --baseline APP_LABEL.MIGRATION_NAME
+[--dry-run]` management command. The selected normalized declaration and source
+SHA must match `COMPOSE_SNAPSHOT.transition_records` and `transitions`, and the
+owner must already assert `initial_baseline: "satisfied"`.
+
+The explicit action is the caller's attestation that the named retained initial
+is the baseline covered by that owner assertion. Native graph structure and
+false guards establish the action's scope; they prove neither historical data
+completion nor schema equivalence. The named anchor must be same-target-label,
+retained on disk and active in Django's graph, and an ancestor of the unique
+current target leaf. It must have `Migration.initial is True`, or `initial is
+None` and be a native same-app graph root. This root criterion is conservative
+scope for adoption, not a reimplementation of Django's soft-initial detection;
+`run_before` can affect native graph roots. A true guard either after the named
+anchor or at the resolved binding pre-state refuses adoption. Unrelated current
+model drift remains for ordinary `makemigrations`.
+
+Only the selected pending declaration is loaded. Native graph resolution freezes
+its dependency and `run_before` edges; missing or pending explicit prerequisites
+or successors, cycles and ambiguous relevant leaves refuse. Unrelated pending
+sources are not imported or implicitly adopted. The new sealed native empty
+origin depends on the current retained target leaf, preserving existing files.
+The footer retains the existing source/body seals and baseline-satisfaction
+marker, plus `compose_adopted_baseline` (the anchor Node) and
+`compose_adopted_baseline_sha256` (the exact native anchor file hash).
+
+`adoption_plan` returns a `TransitionPlan`, or `None` for an exact retained
+adoption. `adopt` returns the authored path tuple, the prospective path tuple
+for dry-run, or an empty tuple for an exact repeat. A repeat validates the sealed
+origin's native empty semantics, selected source, matching anchor and anchor SHA
+without rewriting or rebinding it, including after later native descendants.
+Existing ordinary or first-authoring origins are not silently converted to
+adoptions. Dry-run validates without writes; failed publication removes only
+its newly authored files through the same exclusive rollback owner as normal
+binding. Authoring never queries the database or writes the migration recorder;
+Django's subsequent `migrate` owns application and recording.
 
 `DropGuardAutodetector`, shared by native `makemigrations` and `migrate`, requires
 relevant rows or columns to be empty on every database eligible for the native

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add explicit `adopt_transition` authoring for a declared transition satisfied by
+  a named retained native initial, with frozen source checks, sealed anchor
+  provenance, idempotent retries and database-free dry-run validation.
+
 ## 0.1.0.dev6
 
 - Allow transition owners to declare an adoption-safe initial baseline through
