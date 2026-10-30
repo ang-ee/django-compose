@@ -41,7 +41,6 @@ class BuildPlan:
         *,
         mode: Literal["write", "check"],
         integrations: tuple[object, ...],
-        transitions: Iterable[Any],
         output_dir: Path,
         output_module: str,
     ) -> None:
@@ -57,7 +56,6 @@ class BuildPlan:
         self.configs = tuple(c for c in configs if c.name in selected)
         self.mode = mode
         self.integrations = integrations
-        self.transitions = tuple(transitions)
         self.output_dir = output_dir
         self.output_module = output_module
         self.previous = read_receipt(output_dir)
@@ -79,7 +77,6 @@ class BuildPlan:
         history = set(previous.HISTORY_LABELS if previous else ())
         history.update(getattr(self, "labels", ()))
         history.update(path.parent.name for path in self.output_dir.glob("*/migrations") if path.is_dir())
-        history.update(transition["app_label"] for transition in self.transitions)
         return Receipt(
             tuple(sorted(history - set(retired))),
             retired,
@@ -248,7 +245,6 @@ def emit(
     *,
     mode: Literal["write", "check"],
     integrations: tuple[object, ...],
-    transitions: Iterable[Any],
     output_dir: Path | str,
     output_module: str,
 ) -> BuildPlan:
@@ -257,7 +253,6 @@ def emit(
         configs,
         mode=mode,
         integrations=integrations,
-        transitions=transitions,
         output_dir=Path(output_dir),
         output_module=output_module,
     ).emit()

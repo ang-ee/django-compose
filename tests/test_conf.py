@@ -853,3 +853,11 @@ def test_authored_legacy_group_fails_before_app_selection(project, legacy):
     namespace["INSTALLED_APPS"] = ["must_not_import"]
     with pytest.raises(ImproperlyConfigured, match="COMPOSE_ADDON_GROUP.*COMPOSE_COMPONENT_GROUP"):
         conf.configure(namespace)
+
+
+@pytest.mark.parametrize("value", ((), [], None, "missing.callable"))
+def test_removed_transition_setting_fails_before_output_verification(project, value):
+    _, namespace = project
+    namespace["COMPOSE_TRANSITION_SOURCE"] = value
+    with pytest.raises(ImproperlyConfigured, match="native project migrations"):
+        conf.configure(namespace)

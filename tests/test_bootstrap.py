@@ -469,7 +469,7 @@ def test_custom_swappable_setting_requires_declared_fingerprint(tmp_path: Path) 
     successful(invoke(root, "compose"))
 
 
-def test_default_transition_targets_feed_build_history_from_snapshot_records(tmp_path: Path) -> None:
+def test_leftover_transition_sources_are_inert(tmp_path: Path) -> None:
     root = host(tmp_path)
     transition = root / "bootapp/compose_migrations/previous/0001_initial.py"
     transition.parent.mkdir(parents=True)
@@ -479,7 +479,7 @@ def test_default_transition_targets_feed_build_history_from_snapshot_records(tmp
 
     receipt = read_receipt(root / "runtime")
     assert receipt is not None
-    assert "previous" in receipt.HISTORY_LABELS
+    assert "previous" not in receipt.HISTORY_LABELS
 
 
 def test_stale_check_verifies_before_integration_import_and_construction(tmp_path: Path) -> None:
