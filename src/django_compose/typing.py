@@ -16,9 +16,13 @@ from typing import TYPE_CHECKING, Literal
 
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
+from mypy.checkmember import analyze_member_access
+from mypy.expandtype import expand_type, expand_type_by_instance
+from mypy.maptype import map_instance_to_supertype
 from mypy.mro import calculate_mro
 from mypy.nodes import (
     MDEF,
+    CallExpr,
     ClassDef,
     Decorator,
     FuncDef,
@@ -35,7 +39,8 @@ from mypy.options import Options
 from mypy.plugin import AttributeContext, ClassDefContext, DynamicClassDefContext, ReportConfigContext
 from mypy.semanal_shared import PRIORITY_FALLBACKS, has_placeholder
 from mypy.server.trigger import make_trigger
-from mypy.types import CallableType, Instance, Overloaded, TypeType, get_proper_type
+from mypy.typeops import erase_to_bound, make_simplified_union
+from mypy.types import CallableType, Instance, Overloaded, TypeType, UnionType, get_proper_type
 from mypy.types import Type as MypyType
 from mypy.typevars import fill_typevars, fill_typevars_with_any
 from mypy_django_plugin.django.context import DjangoContext
@@ -212,16 +217,23 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
         if self._projecting_access:
             return None
         owner, _, name = fullname.rpartition(".")
+        if name not in self.django_context.members.get(owner, {}):
+            symbol = self.lookup_fully_qualified(owner)
+            if symbol and isinstance(symbol.node, TypeInfo):
+                inherited = symbol.node.get_containing_type_info(name)
+                if inherited is not None:
+                    owner = inherited.fullname
         if name in self.django_context.members.get(owner, {}):
             return partial(self._member_access, target_name=owner, name=name)
         return None
 
     def _member_access(self, ctx: AttributeContext, *, target_name: str, name: str) -> MypyType:
-        from mypy.checkmember import analyze_member_access
-
         # Native override checks also use member access with a declaration as
-        # context; those must continue to compare the authored signatures.
-        if not isinstance(ctx.context, MemberExpr):
+        # context; those must continue to compare the authored signatures. The
+        # native union call checker rechecks member access with the CallExpr.
+        if not isinstance(ctx.context, MemberExpr) and not (
+            isinstance(ctx.context, CallExpr) and isinstance(ctx.context.callee, MemberExpr)
+        ):
             return ctx.default_attr_type
         target_symbol = self.lookup_fully_qualified(target_name)
         assert target_symbol and isinstance(target_symbol.node, TypeInfo)
@@ -248,21 +260,42 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
         )
         view._fullname = target.fullname
         view.mro = [view, *target.mro[1:]]
-        accessed = ctx.type
-        if isinstance(accessed, CallableType | Overloaded) and accessed.is_type_obj():
-            accessed = TypeType.make_normalized(accessed.items[0].ret_type)
+        receivers: list[MypyType] = [ctx.type]
+        bounded = get_proper_type(erase_to_bound(ctx.type))
+        if isinstance(bounded, UnionType):
+            # Native union lookup invokes this hook for each owning member but
+            # exposes the original union. Keep only that owner's receivers;
+            # the outer native lookup handles the other arms independently.
+            receivers = []
+            for item in bounded.relevant_items():
+                instance = get_proper_type(item)
+                if isinstance(instance, TypeType):
+                    instance = get_proper_type(instance.item)
+                elif isinstance(instance, CallableType | Overloaded) and instance.is_type_obj():
+                    instance = get_proper_type(instance.items[0].ret_type)
+                if isinstance(instance, Instance) and instance.type.get_containing_type_info(name) is target:
+                    receivers.append(item)
+        if not receivers:
+            return ctx.default_attr_type
         self._projecting_access = True
         try:
-            return analyze_member_access(
-                name,
-                accessed,
-                ctx.context,
-                is_lvalue=ctx.is_lvalue,
-                is_super=False,
-                is_operator=False,
-                original_type=ctx.type,
-                chk=checker,
-                override_info=view,
+            return make_simplified_union(
+                [
+                    analyze_member_access(
+                        name,
+                        TypeType.make_normalized(receiver.items[0].ret_type)
+                        if isinstance(receiver, CallableType | Overloaded) and receiver.is_type_obj()
+                        else receiver,
+                        ctx.context,
+                        is_lvalue=ctx.is_lvalue,
+                        is_super=False,
+                        is_operator=False,
+                        original_type=receiver,
+                        chk=checker,
+                        override_info=view,
+                    )
+                    for receiver in receivers
+                ]
             )
         finally:
             self._projecting_access = False
@@ -589,11 +622,6 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
         receiver: TypeInfo,
         function_type: Instance,
     ) -> Var:
-        # Load this native owner after mypy.types: its standalone import cycle
-        # otherwise prevents importing CompositionContext outside mypy's CLI.
-        from mypy.expandtype import expand_type, expand_type_by_instance
-        from mypy.maptype import map_instance_to_supertype
-
         assert declaration.type is not None
         instance = fill_typevars(receiver)
         assert isinstance(instance, Instance)

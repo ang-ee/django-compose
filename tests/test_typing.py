@@ -371,6 +371,70 @@ def test_native_c3_source_precedes_later_donor_ancestor(tmp_path):
         assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_union_receivers_keep_each_native_member_owner_and_binding(tmp_path):
+    config, env = host(tmp_path)
+    model = tmp_path / "modelapp/models.py"
+    model.write_text(
+        MODEL_SOURCE.replace("def winner(self) -> str:", "def winner(self) -> object:").replace(
+            '    class Meta:\n        abstract = True\n        base_manager_name = "objects"',
+            "    def echo(self, value: int) -> object:\n        return value\n"
+            "    def clone(self) -> object:\n        return self\n"
+            "    @classmethod\n    def origin(cls) -> object:\n        return 'source'\n"
+            '    class Meta:\n        abstract = True\n        base_manager_name = "objects"',
+            1,
+        )
+    )
+    donor = tmp_path / "modelapp/donors.py"
+    donor.write_text(
+        DONOR_SOURCE.replace(
+            "class Audit(Shared, GenericMethods[int]", "class Audit(GenericMethods[int], Shared"
+        ).replace(
+            "    def winner(self) -> str:",
+            "    @classmethod\n    def origin(cls) -> str:\n        return 'donor'\n"
+            "    def winner(self) -> str:",
+        )
+    )
+    source = tmp_path / "consumer.py"
+    consumer = (
+        "from typing import TypeVar, assert_type\n"
+        "from modelapp.models import Entity, Child\n"
+        "class Other:\n"
+        "    def winner(self) -> str:\n        return 'other'\n"
+        "    def echo(self, value: int) -> int:\n        return value\n"
+        '    def clone(self) -> "Other":\n        return self\n'
+        "    @classmethod\n    def origin(cls) -> str:\n        return 'other'\n"
+        "class Distinct:\n"
+        "    def winner(self) -> int:\n        return 1\n"
+        "def consume(value: Entity | Other, mixed: Entity | Distinct, "
+        "inherited: Child | Other, related: Entity | Child, cls: type[Entity] | type[Other], "
+        "inherited_cls: type[Child] | type[Other]) -> None:\n"
+        "    assert_type(value.winner(), str)\n"
+        "    method = value.winner\n    assert_type(method(), str)\n"
+        "    assert_type(mixed.winner(), str | int)\n"
+        "    distinct_method = mixed.winner\n    assert_type(distinct_method(), str | int)\n"
+        "    assert_type(inherited.winner(), str)\n"
+        "    assert_type(related.winner(), str)\n"
+        "    assert_type(inherited.echo(1), int)\n"
+        "    assert_type(inherited.clone(), Child | Other)\n"
+        "    assert_type(value.origin(), str)\n"
+        "    assert_type(cls.origin(), str)\n"
+        "    assert_type(inherited_cls.origin(), str)\n"
+        "T = TypeVar('T', bound=Entity | Other)\n"
+        "def bounded(value: T, cls: type[T]) -> None:\n"
+        "    assert_type(value.winner(), str)\n"
+        "    method = value.winner\n    assert_type(method(), str)\n"
+        "    assert_type(value.echo(1), int)\n"
+        "    assert_type(cls.origin(), str)\n"
+    )
+    source.write_text(consumer)
+    for _ in range(2):
+        result = check(config, env, source)
+        assert result.returncode == 0, result.stdout + result.stderr
+    source.write_text(consumer + "def missing(mixed: Entity | Distinct) -> None:\n    mixed.echo(1)\n")
+    missing = check(config, env, source)
+    assert missing.returncode == 1 and "[union-attr]" in missing.stdout, missing.stdout + missing.stderr
+
+
 def test_context_restores_mode_when_native_setup_fails(tmp_path):
     script = """import os
 from unittest.mock import patch
