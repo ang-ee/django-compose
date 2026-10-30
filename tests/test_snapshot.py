@@ -408,8 +408,8 @@ assert 'inputprobe.declarations' not in sys.modules
 import django
 django.setup()
 from django.apps import apps
-from django_compose.build import discover
-composition = discover(apps.get_app_configs())
+from django_compose.model_composition import ModelComposition
+composition = ModelComposition.discover(apps.get_app_configs())
 print(json.dumps([snap.digest(), [model.__name__ for model in composition.ordered_models], dict(snap.files)]))
 """
     environment = dict(os.environ, PYTHONPATH=os.pathsep.join([str(tmp_path), *sys.path]))

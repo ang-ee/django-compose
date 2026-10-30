@@ -10,6 +10,7 @@ from graphlib import CycleError, TopologicalSorter
 from typing import Any
 
 from django.apps import AppConfig
+from django.apps.registry import Apps
 from django.core.exceptions import ImproperlyConfigured
 from django.db import models
 
@@ -169,6 +170,31 @@ class ModelComposition:
         """Return one native declaration per constraint, preserving shared ancestry."""
         return self._constraints[source]
 
+    def validate_generated(self, registry: Apps) -> None:
+        """Check constructed native namespaces, including automatically created managers."""
+        for source in self.ordered_models:
+            model = registry.get_model(source._meta.app_label, source.__name__, require_ready=False)
+            self._validate_field_managers(
+                model,
+                (
+                    name
+                    for native in (
+                        *model._meta.fields,
+                        *model._meta.many_to_many,
+                        *model._meta.private_fields,
+                    )
+                    for name in (native.name, native.attname)
+                ),
+                (manager.name for manager in model._meta.managers),
+            )
+
+    @staticmethod
+    def _validate_field_managers(
+        model: type[models.Model], field_names: Iterable[str], manager_names: Iterable[str]
+    ) -> None:
+        for name in sorted(set(field_names) & set(manager_names)):
+            raise ImproperlyConfigured(f"{model._meta.label} composes field and manager {name!r} twice")
+
     def _resolve_constraints(self, source: type[models.Model]) -> tuple[tuple[type[models.Model], int], ...]:
         selected = []
         seen: set[int] = set()
@@ -278,13 +304,9 @@ class ModelComposition:
                         raise ImproperlyConfigured(
                             f"{source._meta.label} composes manager {manager.name!r} twice"
                         )
-            for manager_name in sorted(
-                (managers.keys() & (local_names.keys() | inherited_names))
-                | (inherited_managers & local_names.keys())
-            ):
-                raise ImproperlyConfigured(
-                    f"{source._meta.label} composes field and manager {manager_name!r} twice"
-                )
+            self._validate_field_managers(
+                source, local_names.keys() | inherited_names, managers.keys() | inherited_managers
+            )
             inherited_fields[source] = {**inherited, **{name: item[0] for name, item in fields.items()}}
             self._contributions[source] = tuple(
                 (native, owner)
