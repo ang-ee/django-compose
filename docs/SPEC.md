@@ -463,7 +463,7 @@ historical adoption; new metadata uses `compose_origin` and
 relevant rows or columns to be empty on every database eligible for the native
 operation before automatic destructive changes. Eligibility includes native
 model options and routers. Shared-table protection is per alias and includes
-implicit many-to-many storage deleted with its owning model. Quoted identifiers
+implicit many-to-many storage deleted with its owning model or field. Quoted identifiers
 are resolved through backend semantics; unsupported or uncertain storage identity
 and unavailable eligible databases cannot prove safety. Explicit integration-owned
 row exemptions use `MigrationPolicy`. See the [storage proof's supported cases

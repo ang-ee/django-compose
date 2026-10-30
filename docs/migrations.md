@@ -174,7 +174,7 @@ required data cutovers as reviewed migrations.
 The guards compare storage on each eligible alias. A table still owned by an
 active model cannot be deleted, even when empty or reached through differently
 quoted names. This includes Django's implicit many-to-many tables deleted with
-their owning model. Identical table names on disjoint database aliases do not
+their owning model or field. Identical table names on disjoint database aliases do not
 establish shared ownership.
 
 Ordinary and double-quoted identifiers use Django's backend interpretation.
