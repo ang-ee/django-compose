@@ -16,7 +16,13 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
 from django_compose import components
-from django_compose.components import active_requirements, enabled_apps, inspect_apps, installed_components
+from django_compose.components import (
+    active_requirements,
+    enabled_apps,
+    index_components,
+    inspect_apps,
+    installed_components,
+)
 
 GROUP = "testsite.components"
 
@@ -72,6 +78,125 @@ def installed(tmp_path, monkeypatch):
     for module in tuple(sys.modules):
         if module.partition(".")[0] in apps:
             sys.modules.pop(module)
+
+
+def test_supplied_native_metadata_is_inert_sorted_and_preserves_native_objects(installed, monkeypatch):
+    zeta = installed.distribution(
+        "Zeta.Component",
+        app="unimportable_zeta",
+        entry="unimportable_zeta.apps.Config",
+        requires=("absent-library>=2", 'optional; extra == "feature"'),
+    )
+    alpha = installed.distribution("alpha_component", app="unimportable_alpha")
+    library = installed.distribution("plain-library")
+    disabled = installed.distribution(
+        "disabled-component",
+        app="unimportable_disabled",
+        group="other.components",
+        requires=("not a valid requirement ???",),
+        extra_points=("another_missing_app = another_missing_app.Config",),
+    )
+    supplied = (zeta, library, disabled, alpha)
+    assert all(isinstance(distribution, metadata.PathDistribution) for distribution in supplied)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("supplied metadata must not discover, load, activate or build")
+
+    monkeypatch.setattr(metadata, "distributions", forbidden)
+    monkeypatch.setattr(metadata, "distribution", forbidden)
+    monkeypatch.setattr(metadata.EntryPoint, "load", forbidden)
+    monkeypatch.setattr(AppConfig, "create", forbidden)
+    monkeypatch.setattr("django.setup", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+
+    index = index_components(iter(supplied), group=GROUP)
+    reversed_index = index_components(reversed(supplied), group=GROUP)
+
+    assert index == reversed_index
+    assert tuple(index.distributions) == (
+        "alpha-component",
+        "disabled-component",
+        "plain-library",
+        "zeta-component",
+    )
+    assert tuple(index.entry_points) == ("alpha-component", "zeta-component")
+    assert index.providers == {"unimportable_alpha": "alpha-component", "unimportable_zeta": "zeta-component"}
+    assert tuple(index.providers.items()) == tuple(reversed_index.providers.items())
+    assert index.distributions["zeta-component"] is zeta
+    assert index.distributions["alpha-component"] is alpha
+    assert index.distributions["plain-library"] is library
+    assert index.distributions["disabled-component"] is disabled
+    point = index.entry_points["zeta-component"]
+    assert isinstance(point, metadata.EntryPoint)
+    assert point.dist is zeta
+    assert point.value == "unimportable_zeta.apps.Config"
+    assert tuple(map(str, index.active_requirements("zeta-component"))) == ("absent-library>=2",)
+    assert not any(name.startswith("unimportable_") for name in sys.modules)
+    for container in (index.distributions, index.entry_points, index.providers):
+        with pytest.raises(TypeError):
+            container["new"] = object()
+    with pytest.raises(FrozenInstanceError):
+        index.distributions = {}
+
+
+@pytest.mark.parametrize("participating", [False, True])
+@pytest.mark.parametrize("same_object", [False, True])
+def test_supplied_canonical_distribution_name_collisions_fail_even_with_equal_versions(
+    installed, participating, same_object
+):
+    first = installed.distribution("Provider.Name", app="first_missing_app" if participating else None)
+    second = (
+        first
+        if same_object
+        else installed.distribution("provider_name", app="second_missing_app" if participating else None)
+    )
+    assert first.version == second.version == "1.0"
+    for supplied in ((first, second), (second, first)):
+        with pytest.raises(
+            ImproperlyConfigured, match="Duplicate component distribution name 'provider-name'"
+        ):
+            index_components(iter(supplied), group=GROUP)
+
+
+@pytest.mark.parametrize("failure", ["cardinality", "app-key"])
+def test_supplied_metadata_uses_the_existing_component_declaration_rules(installed, failure):
+    first = installed.distribution("zeta-provider", app="same_missing_app")
+    if failure == "cardinality":
+        second = installed.distribution(
+            "alpha-provider", app="different_missing_app", extra_points=("extra = extra.Config",)
+        )
+        diagnostic = "Distribution 'alpha-provider' must declare one entry point"
+    else:
+        second = installed.distribution("alpha-provider", app="same_missing_app")
+        diagnostic = "Competing providers for app 'same_missing_app': 'alpha-provider' and 'zeta-provider'"
+    for supplied in ((first, second), (second, first)):
+        with pytest.raises(ImproperlyConfigured, match=diagnostic):
+            index_components(iter(supplied), group=GROUP)
+
+
+@pytest.mark.parametrize("group", ["", None, 12, False])
+def test_component_index_group_validation_precedes_supplied_or_installed_discovery(monkeypatch, group):
+    def forbidden():
+        raise AssertionError("invalid group must fail before metadata iteration")
+
+    def supplied():
+        forbidden()
+        yield
+
+    monkeypatch.setattr(metadata, "distributions", forbidden)
+    for build in (
+        lambda: index_components(supplied(), group=group),
+        lambda: installed_components(group),
+    ):
+        with pytest.raises(ImproperlyConfigured, match="explicit non-empty.*group"):
+            build()
+
+
+def test_empty_supplied_metadata_still_returns_the_native_immutable_index():
+    index = index_components(iter(()), group=GROUP)
+    assert index.distributions == index.entry_points == index.providers == {}
+    with pytest.raises(TypeError):
+        index.providers["app"] = "provider"
 
 
 def test_closure_uses_provider_metadata_across_package_names_and_is_frozen(installed):
@@ -526,15 +651,18 @@ def test_native_distribution_precedence_with_actual_dist_and_egg_info(tmp_path, 
     winner = metadata.distribution("compose-native-shadow")
     native_distribution = metadata.distribution
     calls = []
+    winners = {}
 
     def distribution(name):
         calls.append(name)
-        return native_distribution(name)
+        winners[name] = native_distribution(name)
+        return winners[name]
 
     monkeypatch.setattr(metadata, "distribution", distribution)
     index = installed_components(GROUP)
     assert calls.count("compose-native-shadow") == 1
     assert calls.count("compose-unrelated-shadow") == 1
+    assert index.distributions["compose-native-shadow"] is winners["compose-native-shadow"]
     assert index.distributions["compose-native-shadow"].requires == winner.requires
     assert index.entry_points["compose-native-shadow"] == next(iter(winner.entry_points.select(group=GROUP)))
     assert tuple(map(str, index.active_requirements("compose-native-shadow"))) == tuple(winner.requires)

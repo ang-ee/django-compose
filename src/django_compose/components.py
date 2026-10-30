@@ -1,4 +1,4 @@
-"""Resolve installed component metadata into an ordered selection of native Django apps."""
+"""Index native component metadata and resolve ordered selections of Django apps."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import math
 import os
 import subprocess
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import asdict, dataclass, field
 from graphlib import CycleError, TopologicalSorter
 from importlib import metadata
@@ -178,23 +178,29 @@ def active_requirements(requirements: Iterable[str]) -> tuple[Requirement, ...]:
     )
 
 
-def installed_components(group: str) -> InstalledComponents:
-    """Index group declarations and declared app-key collisions without imports.
+def index_components(distributions: Iterable[metadata.Distribution], *, group: str) -> InstalledComponents:
+    """Index supplied native metadata without discovering or importing apps.
 
     Each participating distribution must declare exactly one group entry point.
     Its value remains a native app/config string, never a loaded entry point.
-    Native metadata.distribution selects the winner for same-name installations.
+    Canonical distribution names must be unique, including library-only inputs.
+    Containers are immutable and sorted by distribution name; values retain
+    their supplied native Distribution and EntryPoint APIs. Indexing neither
+    validates app paths nor resolves requirements.
     """
     if not isinstance(group, str) or not group:
         raise ImproperlyConfigured("An explicit non-empty component entry-point group is required")
-    distributions: dict[str, metadata.Distribution] = {}
+    indexed: dict[str, metadata.Distribution] = {}
+    for distribution in distributions:
+        name: str = canonicalize_name(distribution.metadata["Name"])
+        if name in indexed:
+            raise ImproperlyConfigured(f"Duplicate component distribution name {name!r}")
+        indexed[name] = distribution
+    indexed = dict(sorted(indexed.items()))
     points: dict[str, metadata.EntryPoint] = {}
     app_providers: dict[str, str] = {}
-    names = {canonicalize_name(dist.metadata["Name"]) for dist in metadata.distributions()}
-    for name in sorted(names):
-        distribution = metadata.distribution(name)
+    for name, distribution in indexed.items():
         entries = distribution.entry_points.select(group=group)
-        distributions[name] = distribution
         if not entries:
             continue
         if len(entries) != 1:
@@ -207,8 +213,19 @@ def installed_components(group: str) -> InstalledComponents:
         app_providers[point.name] = name
         points[name] = point
     return InstalledComponents(
-        MappingProxyType(distributions), MappingProxyType(points), MappingProxyType(app_providers)
+        MappingProxyType(indexed), MappingProxyType(points), MappingProxyType(app_providers)
     )
+
+
+def installed_components(group: str) -> InstalledComponents:
+    """Index installed metadata using native same-name installation precedence."""
+
+    def distributions() -> Iterator[metadata.Distribution]:
+        names = {canonicalize_name(dist.metadata["Name"]) for dist in metadata.distributions()}
+        for name in sorted(names):
+            yield metadata.distribution(name)
+
+    return index_components(distributions(), group=group)
 
 
 def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
