@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def host(tmp_path: Path) -> Path:
     package = tmp_path / "bootapp"
@@ -165,6 +167,78 @@ def test_changed_artifact_and_failed_build_refuse_serving(tmp_path: Path) -> Non
     assert invoke(root, script="import django; django.setup()").returncode != 0
 
 
+@pytest.mark.parametrize("retained_history", [False, True])
+def test_interrupted_first_model_write_recovers_on_ordinary_retry(
+    tmp_path: Path, retained_history: bool
+) -> None:
+    import stat
+
+    from django_compose.serving import read_receipt
+
+    root = host(tmp_path)
+    runtime = root / "runtime"
+    history = runtime / "archived/migrations/0001_initial.py"
+    if retained_history:
+        history.parent.mkdir(parents=True)
+        history.write_bytes(b"# retained native migration\n")
+        history.chmod(0o640)
+    result = invoke(
+        root,
+        DJANGO_COMPOSE_MODE="write",
+        script="""from django_compose import artifacts
+original = artifacts.atomic_write
+def interrupted(path, content, **kwargs):
+    original(path, content, **kwargs)
+    if path.name == 'models.py':
+        raise OSError('interrupted after model publication')
+artifacts.atomic_write = interrupted
+from django_compose.management import execute
+execute(['manage.py', 'compose'])
+""",
+    )
+    assert result.returncode != 0
+    assert "interrupted after model publication" in result.stderr
+    assert (runtime / "custom_boot/models.py").is_file()
+    pending = read_receipt(runtime)
+    assert pending is not None and pending.IN_PROGRESS
+    assert "custom_boot/models.py" in pending.OWNED_FILES
+    assert invoke(root, script="import django; django.setup()").returncode != 0
+    user = runtime / "custom_boot/user.txt"
+    user.write_bytes(b"unowned user file")
+
+    successful(invoke(root, "compose"))
+
+    complete = read_receipt(runtime)
+    assert complete is not None and not complete.IN_PROGRESS
+    assert "custom_boot/user.txt" not in complete.OWNED_FILES
+    assert user.read_bytes() == b"unowned user file"
+    if retained_history:
+        assert history.read_bytes() == b"# retained native migration\n"
+        assert stat.S_IMODE(history.stat().st_mode) == 0o640
+        assert "archived" in complete.HISTORY_LABELS
+    successful(invoke(root, script="import django; django.setup()"))
+
+
+def test_model_publication_refuses_to_claim_existing_unowned_file(tmp_path: Path) -> None:
+    from django_compose.serving import Receipt, read_receipt
+
+    root = host(tmp_path)
+    runtime = root / "runtime"
+    foreign = runtime / "custom_boot/models.py"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(b"# user authored model\n")
+    (runtime / "__init__.py").write_text(Receipt((), (), "d", {}, "c", IN_PROGRESS=True).source())
+
+    result = invoke(root, "compose")
+
+    assert result.returncode != 0
+    assert "collides with an unowned file: custom_boot/models.py" in result.stderr
+    assert foreign.read_bytes() == b"# user authored model\n"
+    receipt = read_receipt(runtime)
+    assert receipt is not None and receipt.IN_PROGRESS
+    assert "custom_boot/models.py" not in receipt.OWNED_FILES
+
+
 def test_direct_launcher_requires_mode(tmp_path: Path) -> None:
     root = host(tmp_path)
     successful(invoke(root, "compose"))
@@ -279,7 +353,7 @@ def test_check_receipt_content_is_verified_before_discovery(tmp_path: Path) -> N
         script="""import sys
 def forbidden(frame, event, arg):
     if (event == 'call' and frame.f_code.co_name == 'discover'
-        and frame.f_globals.get('__name__') == 'django_compose.build'):
+        and frame.f_globals.get('__name__') == 'django_compose.model_composition'):
         raise AssertionError('discovery ran before receipt verification')
 sys.setprofile(forbidden)
 import django

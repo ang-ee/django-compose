@@ -23,10 +23,6 @@ from django_compose.serving import Receipt, read_receipt, verify
 from django_compose.snapshot import Snapshot
 
 
-def discover(configs: Iterable[AppConfig]) -> ModelComposition:
-    return ModelComposition.discover(tuple(configs))
-
-
 @dataclass(frozen=True)
 class ConcreteModels:
     composition: ModelComposition
@@ -111,7 +107,7 @@ class BuildPlan:
                         progress=True, hashes=GeneratedTree(self.output_dir, self.sources).hashes()
                     )
                 atomic_write(self.output_dir / "__init__.py", receipt.source().encode())
-            self.composition = discover(self.configs)
+            self.composition = ModelComposition.discover(self.configs)
             models = {model for config in self.configs for model in (config.models or {}).values()}
             models.update(self.composition.ordered_models)
             for source in self.composition.ordered_models:
@@ -162,23 +158,7 @@ class BuildPlan:
                 )
                 if effective == f"{self.output_module}.{label}.migrations" and not migration_init.exists():
                     self.sources[Path(label) / "migrations" / "__init__.py"] = ""
-            if self.mode == "check":
-                changed = [
-                    p
-                    for p, value in self.sources.items()
-                    if not (self.output_dir / p).is_file()
-                    or (self.output_dir / p).read_bytes() != GeneratedTree._bytes(value)
-                ]
-                if changed:
-                    raise ImproperlyConfigured(f"Generated models are stale: {changed}; run compose")
-            else:
-                GeneratedTree(self.output_dir, self.sources).reconcile(prune=False)
-                provisional = dict(self.previous.OWNED_FILES) if self.previous else {}
-                provisional.update(GeneratedTree(self.output_dir, self.sources).hashes())
-                atomic_write(
-                    self.output_dir / "__init__.py",
-                    self._receipt(progress=True, hashes=provisional).source().encode(),
-                )
+            self._publish_sources()
             importlib.invalidate_caches()
             for label in self.labels:
                 importlib.import_module(f"{self.output_module}.{label}.models")
@@ -213,8 +193,15 @@ class BuildPlan:
                 if not isinstance(content, bytes):
                     raise ImproperlyConfigured(f"ArtifactHook must render bytes: {path}")
                 self.sources[path] = content
+        tree = self._publish_sources()
+        serving._publish_build_artifacts(
+            self.close, self.output_dir, self._receipt(progress=True, hashes=tree.hashes())
+        )
+
+    def _publish_sources(self) -> GeneratedTree:
+        """Validate before claiming paths, then record ownership before any write."""
         tree = GeneratedTree(self.output_dir, self.sources)
-        tree._validate()
+        current = tree._validate()
         if self.mode == "check":
             if any(
                 not (self.output_dir / path).is_file()
@@ -223,7 +210,6 @@ class BuildPlan:
             ):
                 raise ImproperlyConfigured("Generated artifacts are stale; run compose")
         else:
-            current = read_receipt(self.output_dir)
             provisional = dict(current.OWNED_FILES) if current else {}
             provisional.update(tree.hashes())
             atomic_write(
@@ -231,9 +217,7 @@ class BuildPlan:
                 self._receipt(progress=True, hashes=provisional).source().encode(),
             )
             tree.reconcile(prune=False)
-        serving._publish_build_artifacts(
-            self.close, self.output_dir, self._receipt(progress=True, hashes=tree.hashes())
-        )
+        return tree
 
     def finalize(self) -> Receipt:
         try:
