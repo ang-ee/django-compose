@@ -28,9 +28,11 @@ from django.db.migrations.autodetector import MigrationAutodetector
 from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.graph import MigrationGraph
 from django.db.migrations.loader import MigrationLoader
+from django.db.migrations.operations import fields as field_operations
+from django.db.migrations.operations import models as model_operations
 from django.db.migrations.operations.base import Operation
-from django.db.migrations.operations.fields import FieldOperation, RemoveField
-from django.db.migrations.operations.models import DeleteModel, ModelOperation
+from django.db.migrations.operations.fields import RemoveField
+from django.db.migrations.operations.models import DeleteModel
 from django.db.migrations.operations.special import RunPython, RunSQL, SeparateDatabaseAndState
 from django.db.migrations.recorder import MigrationRecorder
 from django.db.migrations.state import ProjectState
@@ -762,7 +764,15 @@ def _history_aliases(loader: MigrationLoader, labels: set[str]) -> tuple[str, ..
                     alias for alias in connections if router.allow_migrate(alias, label, **operation.hints)
                 )
             elif (
-                forwards.__module__ not in (ModelOperation.__module__, FieldOperation.__module__)
+                not any(
+                    vars(owner).get("database_forwards") is forwards
+                    and any(
+                        getattr(module, owner.__name__, None) is owner
+                        for module in (model_operations, field_operations)
+                    )
+                    for owner in type(operation).__mro__
+                    if owner is not Operation
+                )
                 or type(operation).allow_migrate_model is not Operation.allow_migrate_model
             ):
                 aliases.update(connections)

@@ -432,7 +432,7 @@ assert not updated.called
 
 @pytest.mark.parametrize("cutoff", ["retire", "reset"])
 @pytest.mark.parametrize("nested", [False, True])
-@pytest.mark.parametrize("kind", ["sql", "python", "custom", "override"])
+@pytest.mark.parametrize("kind", ["sql", "python", "custom", "override", "wrapped"])
 def test_database_operation_routes_keep_pending_secondary_history_in_scope(host, cutoff, nested, kind):
     root, run = host
     operations = {
@@ -440,6 +440,7 @@ def test_database_operation_routes_keep_pending_secondary_history_in_scope(host,
         "python": 'HintedPython(migrations.RunPython.noop, hints={"target_db": "other"})',
         "custom": "CustomOperation()",
         "override": "CustomPython(migrations.RunPython.noop)",
+        "wrapped": "WrappedOperation()",
     }
     operation = operations[kind]
     if nested:
@@ -451,6 +452,7 @@ def test_database_operation_routes_keep_pending_secondary_history_in_scope(host,
         root,
         "history/alpha/0002_auxiliary.py",
         f"""
+from functools import wraps
 from django.db import migrations
 from django.db.migrations.operations.base import Operation
 class HintedPython(migrations.RunPython):
@@ -461,6 +463,12 @@ class CustomOperation(Operation):
     def database_forwards(self, app_label, schema_editor, from_state, to_state):
         schema_editor.execute("SELECT 1")
 class CustomPython(migrations.RunPython):
+    def database_forwards(self, app_label, schema_editor, from_state, to_state):
+        schema_editor.execute("SELECT 1")
+class WrappedOperation(Operation):
+    def state_forwards(self, app_label, state):
+        pass
+    @wraps(migrations.AlterModelOptions.database_forwards)
     def database_forwards(self, app_label, schema_editor, from_state, to_state):
         schema_editor.execute("SELECT 1")
 class Migration(migrations.Migration):
@@ -487,7 +495,7 @@ with patch.object(router, "routers", [HintRouter()]):
     secondary = MigrationExecutor(connections["other"])
     secondary.migrate([("alpha", "0001_origin")])
     expected = ("default", "other")
-    if {kind!r} in ("custom", "override"):
+    if {kind!r} in ("custom", "override", "wrapped"):
         expected += ("unrelated",)
     assert _history_aliases(MigrationLoader(None), {{"alpha"}}) == expected
     before = files()
@@ -540,5 +548,41 @@ with patch.object(router, "routers", [ModelRouter()]):
     assert _history_aliases(MigrationLoader(None), {"alpha"}) == ("default", "other")
     expect(RuntimeError, "database 'other'", lambda: retire_history("alpha"))
 assert not updated.called
+"""
+    )
+
+
+def test_inherited_native_model_operation_keeps_router_exclusions(host):
+    root, run = host
+    write(
+        root,
+        "history/alpha/0002_native.py",
+        """
+from django.db import migrations
+class NativeOptions(migrations.AlterModelOptions):
+    pass
+class Migration(migrations.Migration):
+    dependencies = [("alpha", "0001_origin")]
+    operations = [NativeOptions(name="record", options={"verbose_name": "Native record"})]
+""",
+    )
+    run(
+        DISABLE
+        + """
+from django.db import connections, router
+from django_compose.migrations import _history_aliases
+connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
+class ModelRouter:
+    def allow_migrate(self, db, app_label, **hints):
+        if app_label == "alpha":
+            return db == "default"
+        return None
+with patch.object(router, "routers", [ModelRouter()]):
+    executor = MigrationExecutor(connection)
+    executor.migrate(executor.loader.graph.leaf_nodes())
+    assert _history_aliases(MigrationLoader(None), {"alpha"}) == ("default",)
+    retire_history("alpha")
+assert updated.called
+assert not Path("other.sqlite3").exists()
 """
     )
