@@ -2,6 +2,11 @@
 
 ## 0.1.0.dev5
 
+- Allow transition owners to declare an adoption-safe initial baseline through
+  `initial_baseline: "satisfied"`, preserving true-guard data work and immutable
+  source hashes. Roll back initial schema, bindings and reconciliation together
+  when migration authoring raises.
+
 - Respect Django's swapped-model storage semantics when guarding migrations, so
   projects with a custom user model can create migrations and provision normally.
 

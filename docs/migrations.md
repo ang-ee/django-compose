@@ -156,6 +156,53 @@ helpers still need their providers. A guard that sees a final schema cannot prov
 that a data operation already ran. Native dependencies, replacements and complete
 squash chains retain that execution history.
 
+A transition owner can explicitly assert that a final-schema initial baseline
+satisfies a transition by adding `initial_baseline: "satisfied"` to its existing
+explicit declaration provider, without editing its immutable migration source:
+
+```python
+# inventory/transitions.py; safe to call before Django setup.
+def declarations():
+    return [{
+        "declaring_app": "inventory",
+        "name": "rename_legacy",
+        "app_label": "inventory",
+        "module": "inventory.compose_migrations.inventory.rename_legacy",
+        "initial_baseline": "satisfied",
+    }]
+```
+
+Wire that provider through `COMPOSE_TRANSITION_SOURCE =
+"inventory.transitions.declarations"`. The explicit provider replaces default
+filename discovery, so include every required transition record. Omission is
+strict; no other baseline value is accepted. The frozen declaration participates
+in the snapshot digest while migration source bytes and hashes stay unchanged.
+
+This is a strong assertion: no original operation is needed on **any** database
+adopting the final-schema baseline, including existing tables and rows adopted
+with native `migrate --fake-initial`. If those rows need conversion or backfill,
+keep that work in a separate native transition whose guard is true on the final
+schema and whose operations handle both empty and preexisting tables. True guards
+always run their original operations, even when the declaration has this option.
+
+Only a declared false guard targeting a label actually initialized by this
+command's native initial-authoring phase becomes a sealed zero-operation origin.
+Native prerequisite expansion contributes its exact newly initialized labels.
+Existing initial-looking files do not qualify, and ordinary planning/checks and
+history reset stay strict. The sealed `compose_initial_baseline = "satisfied"`
+metadata identifies satisfaction by the baseline, rather than execution of the
+original operations. Keep that native origin node after removing the declaration;
+it preserves source/body digests, imports and resolved graph edges and remains
+executable without the original source module. Imported helpers still need their
+providers.
+
+If initial generation, binding or final reconciliation raises, authoring restores
+affected pre-call migration bytes and permissions and removes its exact new
+files. It invalidates migration imports and never writes the migration recorder;
+a retry starts from the same disk history. This exception rollback does not
+promise crash-atomic multi-file filesystem publication. Django owns subsequent
+application and database retry behavior.
+
 New bindings use `compose_*` metadata. Existing `angee_origin` and
 `angee_source_sha256` metadata remain readable for historical compatibility;
 there is no need to rewrite old migration files. Check and dry-run paths do not

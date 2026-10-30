@@ -286,10 +286,13 @@ setup. Snapshot and serving do not import the model compiler or execute integrat
 
 Without `COMPOSE_TRANSITION_SOURCE`, each selected app contributes sorted
 `compose_migrations/<label>/<name>.py` files in app order, including numeric
-migration names. An explicit source replaces that discovery. Records have exactly
-`declaring_app`, `name`, `app_label` and `module` keys. Modules relative to the
-declaring app are normalized once. Duplicate `<declaring_app>:<name>` origins
-fail. `Snapshot.transition_records` retains the frozen normalized records;
+migration names. An explicit source replaces that discovery. Records require
+`declaring_app`, `name`, `app_label` and `module` string keys, and optionally
+`initial_baseline: "satisfied"`; other keys or baseline values are invalid.
+Omission retains strict guard handling. The explicit transition-owner provider
+supplies this assertion; default discovery does not infer it from source modules.
+Modules relative to the declaring app are normalized once. Duplicate
+`<declaring_app>:<name>` origins fail. `Snapshot.transition_records` retains the frozen normalized records;
 `Snapshot.transitions` stores their origin/sha256 pairs. Build and native history
 use the same records.
 
@@ -466,11 +469,30 @@ expansion. Initial `--check` retains Django's exit status 1 for missing history;
 are refused before initial schema authoring. If native expansion requires changes
 to an app with existing history, the command refuses before writes and asks the
 caller to author that app's transitions first; existing history bytes remain intact.
+Initial authoring, binding and final reconciliation share an exception rollback
+boundary: restore affected pre-call migration bytes and permissions, remove exact
+newly authored files and invalidate migration imports, without recorder writes.
+A failed attempt can retry from the same disk history. This is exception safety,
+not crash-atomic publication of multiple files.
 
 `TransitionBinding` uses frozen snapshot records by default, or explicit
 `declarations=`. It binds native migration origins `<declaring_app>:<name>` to
 the project's actual graph leaves. Each source provides a native `Migration`
-and a pure `applies(ProjectState) -> bool` guard; a pending false guard is refused.
+and a pure `applies(ProjectState) -> bool` guard. A pending false guard is refused
+unless its owner declares `initial_baseline: "satisfied"` and the label acquired
+its first native disk nodes in this successful command's initial-authoring phase,
+including native prerequisite expansion. The assertion means the final-schema
+initial baseline satisfies this transition on every database adopting it,
+including existing rows adopted through native `migrate --fake-initial`. It does
+not assert that the original operations executed. Existing initial-looking
+files, reset-created initials and global read-only checks supply no exemption.
+True guards always retain their operations, including bootstrap and backfill
+work. A false-guard baseline binding substitutes zero native operations before
+downstream graph state calculation and seals `compose_initial_baseline =
+"satisfied"` plus the operations override in its materialization footer. This
+durable origin must be retained like any other native history node after its
+source declaration is removed. Its source bytes and source SHA remain unchanged;
+adding the optional declaration does not rewrite or invalidate existing origins.
 Immutable source/body digests, dependencies, `run_before`, `replaces` and complete
 squash chains are preserved. Materialized history remains executable after its
 source declaration is removed. Changed immutable sources, duplicate origins,

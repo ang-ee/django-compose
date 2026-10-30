@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +17,13 @@ from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.writer import MigrationWriter
 from django.utils.module_loading import module_dir
 
+from django_compose.artifacts import atomic_write
 from django_compose.management import require_serving_mode
 from django_compose.migrations import (
     DropGuardAutodetector,
     TransitionBinding,
+    _directory,
+    _forget_history,
     _metadata,
 )
 from django_compose.serving import read_receipt
@@ -39,7 +43,37 @@ class Command(NativeCommand):
     autodetector = DropGuardAutodetector
     _initial_history: frozenset[str] | None = None
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._originals: dict[Path, tuple[bytes, int] | None] = {}
+        self._bound_files: list[Path] = []
+        self._changed_labels: set[str] = set()
+
     def handle(self, *app_labels: str, **options: Any) -> str | None:
+        self._originals.clear()
+        self._bound_files.clear()
+        self._changed_labels.clear()
+        try:
+            return self._author(*app_labels, **options)
+        except BaseException:
+            for path in self._bound_files:
+                path.unlink(missing_ok=True)
+            for path, original in self._originals.items():
+                if original is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    content, mode = original
+                    atomic_write(path, content, mode=mode)
+            _forget_history(self._changed_labels)
+            raise
+
+    def _remember(self, path: Path) -> None:
+        if path not in self._originals:
+            self._originals[path] = (
+                (path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) if path.exists() else None
+            )
+
+    def _author(self, *app_labels: str, **options: Any) -> str | None:
         require_serving_mode()
         name = options.get("name")
         if name and not name.isidentifier():
@@ -61,6 +95,7 @@ class Command(NativeCommand):
             and any(apps.get_app_config(label).get_models())
         }
         selected = set(app_labels) if app_labels else None
+        new_labels = frozenset[str]()
         if initial:
             for flag in ("merge", "empty", "update"):
                 if options.get(flag):
@@ -72,10 +107,12 @@ class Command(NativeCommand):
                 self._initial_history = None
             if options.get("dry_run") or options.get("check_changes"):
                 return None
+            # Only actual disk nodes created by this native initial phase prove
+            # first authoring, including native prerequisite expansion.
+            current = MigrationLoader(None, ignore_no_migrations=True)
+            new_labels = frozenset(label for label, _ in current.disk_migrations if label not in initialized)
             if selected is not None:
-                # Native dependency expansion can initialize other fresh apps.
-                current = MigrationLoader(None, ignore_no_migrations=True)
-                selected.update(label for label, _ in current.disk_migrations if label not in initialized)
+                selected.update(new_labels)
         if options.get("merge"):
             return super().handle(*app_labels, **options)
         authored = TransitionBinding(labels=labels)
@@ -83,7 +120,17 @@ class Command(NativeCommand):
             if options.get("dry_run") or options.get("check_changes"):
                 authored.check(app_labels=selected)
             else:
-                authored.materialize(apps, app_labels=selected)
+                authored.materialize(
+                    apps,
+                    app_labels=selected,
+                    initial_baselines=new_labels,
+                    written_files=self._bound_files,
+                )
+                self._changed_labels.update(
+                    declaration["app_label"]
+                    for declaration in authored.declarations
+                    if MigrationLoader.migrations_module(declaration["app_label"])[0] is not None
+                )
         except (RuntimeError, ImproperlyConfigured) as error:
             raise CommandError(str(error)) from error
         return super().handle(*app_labels, **options)
@@ -113,6 +160,13 @@ class Command(NativeCommand):
                 if package is None:
                     raise CommandError(f"Migrations are disabled for app {label!r}")
                 writer = MigrationWriter(migration, self.include_header)
+                if not self.dry_run:
+                    directory = _directory(label, missing=True)
+                    self._changed_labels.add(label)
+                    self._remember(directory / writer.filename)
+                    self._remember(directory / "__init__.py")
+                    if update_previous_migration_paths:
+                        self._remember(Path(update_previous_migration_paths[label]))
                 key = package, writer.filename
                 if key in destinations:
                     raise CommandError(f"Multiple migrations target {key!r}")

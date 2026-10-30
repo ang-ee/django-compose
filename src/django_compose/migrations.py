@@ -153,6 +153,7 @@ class TransitionPlan:
     dependencies: tuple[Node, ...]
     run_before: tuple[Node, ...]
     source_package: str
+    initial_baseline: bool = False
 
 
 @dataclass(frozen=True)
@@ -164,6 +165,7 @@ class _Source:
     text: str
     digest: str
     package: str
+    initial_baseline: bool
 
 
 class _BindingLoader(MigrationLoader):
@@ -208,8 +210,9 @@ class TransitionBinding:
     """Bind declared migrations to host leaves without connecting to a database.
 
     Origins and snapshots are immutable, including after declaration removal.
-    A false guard never establishes that a data operation has run. Completed
-    transitions must remain in native history, including native squash chains.
+    A false guard never establishes that a data operation has run. Only an
+    explicit declaration can assert satisfaction by a newly authored initial
+    baseline. Completed transitions remain in native history and squash chains.
     """
 
     def __init__(
@@ -309,7 +312,16 @@ class TransitionBinding:
             if len(leaves) == 1 and leaves[0] not in migration.dependencies:
                 cast(list[Node], migration.dependencies).append(leaves[0])
             package = (module.__spec__.parent if module.__spec__ else None) or module_name.rpartition(".")[0]
-            pending[key] = _Source(origin, migration, guard, path, data.decode("utf-8"), digest, package)
+            pending[key] = _Source(
+                origin,
+                migration,
+                guard,
+                path,
+                data.decode("utf-8"),
+                digest,
+                package,
+                declaration.get("initial_baseline") == "satisfied",
+            )
         return pending
 
     def plan(
@@ -319,6 +331,7 @@ class TransitionBinding:
         defer_drop_check: bool = False,
         app_labels: Iterable[str] | None = None,
         allow_missing_packages: bool = False,
+        initial_baselines: frozenset[str] = frozenset(),
     ) -> tuple[TransitionPlan, ...]:
         """Validate the complete graph and selected prerequisite closure, without writes."""
         existing = MigrationLoader(None, ignore_no_migrations=True)
@@ -354,7 +367,12 @@ class TransitionBinding:
                 raise RuntimeError(f"{source.origin}: applies(project_state) failed") from error
             if not isinstance(applies, bool):
                 raise RuntimeError(f"{source.origin}: applies must return bool")
-            if not applies:
+            baseline = not applies and source.initial_baseline and key[0] in initial_baselines
+            if baseline:
+                # The graph owns this same Migration object. Substitute before
+                # computing any following transition's native ProjectState.
+                cast(list[Operation], source.migration.operations)[:] = []
+            elif not applies:
                 raise RuntimeError(
                     f"{source.origin}: false guard cannot prove a data transition completed; "
                     "retain native history or a complete replacement baseline"
@@ -379,6 +397,7 @@ class TransitionBinding:
                     tuple(source.migration.dependencies),
                     tuple(source.migration.run_before),
                     source.package,
+                    baseline,
                 )
             )
         if apps is not None and not defer_drop_check:
@@ -461,25 +480,61 @@ class TransitionBinding:
             + f"Migration.compose_origin = {plan.origin!r}\n"
             + f"Migration.compose_source_sha256 = {plan.source_sha256!r}\n"
             + f"Migration.compose_body_sha256 = {body_digest!r}\n"
+            + (
+                "Migration.operations = []\nMigration.compose_initial_baseline = 'satisfied'\n"
+                if plan.initial_baseline
+                else ""
+            )
         ).encode()
         return payload + _SEAL_PREFIX + repr(hashlib.sha256(payload).hexdigest()).encode() + b"\n"
 
-    def materialize(self, apps: Apps, app_labels: Iterable[str] | None = None) -> tuple[Path, ...]:
-        """Snapshot all validated sources at the explicit native authoring boundary."""
-        plans = self.plan(apps=apps, app_labels=app_labels, allow_missing_packages=True)
+    def materialize(
+        self,
+        apps: Apps,
+        app_labels: Iterable[str] | None = None,
+        *,
+        initial_baselines: frozenset[str] = frozenset(),
+        written_files: list[Path] | None = None,
+    ) -> tuple[Path, ...]:
+        """Snapshot sources, optionally satisfying declared first-authoring baselines.
+
+        initial_baselines is the command's exact newly initialized disk-label
+        delta, never inferred from initial-looking files or database contents.
+        written_files tracks exclusive destinations for an enclosing native
+        authoring rollback, including a write that raises after publication.
+        """
+        plans = self.plan(
+            apps=apps,
+            app_labels=app_labels,
+            allow_missing_packages=True,
+            initial_baselines=initial_baselines,
+        )
         rendered = [(plan, self._render(plan)) for plan in plans]
-        for label in dict.fromkeys(plan.app_label for plan in plans):
-            directory = Path(MigrationWriter(Migration("_package", label)).basedir)
-            directory.mkdir(parents=True, exist_ok=True)
-            if not (directory / "__init__.py").exists():
-                atomic_write(directory / "__init__.py", b"", exclusive=True)
-        written = []
+        packages = [
+            directory / "__init__.py"
+            for label in dict.fromkeys(plan.app_label for plan in plans)
+            for directory in (_directory(label, missing=True),)
+            if not (directory / "__init__.py").exists()
+        ]
+        written: list[Path] = []
         try:
-            for plan, content in rendered:
-                if plan.output_path.exists():
-                    raise RuntimeError(f"Migration destination appeared during authoring: {plan.output_path}")
-                atomic_write(plan.output_path, content, exclusive=True)
-                written.append(plan.output_path)
+            for path, content in [
+                *((path, b"") for path in packages),
+                *((plan.output_path, content) for plan, content in rendered),
+            ]:
+                if path.exists():
+                    raise RuntimeError(f"Migration destination appeared during authoring: {path}")
+                written.append(path)
+                if written_files is not None:
+                    written_files.append(path)
+                try:
+                    atomic_write(path, content, exclusive=True)
+                except FileExistsError:
+                    # Exclusive publication lost a race; that file is not ours.
+                    written.pop()
+                    if written_files is not None:
+                        written_files.pop()
+                    raise
             importlib.invalidate_caches()
             self.plan(apps=apps, app_labels=app_labels)
         except BaseException:
@@ -487,7 +542,7 @@ class TransitionBinding:
                 path.unlink(missing_ok=True)
             _forget_history({plan.app_label for plan in plans})
             raise
-        return tuple(written)
+        return tuple(plan.output_path for plan in plans)
 
 
 def _storage_identifier(connection: BaseDatabaseWrapper, identifier: str) -> tuple[str, str]:
@@ -800,7 +855,7 @@ def _forget_history(labels: Iterable[str]) -> None:
         if any(prefix and (name == prefix or name.startswith(prefix + ".")) for prefix in prefixes):
             sys.modules.pop(name, None)
     for label in labels:
-        for bytecode in (_directory(label) / "__pycache__").glob("*.pyc"):
+        for bytecode in (_directory(label, missing=True) / "__pycache__").glob("*.pyc"):
             bytecode.unlink()
     importlib.invalidate_caches()
 

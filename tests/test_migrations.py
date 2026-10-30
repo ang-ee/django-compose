@@ -704,3 +704,29 @@ executor = MigrationExecutor(connection)
 executor.migrate(executor.loader.graph.leaf_nodes())
 assert "new" in executor.loader.project_state().models[("alpha", "record")].fields
 """)
+
+
+def test_adding_baseline_declaration_preserves_existing_source_and_upgrade(host):
+    _, run = host
+    run("""
+import hashlib
+source = Path("author/transitions/rename.py").read_bytes()
+path, = owner().materialize(apps)
+sealed = path.read_bytes()
+declarations.entries[0]["initial_baseline"] = "satisfied"
+assert owner().materialize(apps) == ()
+assert path.read_bytes() == sealed
+loader = MigrationLoader(None)
+node = loader.disk_migrations["alpha", "rename"]
+assert len(node.operations) == 2
+assert not hasattr(node, "compose_initial_baseline")
+assert node.compose_source_sha256 == hashlib.sha256(source).hexdigest()
+executor = MigrationExecutor(connection)
+executor.migrate([("alpha", "0001_origin")])
+state = executor.loader.project_state([("alpha", "0001_origin")])
+state.apps.get_model("alpha", "Record")._base_manager.create(old="before")
+executor = MigrationExecutor(connection)
+executor.migrate([("alpha", "rename")])
+assert list(apps.get_model("alpha", "Record")._base_manager.values_list("new", flat=True)) == ["converted"]
+assert Path("author/transitions/rename.py").read_bytes() == source
+""")

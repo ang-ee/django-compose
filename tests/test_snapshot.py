@@ -610,3 +610,36 @@ def test_opaque_closure_is_derived_not_a_snapshot_input():
     assert plain.digest() == with_closure.digest()
     assert "COMPOSE_CLOSURE" not in with_closure.settings
     assert "COMPOSE_CLOSURE" not in structural_settings({"COMPOSE_CLOSURE": object()})
+
+
+@pytest.mark.parametrize("value", ["", "skip", "Satisfied", True, None])
+def test_transition_initial_baseline_rejects_other_values(value):
+    with pytest.raises(ImproperlyConfigured):
+        transition_declarations(
+            [
+                {
+                    "declaring_app": "app",
+                    "name": "rename",
+                    "app_label": "app",
+                    "module": "rename",
+                    "initial_baseline": value,
+                }
+            ]
+        )
+
+
+def test_transition_initial_baseline_is_frozen_and_fingerprinted(tmp_path, monkeypatch):
+    package = tmp_path / "baselineapp"
+    package.mkdir()
+    (package / "rename.py").write_text("# unchanged historical source\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    record = {"declaring_app": "baselineapp", "name": "rename", "app_label": "app", "module": "rename"}
+    before = snapshot((), transitions=[record])
+    record["initial_baseline"] = "satisfied"
+    after = snapshot((), transitions=[record])
+    assert before.transitions == after.transitions
+    assert before.digest() != after.digest()
+    assert "initial_baseline" not in before.transition_records[0]
+    assert after.transition_records[0]["initial_baseline"] == "satisfied"
+    with pytest.raises(TypeError):
+        after.transition_records[0]["initial_baseline"] = "other"

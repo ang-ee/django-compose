@@ -169,3 +169,348 @@ for label in ("alpha", "beta"):
 """,
         )
     )
+
+
+@pytest.fixture
+def baseline_host(fresh_host):
+    records = []
+    for label in ("alpha", "beta"):
+        write(
+            fresh_host,
+            f"{label}/compose_migrations/{label}/rename_legacy.py",
+            f'''
+"""Immutable upgrade source retained by a no-op baseline origin."""
+from __future__ import annotations
+from django.db import migrations
+
+def applies(state):
+    model = state.models.get(({label!r}, "entry"))
+    return model is not None and "value" not in model.fields
+
+def convert(apps, editor):
+    apps.get_model({label!r}, "Entry")._base_manager.using(editor.connection.alias).update(value="converted")
+
+class Migration(migrations.Migration):
+    dependencies = []
+    run_before = [({label!r}, "record_bootstrap")]
+    operations = [
+        migrations.RenameField(model_name="entry", old_name="legacy", new_name="value"),
+        migrations.RunPython(convert, migrations.RunPython.noop),
+    ]
+''',
+        )
+        source = fresh_host / f"{label}/compose_migrations/{label}/record_bootstrap.py"
+        source.write_text(
+            source.read_text()
+            .replace("dependencies = []", f"dependencies = [({label!r}, 'rename_legacy')]")
+            .replace(
+                f'return ({label!r}, "entry") in state.models',
+                f'return "value" in state.models[({label!r}, "entry")].fields',
+            )
+            .replace(
+                "def forwards(apps, editor):",
+                f"def forwards(apps, editor):\n"
+                f'    apps.get_model({label!r}, "Entry")._base_manager.using(editor.connection.alias)'
+                '.update(value="backfilled")',
+            )
+        )
+        for name in ("rename_legacy", "record_bootstrap"):
+            records.append(
+                {
+                    "declaring_app": label,
+                    "name": name,
+                    "app_label": label,
+                    "module": f"{label}.compose_migrations.{label}.{name}",
+                    "initial_baseline": "satisfied",
+                }
+            )
+    write(fresh_host, "declarations.py", f"def transitions():\n    return {records!r}\n")
+    settings_path = fresh_host / "settings.py"
+    settings_path.write_text(
+        settings_path.read_text().replace(
+            "configure(globals())",
+            'COMPOSE_TRANSITION_SOURCE = "declarations.transitions"\nconfigure(globals())',
+        )
+    )
+    successful(invoke(fresh_host, "compose"))
+    return fresh_host
+
+
+@pytest.mark.parametrize("fake_initial", [False, True])
+def test_declared_initial_baseline_preserves_true_data_work(baseline_host, fake_initial):
+    successful(
+        invoke(
+            baseline_host,
+            script=f"""
+import hashlib
+from pathlib import Path
+import django
+django.setup()
+from django.apps import apps
+from django.core.management import call_command
+from django.db import connection
+from django.db.migrations.loader import MigrationLoader
+from django.db.migrations.recorder import MigrationRecorder
+source = Path("alpha/compose_migrations/alpha/rename_legacy.py").read_bytes()
+if {fake_initial!r}:
+    model = apps.get_model("alpha", "Entry")
+    with connection.schema_editor() as editor:
+        editor.create_model(model)
+    model._base_manager.create(value="preexisting")
+for flag in ("--check", "--dry-run"):
+    before = {{p: p.read_bytes() for p in Path("runtime").glob("*/migrations/*.py")}}
+    try:
+        call_command("makemigrations", "alpha", flag, interactive=False, verbosity=0)
+    except SystemExit as error:
+        assert flag == "--check" and error.code == 1
+    assert {{p: p.read_bytes() for p in Path("runtime").glob("*/migrations/*.py")}} == before
+call_command("makemigrations", interactive=False, verbosity=0)
+loader = MigrationLoader(None, ignore_no_migrations=True)
+node = loader.disk_migrations["alpha", "rename_legacy"]
+assert node.operations == []
+assert node.compose_initial_baseline == "satisfied"
+assert node.compose_source_sha256 == hashlib.sha256(source).hexdigest()
+assert node.dependencies == [("alpha", "0001_initial")]
+assert node.run_before == [("alpha", "record_bootstrap")]
+data = loader.disk_migrations["alpha", "record_bootstrap"]
+assert len(data.operations) == 1 and not hasattr(data, "compose_initial_baseline")
+assert ("alpha", "rename_legacy") in data.dependencies
+assert MigrationRecorder(connection).applied_migrations() == {{}}
+call_command("makemigrations", "alpha", check_changes=True, dry_run=True, interactive=False, verbosity=0)
+call_command("migrate", "alpha", fake_initial={fake_initial!r}, interactive=False, verbosity=0)
+values = list(apps.get_model("alpha", "Entry")._base_manager.values_list("value", flat=True))
+assert values == (["backfilled", "transition ran"] if {fake_initial!r} else ["transition ran"]), values
+assert Path("alpha/compose_migrations/alpha/rename_legacy.py").read_bytes() == source
+""",
+        )
+    )
+    # Removing a satisfied source declaration leaves durable executable native history.
+    provider = baseline_host / "declarations.py"
+    provider.write_text(
+        provider.read_text().replace("def transitions():", "def all_transitions():")
+        + '\ndef transitions():\n    return [r for r in all_transitions() if r["name"] != "rename_legacy"]\n'
+    )
+    (baseline_host / "alpha/compose_migrations/alpha/rename_legacy.py").unlink()
+    (baseline_host / "beta/compose_migrations/beta/rename_legacy.py").unlink()
+    successful(invoke(baseline_host, "compose"))
+    successful(invoke(baseline_host, "check_migrations"))
+    successful(invoke(baseline_host, "migrate", "alpha", "--noinput", "--verbosity", "0"))
+
+
+def test_undeclared_initial_false_guard_rolls_back_and_retry_stays_strict(baseline_host):
+    provider = baseline_host / "declarations.py"
+    provider.write_text(provider.read_text().replace(", 'initial_baseline': 'satisfied'", ""))
+    successful(invoke(baseline_host, "compose"))
+    before = {p: p.read_bytes() for p in (baseline_host / "runtime").glob("*/migrations/*.py")}
+    for _ in range(2):
+        result = invoke(baseline_host, "makemigrations", "alpha", "--noinput", "--verbosity", "0")
+        assert result.returncode != 0
+        assert "false guard cannot prove" in result.stderr
+        assert {p: p.read_bytes() for p in (baseline_host / "runtime").glob("*/migrations/*.py")} == before
+
+
+def test_initial_baseline_includes_only_native_expanded_labels(baseline_host):
+    source = baseline_host / "beta/models.py"
+    source.write_text(
+        source.read_text().replace(
+            "    class Meta:",
+            '    parent = models.ForeignKey("alpha.Entry", null=True, on_delete=models.CASCADE)\n'
+            "    class Meta:",
+        )
+    )
+    successful(invoke(baseline_host, "compose"))
+    successful(invoke(baseline_host, "makemigrations", "beta", "--noinput", "--verbosity", "0"))
+    successful(
+        invoke(
+            baseline_host,
+            script="""
+import django
+django.setup()
+from django.core.management import call_command
+from django.db.migrations.loader import MigrationLoader
+loader = MigrationLoader(None, ignore_no_migrations=True)
+for label in ("alpha", "beta"):
+    assert loader.disk_migrations[label, "rename_legacy"].compose_initial_baseline == "satisfied"
+call_command("migrate", interactive=False, verbosity=0)
+""",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "phase", ["initial", "render", "binding-write", "binding-validation", "reconciliation", "expanded-write"]
+)
+def test_initial_authoring_failure_restores_exact_files_and_retries(baseline_host, phase):
+    if phase == "expanded-write":
+        model = baseline_host / "beta/models.py"
+        model.write_text(
+            model.read_text().replace(
+                "    class Meta:",
+                '    parent = models.ForeignKey("alpha.Entry", null=True, on_delete=models.CASCADE)\n'
+                "    class Meta:",
+            )
+        )
+    selected = "beta" if phase == "expanded-write" else "alpha"
+    # This real state operation requires a final native reconciliation migration.
+    source = baseline_host / "alpha/compose_migrations/alpha/record_bootstrap.py"
+    source.write_text(
+        source.read_text()
+        .replace("from django.db import migrations", "from django.db import migrations, models")
+        .replace(
+            "operations = [migrations.RunPython(forwards, migrations.RunPython.noop)]",
+            "operations = [migrations.RunPython(forwards, migrations.RunPython.noop), "
+            'migrations.AddField("entry", "temporary", models.CharField(max_length=10, default=""))]',
+        )
+    )
+    successful(invoke(baseline_host, "compose"))
+    successful(
+        invoke(
+            baseline_host,
+            script=f"""
+from pathlib import Path
+from stat import S_IMODE
+from unittest.mock import patch
+import django
+django.setup()
+from django.core.management import call_command
+from django.core.management.commands.makemigrations import Command as NativeCommand
+from django.db import connection
+from django.db.migrations.recorder import MigrationRecorder
+from django_compose.migrations import TransitionBinding
+from django_compose.artifacts import atomic_write
+
+init = Path("runtime/alpha/migrations/__init__.py")
+init.write_text("# retained package bytes\\n")
+init.chmod(0o640)
+def files():
+    return {{p: (p.read_bytes(), S_IMODE(p.stat().st_mode))
+            for p in Path("runtime").glob("*/migrations/*.py")}}
+before = files()
+native = NativeCommand.handle
+plan = TransitionBinding.plan
+calls = 0
+def native_phase(self, *args, **options):
+    global calls
+    calls += 1
+    result = native(self, *args, **options)
+    if ({phase!r} == "initial" and calls == 1) or ({phase!r} == "reconciliation" and calls == 2):
+        if calls == 2:
+            assert any("RemoveField" in p.read_text() for p in Path("runtime/alpha/migrations").glob("*.py"))
+        raise RuntimeError("injected " + {phase!r})
+    return result
+
+def render(_plan):
+    raise RuntimeError("injected render")
+
+def write(path, content, **kwargs):
+    atomic_write(path, content, **kwargs)
+    if path.stem == "record_bootstrap":
+        raise RuntimeError("injected " + {phase!r})
+
+def validate(self, **kwargs):
+    global calls
+    calls += 1
+    if calls == 2:
+        raise RuntimeError("injected binding-validation")
+    return plan(self, **kwargs)
+
+if {phase!r} in ("initial", "reconciliation"):
+    failure = patch.object(NativeCommand, "handle", native_phase)
+elif {phase!r} == "render":
+    failure = patch.object(TransitionBinding, "_render", staticmethod(render))
+elif {phase!r} in ("binding-write", "expanded-write"):
+    failure = patch("django_compose.migrations.atomic_write", write)
+else:
+    failure = patch.object(TransitionBinding, "plan", validate)
+with failure:
+    try:
+        call_command("makemigrations", {selected!r}, interactive=False, verbosity=0)
+    except Exception as error:
+        assert "injected " + {phase!r} in str(error), str(error)
+    else:
+        raise AssertionError("failure injection did not run")
+assert files() == before, (files(), before)
+assert MigrationRecorder(connection).applied_migrations() == {{}}
+call_command("makemigrations", {selected!r}, interactive=False, verbosity=0)
+assert init.read_bytes() == before[init][0] and S_IMODE(init.stat().st_mode) == 0o640
+call_command("makemigrations", {selected!r}, check_changes=True, dry_run=True, interactive=False, verbosity=0)
+call_command("migrate", {selected!r}, interactive=False, verbosity=0)
+""",
+        )
+    )
+
+
+def test_initial_looking_existing_history_does_not_authorize_baseline(baseline_host):
+    # A previous/manual/native initial is durable history, not same-run evidence.
+    write(
+        baseline_host,
+        "runtime/alpha/migrations/0001_initial.py",
+        """
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    initial = True
+    dependencies = []
+    operations = [migrations.CreateModel(name="Entry", fields=[
+        ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+        ("value", models.CharField(max_length=40)),
+    ])]
+""",
+    )
+    before = {p: p.read_bytes() for p in (baseline_host / "runtime").glob("*/migrations/*.py")}
+    for flag in ([], ["--check"], ["--dry-run"]):
+        result = invoke(baseline_host, "makemigrations", "alpha", *flag, "--noinput", "--verbosity", "0")
+        assert result.returncode != 0
+        assert "false guard cannot prove" in result.stderr
+        assert {p: p.read_bytes() for p in (baseline_host / "runtime").glob("*/migrations/*.py")} == before
+
+
+@pytest.mark.parametrize("tamper", ["source", "baseline-metadata"])
+def test_initial_baseline_keeps_source_and_footer_immutable(baseline_host, tamper):
+    successful(invoke(baseline_host, "makemigrations", "alpha", "--noinput", "--verbosity", "0"))
+    if tamper == "source":
+        source = baseline_host / "alpha/compose_migrations/alpha/rename_legacy.py"
+        source.write_text(source.read_text() + "\n# changed immutable source\n")
+        successful(invoke(baseline_host, "compose"))
+        expected = "source digest or target changed"
+    else:
+        origin = baseline_host / "runtime/alpha/migrations/rename_legacy.py"
+        origin.write_text(
+            origin.read_text().replace(
+                "compose_initial_baseline = 'satisfied'", "compose_initial_baseline = 'other'"
+            )
+        )
+        expected = "immutable binding metadata digest changed"
+    before = {p: p.read_bytes() for p in (baseline_host / "runtime").glob("*/migrations/*.py")}
+    result = invoke(baseline_host, "makemigrations", "alpha", "--noinput", "--verbosity", "0")
+    assert result.returncode != 0
+    assert expected in result.stderr
+    assert {p: p.read_bytes() for p in (baseline_host / "runtime").glob("*/migrations/*.py")} == before
+
+
+def test_initial_baseline_does_not_bypass_retained_origin_reset_refusal(baseline_host):
+    successful(
+        invoke(
+            baseline_host,
+            script="""
+from pathlib import Path
+import django
+django.setup()
+from django.core.management import call_command
+from django.db import connection
+from django.db.migrations.recorder import MigrationRecorder
+from django_compose.migrations import reset_migration_history
+call_command("makemigrations", interactive=False, verbosity=0)
+call_command("migrate", interactive=False, verbosity=0)
+before = {p: p.read_bytes() for p in Path("runtime").glob("*/migrations/*.py")}
+applied = MigrationRecorder(connection).applied_migrations()
+try:
+    reset_migration_history(("alpha",))
+except RuntimeError as error:
+    assert "false guard cannot prove" in str(error), str(error)
+else:
+    raise AssertionError("retained origin unexpectedly allowed reset")
+assert {p: p.read_bytes() for p in Path("runtime").glob("*/migrations/*.py")} == before
+assert MigrationRecorder(connection).applied_migrations() == applied
+""",
+        )
+    )

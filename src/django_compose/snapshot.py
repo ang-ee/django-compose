@@ -185,15 +185,15 @@ def transition_declarations(source: Any) -> tuple[Mapping[str, str], ...]:
     declarations = []
     origins: set[str] = set()
     for declaration in source:
-        if not isinstance(declaration, Mapping) or set(declaration) != {
-            "declaring_app",
-            "name",
-            "app_label",
-            "module",
+        required = {"declaring_app", "name", "app_label", "module"}
+        if not isinstance(declaration, Mapping) or not required <= set(declaration) <= required | {
+            "initial_baseline"
         }:
             raise ImproperlyConfigured(f"Invalid transition declaration: {declaration!r}")
         if not all(isinstance(value, str) and value for value in declaration.values()):
             raise ImproperlyConfigured(f"Invalid transition declaration: {declaration!r}")
+        if "initial_baseline" in declaration and declaration["initial_baseline"] != "satisfied":
+            raise ImproperlyConfigured("Transition initial_baseline must be 'satisfied' or absent")
         origin = f"{declaration['declaring_app']}:{declaration['name']}"
         name = declaration["name"]
         if not ("_" + name).isidentifier() or name != name.lower() or name.startswith("_"):
