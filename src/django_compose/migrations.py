@@ -563,6 +563,9 @@ def _allows_migrate_model(operation: Operation, alias: str, model: Any, *, offli
 
 def _model_storage(model: Any, *, removed_field: str | None = None) -> Iterator[Any]:
     """Tables deleted by native model deletion or implicit M2M field removal."""
+    # Django intentionally creates no implicit through classes for swapped models.
+    if model._meta.swapped:
+        return
     if removed_field is None:
         yield model
         fields = model._meta.local_many_to_many

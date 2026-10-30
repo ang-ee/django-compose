@@ -808,3 +808,63 @@ assert "shared_links" in connection.introspection.table_names()
 assert link._base_manager.get().pk == row.pk
 assert files() == original
 """)
+
+
+@pytest.mark.parametrize("change", ["none", "swapped_model", "swapped_m2m", "active_m2m"])
+def test_native_swapped_auth_storage_does_not_mask_active_through_protection(host, change):
+    root, run = host
+    write(root, "iam/__init__.py")
+    write(
+        root,
+        "iam/models.py",
+        """
+from django.contrib.auth.models import AbstractUser
+class User(AbstractUser):
+    pass
+""",
+    )
+    run(f"""
+from django.db.migrations.graph import MigrationGraph
+from django.test import override_settings
+with override_settings(
+    AUTH_USER_MODEL="iam.User",
+    INSTALLED_APPS=[commands, "django.contrib.contenttypes", "django.contrib.auth", "iam",
+                    "alpha", "beta", "author"],
+):
+    before = ProjectState.from_apps(apps)
+    swapped = before.apps.get_model("auth", "User")
+    assert swapped._meta.swapped == "iam.User"
+    assert all(field.remote_field.through is None for field in swapped._meta.local_many_to_many)
+    assert not migrations.DeleteModel("User").allow_migrate_model("default", swapped)
+    graph = MigrationGraph()
+    for label in ("auth", "iam", "alpha", "beta", "contenttypes"):
+        graph.add_node((label, "0001"), migrations.Migration("0001", label))
+    if {change!r} == "active_m2m":
+        before.add_model(ModelState("beta", "Tag", [("id", models.AutoField(primary_key=True))]))
+        before.add_model(ModelState("beta", "Item", [
+            ("id", models.AutoField(primary_key=True)),
+            ("tags", models.ManyToManyField("beta.Tag", db_table='"active_links"')),
+        ]))
+        before.add_model(ModelState("beta", "Adopted", [("id", models.AutoField(primary_key=True))],
+                                   options={{"db_table": "active_links"}}))
+        with connection.schema_editor() as editor:
+            editor.create_model(before.apps.get_model("beta", "Tag"))
+            editor.create_model(before.apps.get_model("beta", "Item"))
+    after = before.clone()
+    if {change!r} == "swapped_model":
+        after.remove_model("auth", "user")
+    elif {change!r} == "swapped_m2m":
+        after.remove_field("auth", "user", "groups")
+    elif {change!r} == "active_m2m":
+        after.remove_field("beta", "item", "tags")
+    original = files()
+    action = lambda: DropGuardAutodetector(before, after).changes(graph)
+    if {change!r} == "active_m2m":
+        expect(CommandError, "still owned by beta.adopted", action)
+        assert before.apps.get_model("beta", "Adopted")._base_manager.count() == 0
+    else:
+        with patch.object(connection, "cursor", side_effect=AssertionError("swapped storage queried")):
+            changes = action()
+        assert bool(changes) is ({change!r} != "none")
+    assert files() == original
+""")
