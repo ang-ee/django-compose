@@ -182,6 +182,11 @@ from its concrete parent. Unknown targets, missing demanded ancestors and
 inheritance cycles fail before generated models are used.
 Move shared declarations to a common abstract base rather than repeat fields.
 
+Integration metadata cannot replace generated structural fields. Composition
+checks Django's constructed metadata, including implicit parent links such as
+`item_ptr` and `item_ptr_id`, before artifact hooks and ready callbacks. Ordinary
+implicit and explicit Django parent links remain supported.
+
 `concrete`, `extends` and `inherits` are mutually exclusive, including an explicit
 `concrete=False`. The [API reference](SPEC.md#model-declarations) defines the
 complete validation contract. Use [project configuration](configuration.md) to

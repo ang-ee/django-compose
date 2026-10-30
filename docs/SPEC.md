@@ -62,7 +62,9 @@ native method-resolution order. Shared abstract ancestry contributes once. The
 first extension manager overrides a source manager; distinct extensions
 claiming one manager name fail. Field-name, attname, same-table database-column,
 field/manager and parent-field redeclaration collisions fail. Native generated
-metadata also checks inherited and automatically created managers before callbacks.
+metadata also checks inherited and automatically created managers and refuses
+integration literals that replace structural fields, including implicit MTI
+parent links and their attnames, before artifact hooks or ready callbacks.
 Unknown targets,
 parent or module dependency cycles, and unmet ancestor demands fail explicitly.
 
@@ -458,9 +460,19 @@ historical adoption; new metadata uses `compose_origin` and
 `compose_source_sha256`.
 
 `DropGuardAutodetector`, shared by native `makemigrations` and `migrate`, requires
-relevant rows or columns to be empty on every routed database before automatic
-destructive changes. Unavailable databases are not treated as empty. Explicit
-integration-owned row exemptions use `MigrationPolicy`.
+relevant rows or columns to be empty on every database eligible for the native
+operation before automatic destructive changes. Eligibility includes native
+model options and routers. Shared-table protection is per alias and includes
+implicit many-to-many storage deleted with its owning model. Quoted identifiers
+are resolved through backend semantics; unsupported or uncertain storage identity
+and unavailable eligible databases cannot prove safety. Explicit integration-owned
+row exemptions use `MigrationPolicy`. See the [storage proof's supported cases
+and limits](migrations.md#advanced-destructive-changes-and-history-cutoffs).
+
+Reusable transition planning remains database-free. It conservatively retains
+feature-dependent aliases when checking the feature could connect, and refuses
+ambiguous shared storage that requires database visibility to resolve. Explicit
+migration authoring, purge and history maintenance use database-aware checks.
 
 Retirement requires consistent fully applied history across all configured
 migration-relevant aliases and refuses retained incoming cross-app dependencies.
@@ -488,7 +500,11 @@ uninstall anything. See [migration workflows](migrations.md).
 
 The optional `django_compose.typing` plugin extends django-stubs inference for
 composed fields, relations, managers, methods, properties, generics and ancestor
-demands, while retaining native diagnostics. It tracks source dependencies for
+demands, while retaining native diagnostics. Effective member access follows the
+generated class's native MRO, including an extension overriding an existing source
+member; authored bodies and override checks retain their original signatures.
+The [typing guide](dependencies.md#advanced-typing) documents the remaining
+read-only-to-writable property limitation. It tracks source dependencies for
 cold, warm and incremental analysis. Its extra pins the supported published
 fork versions; ordinary serving needs neither mypy nor django-stubs.
 
@@ -503,8 +519,14 @@ packaging and django-yamlconf are base dependencies; typing is optional.
 
 After `django.setup()`, `django_compose.urls.urlpatterns` includes selected
 configs' optional `compose_urls` modules using `compose_url_prefix` (default empty)
-and `compose_url_namespace` (default absent). Native system checks reject duplicate
-effective routes as `django_compose.E001`.
+and `compose_url_namespace` (default absent). The registered native system check
+reports identical native matching chains as `django_compose.E001`, naming both
+contributing apps. Chains must have the same include boundaries, native matcher
+types, compiled regex text and flags, endpoint behavior, capture names and
+converter instances. Reverse namespaces do not distinguish matches. Different
+converters, differently expressed chains and custom matching implementations
+retain Django's ordered resolution; the check neither executes converters nor
+proves arbitrary regex equivalence or overlap.
 
 `django_compose.asgi.application` composes optional `config.compose_asgi()` factories
 returning `AsgiContribution(http_mounts=..., lifespans=..., protocols=...)`.

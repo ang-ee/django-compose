@@ -66,6 +66,17 @@ plugins = django_compose.typing
 django_settings_module = project.settings
 ```
 
+Member reads and calls follow the generated model's Python MRO, including an
+extension overriding a member already declared on the source. Native analysis
+still checks the original method bodies and override signatures.
+
+One property assignment case remains unsupported: if the source declares a
+read-only property and an extension adds a setter, runtime assignment works but
+mypy still reports that the source property is read-only. Mypy checks that flag
+before its attribute hook. Supporting this case requires a native typing-owner
+extension that preserves declaration diagnostics; the composition plugin does
+not suppress the error.
+
 Runtime-projected bases still need analyzable native mypy TypeInfos. Dependencies
 without `py.typed` may be skipped by mypy's normal import policy, even when a
 plugin requests them. Enable native analysis for the specific untyped dependency;

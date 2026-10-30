@@ -299,6 +299,19 @@ Use [build integrations](extensions.md) for additional generated files and
 [the API reference](SPEC.md#settings-and-snapshots)
 for the complete input contract.
 
+## Compose app URLs
+
+A selected AppConfig can set `compose_urls` to its native URLconf module, with
+optional `compose_url_prefix` and `compose_url_namespace` attributes. Set the
+project's `ROOT_URLCONF` to `"django_compose.urls"` to include those contributions
+after setup. Ordinary project-authored URLconfs remain supported.
+
+The registered check `django_compose.E001` reports identical native matching
+chains and names both contributing apps. It preserves Django's ordered resolution
+for different converters or differently expressed patterns, including custom
+matchers. It does not prove all possible overlaps. The [API reference](SPEC.md#serving-composition-and-metadata-inspection)
+defines the exact equality boundary.
+
 ## Startup consistency
 
 Serving and check retain a shared output lock from verification through the last

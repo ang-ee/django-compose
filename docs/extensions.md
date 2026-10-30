@@ -85,7 +85,10 @@ managers and methods are outside this declaration interface.
 Custom `Meta` names also need support from the Django extension that interprets
 them; the declaration interface does not change Django's option validation.
 Attributes cannot replace structural or private names, fields, managers or
-methods. `meta_options` cannot replace native Django `Meta` options. Two
+methods. This also reserves Django-created field names and attnames, including
+implicit MTI parent links. Composition validates those against the constructed
+model before models-phase artifacts and ready callbacks; failure leaves the build
+incomplete. `meta_options` cannot replace native Django `Meta` options. Two
 integrations claiming the same output name fail rather than overwrite each
 other. Choose names belonging to the capability your app provides.
 

@@ -164,15 +164,38 @@ create migration packages or files.
 ## Advanced: destructive changes and history cutoffs
 
 The shared `DropGuardAutodetector` requires relevant rows or columns to be empty
-before automatic field/model removal, on every routed configured database.
-Unavailable databases cannot prove emptiness. Shared physical tables and explicit
-integration-owned retirement exemptions are accounted for. Implement required
-data cutovers as reviewed migrations.
+before automatic field/model removal, on every configured database eligible for
+that native migration operation. Django's model options, including
+`required_db_vendor` and `required_db_features`, and routers determine eligibility.
+An excluded database is not probed; an unavailable eligible database cannot prove
+emptiness. Integration-owned retirement exemptions remain explicit. Implement
+required data cutovers as reviewed migrations.
+
+The guards compare storage on each eligible alias. A table still owned by an
+active model cannot be deleted, even when empty or reached through differently
+quoted names. This includes Django's implicit many-to-many tables deleted with
+their owning model. Identical table names on disjoint database aliases do not
+establish shared ownership.
+
+Ordinary and double-quoted identifiers use Django's backend interpretation.
+PostgreSQL checks account for quoted case, explicit schemas and `search_path`;
+SQLite checks use its native case and temporary-table visibility rules. Attached
+SQLite databases, unsupported quoting or namespaces, excessive identifier lengths
+and otherwise unprovable identity refuse the automatic safety proof. Use reviewed
+explicit migrations for these cases. Other backends retain native introspection
+with conservative refusal of uncertain identity; the real-backend regression
+coverage is SQLite and PostgreSQL.
+
+Reusable transition planning opens no database connection. It conservatively
+retains feature-dependent aliases when native feature checks could connect, and
+refuses shared-storage ambiguity requiring a live catalog. Authoring, purge and
+history maintenance use database-aware checks.
 
 `retire_history <label>` is an explicit cutoff for a history-only app. It requires
 consistent, fully applied history across the configured databases selected by
-Django routers, and no retained migrations in another app depending on the
-retired nodes. The database scope includes historical and transient model routes,
+Django's native model eligibility and routers, and no retained migrations in
+another app depending on the retired nodes. The database scope includes historical
+and transient model routes,
 `RunSQL`/`RunPython` hints and nested database operations. Custom operations whose
 routes cannot be inferred require every configured alias. Rebase or squash
 incoming dependencies first. Databases absent from the command's settings are

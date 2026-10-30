@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Protect quoted and schema-qualified migration storage, including implicit
+  many-to-many tables, using native eligibility and per-database ownership checks.
+  Keep reusable transition planning database-free.
+- Reject integration literals that overwrite Django's generated parent links
+  before artifact hooks or ready callbacks run.
+- Project effective extension member reads and calls through native MRO and
+  mypy member access while preserving authored-body and override diagnostics.
+- Create new generated files with ordinary umask-filtered permissions while
+  preserving existing or explicit modes during atomic replacement.
+- Diagnose identical native URL matching chains without rejecting disjoint
+  custom converters merely because they share a regex.
+- Reuse packaging's distribution-name normalization and document Unix platform
+  requirements and the remaining property-setter typing limitation.
+
 ## 0.1.0.dev2
 
 - Use component vocabulary for installed distributions, keeping distribution and
