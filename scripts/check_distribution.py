@@ -60,6 +60,13 @@ def component_wheel(directory: Path, package: str, *, dependency: str | None = N
     }
     if dependency is None:
         members[package + "/validators.py"] = "def retained(value):\n    pass\n"
+        members[package + "/legacy.py"] = """from django.db import migrations
+def applies(state):
+    return "old_title" in state.models["installed_catalog", "item"].fields
+class Migration(migrations.Migration):
+    dependencies = []
+    operations = [migrations.RenameField("item", "old_title", "title")]
+"""
         members[package + "/models.py"] = """from django.db import models
 from django_compose.models import Composable
 from .validators import retained
@@ -227,6 +234,75 @@ assert set(state.apps.get_model("installed_catalog", "Grandchild")._meta.parents
     )
     assert "compose-smoke-reviews provides enabled app installed_reviews" in refusal, refusal
 
+    # An installed addon may introduce an origin after this host's final-schema
+    # initial already exists and has been applied. Adoption appends history only.
+    (host / "settings.py").write_text(
+        settings.replace(
+            "configure(globals())",
+            """COMPOSE_TRANSITION_SOURCE = [{
+    "declaring_app": "installed_catalog", "name": "rename_legacy",
+    "app_label": "installed_catalog", "module": "installed_catalog.legacy",
+    "initial_baseline": "satisfied",
+}]
+configure(globals())""",
+        )
+    )
+    run([*compiler, "compose"], cwd=host, env=env)
+    histories = {
+        path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+        for path in sorted((host / "runtime").glob("*/migrations/*.py"))
+    }
+    database = (host / "shop.sqlite3").read_bytes()
+    refusal = run(
+        [*compiler, "makemigrations", "installed_catalog", "--check", "--dry-run"],
+        cwd=host,
+        env=env,
+        success=False,
+    )
+    assert "false guard cannot prove" in refusal, refusal
+    adoption = [
+        *compiler,
+        "adopt_transition",
+        "installed_catalog:rename_legacy",
+        "--baseline",
+        "installed_catalog.0001_initial",
+    ]
+    run([*adoption, "--dry-run"], cwd=host, env=env)
+    assert set((host / "runtime").glob("*/migrations/*.py")) == set(histories)
+    run(adoption, cwd=host, env=env)
+    origin = host / "runtime/installed_catalog/migrations/rename_legacy.py"
+    assert set((host / "runtime").glob("*/migrations/*.py")) == {*histories, origin}
+    authored = origin.read_bytes()
+    run(adoption, cwd=host, env=env)
+    assert origin.read_bytes() == authored
+    assert (host / "shop.sqlite3").read_bytes() == database
+    for path, expected in histories.items():
+        assert (path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) == expected, path
+    run([*compiler, "migrate", "--noinput"], cwd=host, env=env)
+    run([*compiler, "compose", "--check"], cwd=host, env=env)
+    run(
+        [
+            str(python),
+            "-c",
+            """import django
+django.setup()
+from django.apps import apps
+from django.db import connection
+from django.db.migrations.loader import MigrationLoader
+loader = MigrationLoader(connection)
+node = ("installed_catalog", "rename_legacy")
+assert loader.disk_migrations[node].operations == []
+assert node in loader.applied_migrations
+row = apps.get_model("installed_catalog", "Child").objects.get()
+assert (row.title, row.detail, row.rating, row.reviewed) == (
+    "installed component", "child", 5, True,
+)
+""",
+        ],
+        cwd=host,
+        env=env,
+    )
+
 
 def main() -> None:
     (wheel,) = sorted((ROOT / "dist").glob("django_compose-*.whl"))
@@ -247,6 +323,7 @@ def main() -> None:
             "build.py",
             "typing.py",
             "management/commands/makemigrations.py",
+            "management/commands/adopt_transition.py",
             "management/commands/provision.py",
         ):
             assert f"django_compose/{required}" in names, required
