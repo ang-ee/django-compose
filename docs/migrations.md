@@ -178,6 +178,23 @@ filename discovery, so include every required transition record. Omission is
 strict; no other baseline value is accepted. The frozen declaration participates
 in the snapshot digest while migration source bytes and hashes stay unchanged.
 
+Integrations that annotate discovered transitions can reuse the public discovery
+owner instead of maintaining another list or directory scanner:
+
+```python
+# Inside an integration's autoconfig.settings(namespace) callback:
+from django_compose.snapshot import discover_transitions
+
+records = discover_transitions(namespace["COMPOSE_CLOSURE"].app_entries)
+```
+
+One shared adapter can consult each selected app's own declarations, copy the
+matching records with `dict(record, initial_baseline="satisfied")`, and return
+the resulting ordered sequence as `COMPOSE_TRANSITION_SOURCE`. Keep all other
+records unchanged and respect any explicit project-authored replacement. The
+snapshot then freezes the result; no migration module is imported by discovery.
+The package defines no extra addon metadata format for these policy facts.
+
 This is a strong assertion: no original operation is needed on **any** database
 adopting the final-schema baseline, including existing tables and rows adopted
 with native `migrate --fake-initial`. If those rows need conversion or backfill,

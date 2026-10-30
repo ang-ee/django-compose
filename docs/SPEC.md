@@ -286,7 +286,17 @@ setup. Snapshot and serving do not import the model compiler or execute integrat
 
 Without `COMPOSE_TRANSITION_SOURCE`, each selected app contributes sorted
 `compose_migrations/<label>/<name>.py` files in app order, including numeric
-migration names. An explicit source replaces that discovery. Records require
+migration names. The public owner is
+`snapshot.discover_transitions(entries: Iterable[Entry]) -> tuple[Mapping[str, str], ...]`.
+It accepts resolved identities such as `Closure.app_entries`, preserves their
+order, reports watched paths and returns immutable normalized records without
+importing apps or migration modules. Default snapshot discovery calls this same
+function. A settings adapter can use the already resolved `COMPOSE_CLOSURE` during
+an app's `settings(namespace)` callback, annotate copies using owner-declared
+facts, and return concrete `COMPOSE_TRANSITION_SOURCE` records before the snapshot.
+Preserve other records and any explicitly authored replacement source; selecting
+apps again or reading lazy Django settings during configuration is unnecessary.
+An explicit source replaces discovery. Records require
 `declaring_app`, `name`, `app_label` and `module` string keys, and optionally
 `initial_baseline: "satisfied"`; other keys or baseline values are invalid.
 Omission retains strict guard handling. The explicit transition-owner provider

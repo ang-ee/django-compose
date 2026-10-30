@@ -6,6 +6,8 @@
   `initial_baseline: "satisfied"`, preserving true-guard data work and immutable
   source hashes. Roll back initial schema, bindings and reconciliation together
   when migration authoring raises.
+- Expose the existing transition discovery owner as `discover_transitions` so
+  settings adapters can annotate addon-owned records without copying discovery.
 
 ## 0.1.0.dev5
 

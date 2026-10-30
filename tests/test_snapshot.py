@@ -12,7 +12,13 @@ from django.core.exceptions import ImproperlyConfigured
 
 from django_compose.autoreload import InputReport
 from django_compose.serving import Receipt, installed_apps, migration_modules, read_receipt, verify
-from django_compose.snapshot import Entry, snapshot, transition_declarations, transition_fingerprints
+from django_compose.snapshot import (
+    Entry,
+    discover_transitions,
+    snapshot,
+    transition_declarations,
+    transition_fingerprints,
+)
 
 
 def test_snapshot_fingerprints_files_and_settings(tmp_path):
@@ -362,7 +368,9 @@ def test_default_transitions_freeze_records_order_and_bytes_without_imports(tmp_
         (directory / "__init__.py").write_text("raise AssertionError('never imported')")
         (directory / "0001_initial.py").write_text("raise AssertionError('never executed')")
         entries.append(Entry(name, name, "django.apps.AppConfig", str(app), name))
+    discovered = discover_transitions(iter(entries))
     snap = snapshot(entries)
+    assert discovered == snap.transition_records
     assert [record["declaring_app"] for record in snap.transition_records] == ["second", "first"]
     assert snap.transition_records[0] == {
         "declaring_app": "second",
@@ -373,6 +381,12 @@ def test_default_transitions_freeze_records_order_and_bytes_without_imports(tmp_
     with pytest.raises(TypeError):
         snap.transition_records[0]["name"] = "changed"
     assert snap.digest() == snapshot(entries, transitions=snap.transition_records).digest()
+    annotated = [dict(discovered[0], initial_baseline="satisfied"), *discovered[1:]]
+    explicit = snapshot(entries, namespace={"COMPOSE_TRANSITION_SOURCE": annotated})
+    assert explicit.transitions == snap.transitions
+    assert explicit.digest() != snap.digest()
+    assert "initial_baseline" not in discovered[0]
+    assert explicit.transition_records[1] == discovered[1]
     path = tmp_path / "second/compose_migrations/target/0001_initial.py"
     path.write_text("changed")
     assert snap.transitions != snapshot(entries).transitions

@@ -208,7 +208,14 @@ def transition_declarations(source: Any) -> tuple[Mapping[str, str], ...]:
     return tuple(declarations)
 
 
-def _default_transitions(entries: tuple[Entry, ...]) -> tuple[Mapping[str, str], ...]:
+def discover_transitions(entries: Iterable[Entry]) -> tuple[Mapping[str, str], ...]:
+    """Read immutable default records in selected-app and filename order.
+
+    Pass resolved identities, normally Closure.app_entries. Discovery reports
+    watched paths but imports no apps or migration modules. Settings adapters
+    can copy and annotate owner-declared records before supplying an explicit
+    COMPOSE_TRANSITION_SOURCE; snapshot's default uses this same owner.
+    """
     records = []
     for entry in entries:
         directory = Path(entry.path) / "compose_migrations"
@@ -314,7 +321,7 @@ def snapshot(
     )
     resolver = SourceResolver(normalized)
     if transitions is None and "COMPOSE_TRANSITION_SOURCE" not in values:
-        records = _default_transitions(normalized)
+        records = discover_transitions(normalized)
     else:
         records = transition_declarations(
             values.get("COMPOSE_TRANSITION_SOURCE", ()) if transitions is None else transitions

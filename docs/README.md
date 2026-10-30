@@ -52,6 +52,7 @@ validation and lifecycle rules live in the [API reference](SPEC.md).
 | `components.index_components(distributions, *, group)` | Apply the same indexing rules to supplied native `Distribution` objects |
 | `components.active_requirements(requirements)` | Return native `Requirement` values active on this platform with `extra=""` |
 | `conf.apply_app_settings(namespace, closure)` | Apply app settings to a project using ordinary authored concrete models |
+| `snapshot.discover_transitions(entries)` | Read default transition records from resolved app identities for an integration to annotate without importing migration code |
 | `provision.require_provisioned(using="default", timeout=0)` | Require recorded database readiness for the verified build |
 | `serving.artifact_path(relative)` | Locate and verify a generated artifact |
 | `serving.receipt_lease()` / `verified_receipt()` | Hold a shared build-record lease / read the startup-verified record |
