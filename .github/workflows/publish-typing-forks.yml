@@ -10,6 +10,18 @@ on:
         description: Full commit SHA from ang-ee/django-stubs
         required: true
         type: string
+      publish_mypy:
+        description: Publish angee-mypy
+        type: boolean
+        default: false
+      publish_stubs:
+        description: Publish angee-django-stubs
+        type: boolean
+        default: false
+      publish_extensions:
+        description: Publish angee-django-stubs-ext
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -19,13 +31,15 @@ jobs:
   distribution:
     runs-on: ubuntu-latest
     steps:
-      - name: Require immutable source revisions
+      - name: Require immutable revisions and a package selection
         env:
           MYPY_REVISION: ${{ inputs.mypy_revision }}
           STUBS_REVISION: ${{ inputs.django_stubs_revision }}
+          PACKAGE_SELECTED: ${{ inputs.publish_mypy || inputs.publish_stubs || inputs.publish_extensions }}
         run: |
           [[ "$MYPY_REVISION" =~ ^[0-9a-f]{40}$ ]]
           [[ "$STUBS_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PACKAGE_SELECTED" == "true" ]]
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
@@ -88,7 +102,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: typing-distributions
-          path: dist/*
+          path: |
+            ${{ inputs.publish_mypy && 'dist/angee_mypy-*' || '' }}
+            ${{ inputs.publish_stubs && 'dist/angee_django_stubs-*' || '' }}
+            ${{ inputs.publish_extensions && 'dist/angee_django_stubs_ext-*' || '' }}
   publish:
     needs: distribution
     runs-on: ubuntu-latest

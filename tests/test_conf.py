@@ -59,6 +59,82 @@ def test_defaults_native_merges_and_provenance(project):
     assert ns["INSTALLED_APPS"][-1] == "django_compose.apps.BuildComposeConfig"
 
 
+def test_apply_app_settings_retains_native_selection_without_composition(project, monkeypatch):
+    from django.apps import AppConfig
+
+    app, ns = project
+    output = ns.pop("COMPOSE_OUTPUT_DIR")
+    dependency = app("""SEEN = []
+SETTINGS = {'VALUE': 'default', 'TASK_LIMIT': 1, 'ITEMS:append': ['dependency'],
+            'OPTIONS.path': '{BASE_DIR}/data'}
+def settings(namespace):
+    SEEN.append(namespace['COMPOSE_CLOSURE'])
+    assert namespace['TASK_LIMIT'] == '7'
+    return {'VALUE': 'ignored', 'TASK_LIMIT': int(namespace['TASK_LIMIT']),
+            'CALLBACK_VALUE': namespace['VALUE']}
+""")
+    consumer = app("""SEEN = []
+SETTINGS = {'ITEMS:append': ['consumer'], 'OPTIONS.other': True}
+def settings(namespace):
+    SEEN.append(namespace['COMPOSE_CLOSURE'])
+    assert namespace['CALLBACK_VALUE'] == 'authored'
+    assert namespace['TASK_LIMIT'] == 7
+    return {'CALLBACK_ORDER': tuple(namespace['ITEMS'])}
+""")
+    root = output.parent
+    (root / consumer / "apps.py").write_text(
+        "from django.apps import AppConfig\n"
+        f"class Config(AppConfig):\n    name = {consumer!r}\n    requires_apps = ({dependency!r},)\n"
+    )
+    ns.update(
+        INSTALLED_APPS=[consumer],
+        VALUE="authored",
+        ITEMS=["project"],
+        OPTIONS={"existing": True},
+        BASE_DIR=root,
+        COMPOSE_ENV_PREFIXES=["TASK_"],
+        MIGRATION_MODULES={"retained": None},
+    )
+    closure = conf.enabled_apps(ns["INSTALLED_APPS"])
+    monkeypatch.setenv("TASK_LIMIT", "7")
+    monkeypatch.delenv("DJANGO_COMPOSE_MODE")
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("settings contributions entered composition or reselected apps")
+
+    monkeypatch.setattr(AppConfig, "create", refuse)
+    for name in ("mode", "snapshot", "report_inputs", "report_watch_paths"):
+        monkeypatch.setattr(conf, name, refuse)
+    for name in ("read_receipt", "verify", "installed_apps", "migration_modules"):
+        monkeypatch.setattr(conf.serving, name, refuse)
+    conf.apply_app_settings(ns, closure)
+    assert ns["COMPOSE_CLOSURE"] is closure
+    assert closure.entries == (dependency, consumer)
+    assert closure.dependencies == {dependency: (), consumer: (dependency,)}
+    for name in (dependency, consumer):
+        assert importlib.import_module(f"{name}.autoconfig").SEEN == [closure]
+        assert importlib.import_module(f"{name}.autoconfig").SEEN[0] is closure
+        assert f"{name}.models" not in sys.modules
+    assert ns["VALUE"] == "authored"
+    assert ns["TASK_LIMIT"] == 7
+    assert ns["CALLBACK_ORDER"] == ("project", "dependency", "consumer")
+    assert ns["OPTIONS"] == {"existing": True, "path": f"{root}/data", "other": True}
+    info = ns["_YAMLCONF_ATTRIBUTES"]["TASK_LIMIT"]
+    assert info["history"][0] == ("7", "**ENVIRONMENT**")
+    assert ns["INSTALLED_APPS"] == [consumer]
+    assert ns["MIGRATION_MODULES"] == {"retained": None}
+    assert not {"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_OUTPUT_MODULE"}.intersection(ns)
+    assert not output.exists()
+
+
+def test_apply_app_settings_preserves_conflicting_default_diagnostics(project):
+    app, ns = project
+    ns["VALUE"] = "authored"
+    closure = conf.enabled_apps([app("SETTINGS = {'VALUE': 'one'}"), app("SETTINGS = {'VALUE': 'two'}")])
+    with pytest.raises(ImproperlyConfigured, match="VALUE.*confapp_0.*confapp_1"):
+        conf.apply_app_settings(ns, closure)
+
+
 def test_callable_reads_effective_environment_and_authored_values(project, monkeypatch):
     app, ns = project
     monkeypatch.setenv("TASK_LIMIT", "7")
