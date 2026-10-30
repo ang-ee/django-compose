@@ -23,7 +23,14 @@ from django.utils.module_loading import import_string
 from django_compose.autoreload import inputs, report_inputs, write_report
 
 MIGRATION_COMMANDS = frozenset(
-    {"makemigrations", "migrate", "check_migrations", "retire_history", "reset_migration_history"}
+    {
+        "makemigrations",
+        "migrate",
+        "check_migrations",
+        "retire_history",
+        "reset_migration_history",
+        "provision",
+    }
 )
 
 
