@@ -124,3 +124,10 @@ The version in `pyproject.toml` determines the uploaded release. PyPI does not
 allow replacing an uploaded distribution, so subsequent releases need a new
 version. Check the current [dependency release blocker](dependencies.md#advanced-typing)
 before publishing; a successful build alone does not establish PyPI eligibility.
+
+The separate `Publish typing forks` workflow builds `angee-mypy`,
+`angee-django-stubs`, and `angee-django-stubs-ext` from full commit SHAs in their
+Angee fork repositories. It installs the exact wheels together, checks package
+identities and dependency metadata, and runs the composition typing tests before
+uploading those same archives with `PYPI_API_TOKEN`. Publish new fork versions
+there before updating this library's typing requirements and lockfile.
