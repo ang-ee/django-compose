@@ -107,6 +107,20 @@ make dist-check
 with Twine, inspects archive contents, and installs a wheel into a separate
 temporary environment. It exercises a plain Django project with base dependencies
 first, then actual installed addon wheels with settings contributions. Typing
-is absent from that installation test. Current CI and release-artifact workflows
-upload checked archives as workflow artifacts; they do not publish to a package
-index. Building a local archive does not publish it.
+is absent from that installation test. The Checks workflow uploads checked
+archives as workflow artifacts. Building a local archive does not publish it.
+
+## Publish this library
+
+The `Publish to PyPI` workflow runs `make check dist-check`, then passes those
+exact archives to a separate publishing job. That job uses the repository secret
+`PYPI_API_TOKEN`. It runs on `v*` tag pushes or an explicit workflow dispatch:
+
+```sh
+gh workflow run release.yml --repo ang-ee/django-compose --ref main
+```
+
+The version in `pyproject.toml` determines the uploaded release. PyPI does not
+allow replacing an uploaded distribution, so subsequent releases need a new
+version. Check the current [dependency release blocker](dependencies.md#advanced-typing)
+before publishing; a successful build alone does not establish PyPI eligibility.

@@ -31,8 +31,9 @@ and exercises a fresh wheel installation outside the checkout. The installation
 test first uses base dependencies, then installed addon wheels with settings
 contributions; it covers composition, native migration history, serving, ORM behavior, stale
 output refusal and retained-import reporting. CI runs the same Makefile targets.
-Build and release-artifact workflows upload archives without publishing them to
-a package index.
+The Checks workflow uploads archives without publishing them. The separate
+[release workflow](docs/packaging.md#publish-this-library) publishes checked
+archives to PyPI when explicitly dispatched or triggered by a version tag.
 
 ## Keep behavior with its owner
 
