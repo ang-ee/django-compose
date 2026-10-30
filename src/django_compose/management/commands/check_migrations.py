@@ -7,13 +7,12 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db.migrations.loader import MigrationLoader
 
 from django_compose.management import require_serving_mode
-from django_compose.management.commands.makemigrations import history_labels
 from django_compose.migration_imports import MigrationImportReport
-from django_compose.migrations import TransitionBinding
+from django_compose.migrations import check_native_history, history_labels
 
 
 class Command(BaseCommand):
-    help = "Check native history and pending transitions, or audit retained Python imports."
+    help = "Check native history, or audit retained Python imports."
     requires_system_checks: list[str] = []
 
     def add_arguments(self, parser: CommandParser) -> None:
@@ -52,6 +51,6 @@ class Command(BaseCommand):
                 self.stdout.write("No retained history or enabled app requires the named distributions.")
             return
         try:
-            TransitionBinding(labels=history_labels()).check_native_history(apps)
+            check_native_history(apps, labels=history_labels())
         except RuntimeError as error:
             raise CommandError(str(error)) from error

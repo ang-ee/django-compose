@@ -36,6 +36,19 @@ class Migration(migrations.Migration):
         ("title", models.CharField(max_length=30)),
     ])]
 """)
+    with (output / "custom_boot/migrations/0001_initial.py").open("a") as migration:
+        migration.write(
+            "Migration.angee_origin = 'legacy.origin'\n"
+            "Migration.compose_materialization_sha256 = 'historical-seal'\n"
+        )
+    (output / "custom_boot/migrations/0002_baseline.py").write_text("""from django.db import migrations
+class Migration(migrations.Migration):
+    dependencies = [("custom_boot", "0001_initial")]
+    operations = []
+    compose_origin = "retained.empty"
+    compose_initial_baseline = "satisfied"
+""")
+    (output / "custom_boot/migrations/0002_baseline.py").chmod(0o750)
     for path in output.glob("*/migrations/0001_initial.py"):
         path.chmod(0o644)
     if initializers:

@@ -12,10 +12,8 @@ config = apps.get_app_config("alpha")
 config.models_module = None
 config.models.clear()
 apps.clear_cache()
-settings.COMPOSE_TRANSITION_SOURCE = ()
 settings.COMPOSE_SNAPSHOT = SimpleNamespace(
     entries=tuple(SimpleNamespace(label=label) for label in ("beta", "author")),
-    transition_records=(),
 )
 receipt = SimpleNamespace(HISTORY_LABELS=("alpha", "beta"), RETIRED_LABELS=())
 stack = ExitStack()
@@ -33,7 +31,7 @@ loader = MigrationLoader(None)
 before, after = effective_states(loader, apps)
 assert ("alpha", "record") in after.models
 assert not DropGuardAutodetector(before, after).changes(loader.graph)
-TransitionBinding(labels=("alpha", "beta")).check_native_history(apps)
+check_native_history(apps, labels=("alpha", "beta"))
 with receipt_labels():
     call_command("makemigrations", "alpha", interactive=False, verbosity=0)
 assert not list(Path("history/alpha").glob("0002*"))
@@ -327,17 +325,6 @@ with patch("django_compose.migrations.read_receipt", return_value=receipt):
     assert ("alpha", "record") not in after.models
     assert DropGuardAutodetector(before, after).changes(loader.graph)["alpha"]
     expect(RuntimeError, "history-only", lambda: retire_history("alpha"))
-""")
-
-
-def test_binding_uses_frozen_snapshot_after_settings_source_changes(host):
-    _, run = host
-    run("""
-settings.COMPOSE_TRANSITION_SOURCE = "missing.cannot_import"
-binding = TransitionBinding(labels=("alpha", "beta"))
-assert binding.declarations == settings.COMPOSE_SNAPSHOT.transition_records
-expect(RuntimeError, "pending authored", binding.check)
-assert not TransitionBinding(labels=("alpha", "beta"), declarations=()).check()
 """)
 
 

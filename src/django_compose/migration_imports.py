@@ -193,19 +193,16 @@ class _ImportCalls(ast.NodeVisitor):
 class MigrationImportReport:
     """Audit selected native migration sources and local helper bodies offline.
 
-    Distribution source files are leaves: installed distributions own their
-    dependencies. Project and enabled-app helpers are recursively inspected,
-    including imports inside functions which a RunPython operation may call.
+    Installed dependencies outside native migration packages and literal historical
+    package anchors are leaves. Project, enabled-app and anchored helpers are
+    recursively inspected, including imports inside RunPython callables.
     """
 
     def __init__(self) -> None:
         self.resolver = SourceResolver(apps.get_app_configs())
         self.items: list[HistoricalImport] = []
         self._visited: set[Path] = set()
-        snapshot = getattr(settings, "COMPOSE_SNAPSHOT", None)
-        self._transition_packages = {
-            record["module"].rpartition(".")[0] for record in getattr(snapshot, "transition_records", ())
-        }
+        self._history_helper_packages: set[str] = set()
 
     def _edge(self, path: Path, source: ModuleSource) -> HistoricalImport:
         if source.path is not None and source.path.is_dir() and source.search_locations:
@@ -229,7 +226,7 @@ class MigrationImportReport:
                 source.kind in {"app", "project"}
                 or any(
                     module == package or module.startswith(package + ".")
-                    for package in self._transition_packages
+                    for package in self._history_helper_packages
                 )
             )
         ):
@@ -243,7 +240,7 @@ class MigrationImportReport:
             if (
                 parent_source.path is not None
                 and parent_source.path.is_file()
-                and (parent_source.kind in {"app", "project"} or parent in self._transition_packages)
+                and (parent_source.kind in {"app", "project"} or parent in self._history_helper_packages)
             ):
                 self._scan(parent_source.path, parent)
 
@@ -272,14 +269,14 @@ class MigrationImportReport:
             self.items.append(HistoricalImport(path, module, kind="unresolved", detail=str(error)))
             return
         package = module if path.name == "__init__.py" else module.rpartition(".")[0]
-        # Copied transitions deliberately retain their original relative package.
+        # Retained history can explicitly preserve its original relative package.
         for statement in tree.body:
             if isinstance(statement, ast.Assign) and any(
                 isinstance(target, ast.Name) and target.id == "__package__" for target in statement.targets
             ):
                 if isinstance(statement.value, ast.Constant) and isinstance(statement.value.value, str):
                     package = statement.value.value
-                    self._transition_packages.add(package)
+                    self._history_helper_packages.add(package)
         try:
             bindings = _ImportCalls(source, path, package)
             bindings.visit(tree)
@@ -402,7 +399,12 @@ class MigrationImportReport:
     def collect(self) -> tuple[HistoricalImport, ...]:
         """Enumerate selected modules from native settings, never loader objects."""
         mappings = settings.MIGRATION_MODULES
-        for config in sorted(apps.get_app_configs(), key=lambda config: config.label):
+        configs = sorted(apps.get_app_configs(), key=lambda config: config.label)
+        for config in configs:
+            module = mappings.get(config.label, config.name + ".migrations")
+            if module is not None and self.resolver.resolve(module).search_locations:
+                self._history_helper_packages.add(module)
+        for config in configs:
             module = mappings.get(config.label, config.name + ".migrations")
             if module is None:
                 continue

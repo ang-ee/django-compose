@@ -440,3 +440,41 @@ assert not report.removal_refusals(["shared-two"])
 assert bool(report.removal_refusals(["shared-one"])) is {not direct_namespace!r}
 assert report.removal_refusals(["shared-one", "shared-two"])
 """)
+
+
+@pytest.mark.parametrize("anchor", [False, True])
+@pytest.mark.parametrize("edge", ["relative", "absolute", "dynamic"])
+def test_retained_installed_helper_scope_without_snapshot_seed(host, anchor, edge):
+    root, run = host
+    package = "disabled.history" if anchor else "history.beta"
+    write(root, "disabled/__init__.py")
+    write(root, "disabled/history/__init__.py")
+    helper = f"{package.replace('.', '/')}/helper.py"
+    write(root, helper, "import missing_dependency.fields\nfrom . import cycle\n")
+    write(root, f"{package.replace('.', '/')}/cycle.py", "from . import helper\n")
+    write(root, "external/__init__.py", "import unrelated_missing_dependency\n")
+    source = {
+        "relative": "from .helper import missing_dependency\n",
+        "absolute": f"import {package}.helper as helper\n",
+        "dynamic": f"from importlib import import_module as load\nload('{package}.helper')\n",
+    }[edge]
+    write(
+        root,
+        "history/beta/0001_audit.py",
+        (f"__package__ = {package!r}\n" if anchor else "")
+        + "raise AssertionError('audit executed source')\n"
+        + source
+        + "import external\n",
+    )
+    installed_distribution(root, "helper-provider", [helper, f"{package.replace('.', '/')}/cycle.py"])
+    installed_distribution(root, "external-provider", ["external/__init__.py"])
+    run("""
+from django_compose.migration_imports import MigrationImportReport
+assert not hasattr(settings, "COMPOSE_SNAPSHOT")
+report = MigrationImportReport()
+items = report.collect()
+assert any(item.module == "missing_dependency.fields" and item.kind == "unresolved" for item in items)
+assert not any(item.module == "unrelated_missing_dependency" for item in items)
+assert any("helper-provider" in value for value in report.removal_refusals(["helper-provider"]))
+assert any("missing_dependency" in value for value in report.removal_refusals(["absent-provider"]))
+""")

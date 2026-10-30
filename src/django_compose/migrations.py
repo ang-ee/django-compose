@@ -1,21 +1,14 @@
-"""Bind reusable transitions to durable native Django migration history.
-
-Planning uses an offline MigrationLoader. Only explicit materialization writes
-history; Django remains responsible for migration state, execution and recording.
-"""
+"""Native migration state, retained history and destructive-operation safeguards."""
 
 from __future__ import annotations
 
-import ast
-import hashlib
 import importlib
 import importlib.util
 import stat
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from django.apps import apps as global_apps
 from django.apps.registry import Apps
@@ -48,12 +41,6 @@ from django_compose.management import require_serving_mode as require_serving_mo
 from django_compose.migration_imports import HistoricalImport as HistoricalImport
 from django_compose.migration_imports import historical_imports as historical_imports
 from django_compose.serving import read_receipt
-from django_compose.snapshot import transition_declarations
-
-Node = tuple[str, str]
-MATERIALIZED_FOOTER = "# DJANGO-COMPOSE MATERIALIZED MIGRATION - DO NOT EDIT"
-_LEGACY_FOOTER = b"# ANGEE MATERIALIZED MIGRATION - DO NOT EDIT"
-_SEAL_PREFIX = b"Migration.compose_materialization_sha256 = "
 
 
 def history_only_labels() -> frozenset[str]:
@@ -128,574 +115,38 @@ def _directory(label: str, *, missing: bool = False) -> Path:
         raise ImproperlyConfigured(f"Migration package {package!r} must be an importable package") from error
 
 
-def _node(raw: Any, origin: str, kind: str) -> Node:
-    if not isinstance(raw, (list, tuple)) or len(raw) != 2 or not all(isinstance(x, str) for x in raw):
-        raise RuntimeError(f"{origin}: invalid Django {kind} {raw!r}")
-    return raw[0], raw[1]
+def history_labels() -> tuple[str, ...]:
+    """Read the compiler receipt without invoking composition."""
+    receipt = read_receipt(Path(settings.COMPOSE_OUTPUT_DIR))
+    if receipt is None:
+        raise CommandError("Migration authoring requires a receipt; run compose first")
+    return tuple(receipt.HISTORY_LABELS)
 
 
-def _metadata(migration: Migration, name: str) -> Any:
-    """Read only the two historical Angee spellings needed for adoption."""
-    return getattr(migration, f"compose_{name}", getattr(migration, f"angee_{name}", None))
+def check_native_history(apps: Apps, *, labels: Iterable[str]) -> None:
+    """Require model-clean native history without database access.
 
-
-@dataclass(frozen=True)
-class TransitionPlan:
-    """A source snapshot with host-resolved native graph edges."""
-
-    origin: str
-    app_label: str
-    name: str
-    source_path: Path
-    source: str
-    output_path: Path
-    source_sha256: str
-    dependencies: tuple[Node, ...]
-    run_before: tuple[Node, ...]
-    source_package: str
-    initial_baseline: bool = False
-    adopted_baseline: Node | None = None
-    adopted_baseline_sha256: str | None = None
-
-
-@dataclass(frozen=True)
-class _Source:
-    origin: str
-    migration: Migration
-    guard: Callable[[ProjectState], bool]
-    path: Path
-    text: str
-    digest: str
-    package: str
-    initial_baseline: bool
-
-    def applies_to(self, state: ProjectState) -> bool:
-        try:
-            applies = self.guard(state.clone())
-        except Exception as error:
-            raise RuntimeError(f"{self.origin}: applies(project_state) failed") from error
-        if not isinstance(applies, bool):
-            raise RuntimeError(f"{self.origin}: applies must return bool")
-        return applies
-
-    def satisfied(self) -> _Source:
-        """Omit source operations and lifecycle overrides through native Django."""
-        migration = Migration(self.migration.name, self.migration.app_label)
-        cast(list[Node], migration.dependencies).extend(self.migration.dependencies)
-        cast(list[Node], migration.run_before).extend(self.migration.run_before)
-        return replace(self, migration=migration)
-
-    def plan(
-        self,
-        path: Path,
-        *,
-        initial_baseline: bool = False,
-        adopted_baseline: Node | None = None,
-        adopted_baseline_sha256: str | None = None,
-    ) -> TransitionPlan:
-        if path.exists():
-            raise RuntimeError(f"{self.origin}: migration destination already exists: {path}")
-        return TransitionPlan(
-            self.origin,
-            self.migration.app_label,
-            self.migration.name,
-            self.path,
-            self.text,
-            path,
-            self.digest,
-            tuple(self.migration.dependencies),
-            tuple(self.migration.run_before),
-            self.package,
-            initial_baseline,
-            adopted_baseline,
-            adopted_baseline_sha256,
-        )
-
-
-class _BindingLoader(MigrationLoader):
-    """Supply pending native Migration objects at Django's disk-loading hook."""
-
-    def __init__(self, pending: Mapping[Node, _Source]) -> None:
-        self.pending = pending
-        try:
-            super().__init__(None, ignore_no_migrations=True)
-        except Exception as error:
-            raise RuntimeError(f"authored migration graph is invalid: {error}") from error
-
-    def load_disk(self) -> None:
-        super().load_disk()
-        for key, source in self.pending.items():
-            self.disk_migrations[key] = source.migration
-            self.migrated_apps.add(key[0])
-            self.unmigrated_apps.discard(key[0])
-        self.disk_migrations = dict(sorted(self.disk_migrations.items()))
-
-    def add_internal_dependencies(self, key: Node, migration: Migration) -> None:
-        if key in self.pending:
-            cast(list[Node], migration.dependencies)[:] = [
-                edge
-                for edge in migration.dependencies
-                if edge[0] != key[0] or self.check_key(edge, key[0]) is not None
-            ]
-        super().add_internal_dependencies(key, migration)
-
-    def add_external_dependencies(self, key: Node, migration: Migration) -> None:
-        if key in self.pending:
-            for attribute in ("dependencies", "run_before"):
-                frozen = []
-                for edge in getattr(migration, attribute):
-                    resolved = self.check_key(edge, key[0])
-                    if resolved is None and edge[0] != key[0] and edge[1] == "__latest__":
-                        raise RuntimeError(f"{self.pending[key].origin}: unresolved __latest__ {edge!r}")
-                    if resolved is not None and resolved not in frozen:
-                        frozen.append(resolved)
-                setattr(migration, attribute, frozen)
-        super().add_external_dependencies(key, migration)
-
-
-class TransitionBinding:
-    """Bind declared migrations to host leaves without connecting to a database.
-
-    Origins and snapshots are immutable, including after declaration removal.
-    A false guard never establishes that a data operation has run. Only an
-    explicit declaration can assert baseline satisfaction, through first
-    authoring or a named retained-initial adoption. Origins remain in native
-    history and squash chains.
+    Compose check calls this after population. Disabled native migration
+    mappings remain authoritative, and tombstones retain historical state.
     """
-
-    def __init__(
-        self,
-        *,
-        labels: Iterable[str],
-        declarations: Iterable[Mapping[str, str]] | None = None,
-    ) -> None:
-        self.labels = frozenset(labels)
-        self.declarations = transition_declarations(
-            getattr(getattr(settings, "COMPOSE_SNAPSHOT", None), "transition_records", ())
-            if declarations is None
-            else declarations
+    enabled = {label for label in labels if MigrationLoader.migrations_module(label)[0] is not None}
+    if not enabled:
+        return
+    loader = MigrationLoader(None, ignore_no_migrations=True)
+    before, after = effective_states(loader, apps)
+    changes = MigrationAutodetector(before, after).changes(
+        graph=loader.graph,
+        trim_to_apps=enabled,
+        convert_apps=enabled,
+    )
+    if changes:
+        operations = ", ".join(
+            f"{label}: {operation.__class__.__name__}"
+            for label, migrations in sorted(changes.items())
+            for migration in migrations
+            for operation in migration.operations
         )
-
-    def _history(self, loader: MigrationLoader) -> dict[str, tuple[Node, Migration]]:
-        history = {}
-        for key, migration in sorted(loader.disk_migrations.items()):
-            origin = _metadata(migration, "origin")
-            if origin is None:
-                continue
-            if not isinstance(origin, str) or not origin or origin in history:
-                raise RuntimeError(f"invalid or duplicate materialized origin {origin!r}")
-            path = _directory(key[0]) / f"{key[1]}.py"
-            data = path.read_bytes()
-            digest = _metadata(migration, "source_sha256")
-            canonical = hasattr(migration, "compose_origin")
-            body_digest = getattr(migration, "compose_body_sha256", digest) if canonical else digest
-            marker = MATERIALIZED_FOOTER.encode() if canonical else _LEGACY_FOOTER
-            body, separator, _ = data.partition(marker)
-            if (
-                not separator
-                or not isinstance(digest, str)
-                or not isinstance(body_digest, str)
-                or hashlib.sha256(body).hexdigest() != body_digest
-            ):
-                raise RuntimeError(f"{origin}: materialized body digest changed or footer is missing")
-            if canonical:
-                payload, separator, seal = data.rpartition(_SEAL_PREFIX)
-                expected = repr(hashlib.sha256(payload).hexdigest()).encode() + b"\n"
-                if not separator or seal != expected:
-                    raise RuntimeError(f"{origin}: immutable binding metadata digest changed")
-            history[origin] = (key, migration)
-        return history
-
-    def _pending(self, loader: MigrationLoader) -> dict[Node, _Source]:
-        history = self._history(loader)
-        origins: set[str] = set()
-        pending: dict[Node, _Source] = {}
-        replaced = {key for migration in loader.replacements.values() for key in migration.replaces}
-        for declaration in self.declarations:
-            name, label = declaration["name"], declaration["app_label"]
-            declaring_app = declaration["declaring_app"]
-            origin = f"{declaring_app}:{name}"
-            if origin in origins:
-                raise RuntimeError(f"duplicate declared origin {origin}")
-            origins.add(origin)
-            if label not in self.labels:
-                raise RuntimeError(f"{origin}: unknown runtime migration target {label!r}")
-            module_name = declaration["module"]
-            conventional = declaring_app + ".migrations"
-            if module_name == conventional or module_name.startswith(conventional + "."):
-                raise RuntimeError(f"{origin}: source must live outside the conventional migrations package")
-            try:
-                module = importlib.import_module(module_name)
-            except Exception as error:
-                raise RuntimeError(f"{origin}: cannot import source migration {module_name!r}") from error
-            path = Path(module.__file__ or "")
-            if path.suffix != ".py":
-                raise RuntimeError(f"{origin}: migration requires Python source")
-            data = path.read_bytes()
-            digest = hashlib.sha256(data).hexdigest()
-            if origin in history:
-                key, migration = history[origin]
-                if key[0] != label or _metadata(migration, "source_sha256") != digest:
-                    raise RuntimeError(f"{origin}: source digest or target changed after materialization")
-                continue
-            key = label, name
-            if key in pending or key in loader.disk_migrations:
-                raise RuntimeError(f"{origin}: duplicate native migration node {key!r}")
-            if key in replaced:
-                raise RuntimeError(f"{origin}: replacement requires the complete immutable original chain")
-            cls = getattr(module, "Migration", None)
-            guard = getattr(module, "applies", None)
-            if not isinstance(cls, type) or not issubclass(cls, Migration) or not callable(guard):
-                raise RuntimeError(f"{origin}: source requires native Migration and applies(project_state)")
-            migration = cls(name, label)
-            if migration.replaces:
-                raise RuntimeError(f"{origin}: declare native replacements in the host migration package")
-            cast(list[Node], migration.dependencies)[:] = [
-                _node(edge, origin, "dependency") for edge in migration.dependencies
-            ]
-            cast(list[Node], migration.run_before)[:] = [
-                _node(edge, origin, "run_before") for edge in migration.run_before
-            ]
-            leaves = loader.graph.leaf_nodes(label)
-            if len(leaves) == 1 and leaves[0] not in migration.dependencies:
-                cast(list[Node], migration.dependencies).append(leaves[0])
-            package = (module.__spec__.parent if module.__spec__ else None) or module_name.rpartition(".")[0]
-            pending[key] = _Source(
-                origin,
-                migration,
-                guard,
-                path,
-                data.decode("utf-8"),
-                digest,
-                package,
-                declaration.get("initial_baseline") == "satisfied",
-            )
-        return pending
-
-    def plan(
-        self,
-        *,
-        apps: Apps | None = None,
-        defer_drop_check: bool = False,
-        app_labels: Iterable[str] | None = None,
-        allow_missing_packages: bool = False,
-        initial_baselines: frozenset[str] = frozenset(),
-    ) -> tuple[TransitionPlan, ...]:
-        """Validate the complete graph and selected prerequisite closure, without writes."""
-        existing = MigrationLoader(None, ignore_no_migrations=True)
-        pending = self._pending(existing)
-        loader = _BindingLoader(pending)
-        selected = None if app_labels is None else set(app_labels)
-        ordered = dict.fromkeys(
-            key
-            for leaf in loader.graph.leaf_nodes()
-            if selected is None or leaf[0] in selected
-            for key in loader.graph.forwards_plan(leaf)
-        )
-        relevant = {key[0] for key in ordered}
-        conflicts = {
-            label: names
-            for label, names in loader.detect_conflicts().items()
-            if selected is None or label in relevant or label in selected
-        }
-        if conflicts:
-            raise RuntimeError(f"multiple migration leaves: {conflicts}")
-        result, destinations = [], set()
-        for key in ordered:
-            if key not in pending:
-                continue
-            source = pending[key]
-            state = loader.project_state(nodes=[key], at_end=False)
-            applies = source.applies_to(state)
-            baseline = not applies and source.initial_baseline and key[0] in initial_baselines
-            if baseline:
-                # A native empty migration also omits source-class lifecycle
-                # overrides. Replace the graph owner before downstream state.
-                pending[key] = source = source.satisfied()
-                loader.disk_migrations[key] = source.migration
-                loader.graph.nodes[key] = source.migration
-            elif not applies:
-                raise RuntimeError(
-                    f"{source.origin}: false guard cannot prove a data transition completed; "
-                    "retain native history or a complete replacement baseline"
-                )
-            try:
-                source.migration.mutate_state(state)
-            except Exception as error:
-                raise RuntimeError(f"{source.origin}: invalid migration state transition") from error
-            path = _directory(key[0], missing=allow_missing_packages) / f"{key[1]}.py"
-            if path.resolve() in destinations:
-                raise RuntimeError(f"{source.origin}: migration destination already exists: {path}")
-            destinations.add(path.resolve())
-            result.append(source.plan(path, initial_baseline=baseline))
-        if apps is not None and not defer_drop_check:
-            # This check compares state only. DropGuardAutodetector's row proofs
-            # belong exclusively to explicit native authoring and migrate.
-            if selected is not None:
-                loader = _BindingLoader({key: pending[key] for key in ordered if key in pending})
-            before, after = effective_states(loader, apps)
-            changes = MigrationAutodetector(before, after).changes(
-                graph=loader.graph, trim_to_apps=None if selected is None else selected | relevant
-            )
-            _shared_table_drops(before, after, changes)
-        return tuple(result)
-
-    def adoption_plan(self, origin: str, baseline: Node) -> TransitionPlan | None:
-        """Plan one declared origin satisfied by an explicit retained initial.
-
-        The caller attests that this retained initial is covered by the owner's
-        satisfaction assertion; native structure and guards do not prove prior
-        data work. The anchor must remain an active native initial and ancestor of
-        the unique target leaf. A matching sealed adoption is an immutable,
-        idempotent result even after later native descendants are authored.
-        """
-        declaration = next(
-            (
-                record
-                for record in self.declarations
-                if f"{record['declaring_app']}:{record['name']}" == origin
-            ),
-            None,
-        )
-        if declaration is None:
-            raise RuntimeError(f"{origin}: unknown selected transition origin")
-        snap = getattr(settings, "COMPOSE_SNAPSHOT", None)
-        frozen = next(
-            (
-                record
-                for record in getattr(snap, "transition_records", ())
-                if f"{record['declaring_app']}:{record['name']}" == origin
-            ),
-            None,
-        )
-        frozen_digest = dict(getattr(snap, "transitions", ())).get(origin)
-        if declaration != frozen or frozen_digest is None:
-            raise RuntimeError(f"{origin}: selected declaration must match the frozen snapshot")
-        if declaration.get("initial_baseline") != "satisfied":
-            raise RuntimeError(f"{origin}: adoption requires initial_baseline='satisfied'")
-        baseline = _node(baseline, origin, "baseline")
-        label = declaration["app_label"]
-        if baseline[0] != label:
-            raise RuntimeError(f"{origin}: baseline must target app {label!r}")
-        # Scope before loading source modules. Other pending declarations are
-        # neither prerequisites inferred by this action nor implicit adoptions.
-        selected = TransitionBinding(labels=self.labels, declarations=(declaration,))
-        existing = MigrationLoader(None, ignore_no_migrations=True)
-        if baseline not in existing.disk_migrations or baseline not in existing.graph.nodes:
-            raise RuntimeError(f"{origin}: baseline must be retained native disk and active graph history")
-        native = existing.disk_migrations[baseline]
-        if native.initial is not True and not (
-            native.initial is None and baseline in existing.graph.root_nodes(label)
-        ):
-            raise RuntimeError(f"{origin}: baseline must be a native initial migration")
-        leaves = existing.graph.leaf_nodes(label)
-        if len(leaves) != 1:
-            raise RuntimeError(f"{origin}: adoption requires one native target leaf")
-        if baseline not in existing.graph.forwards_plan(leaves[0]):
-            raise RuntimeError(f"{origin}: baseline is not an ancestor of the native target leaf")
-        baseline_digest = hashlib.sha256((_directory(label) / f"{baseline[1]}.py").read_bytes()).hexdigest()
-        pending = selected._pending(existing)
-        history = selected._history(existing)
-        if origin in history:
-            key, migration = history[origin]
-            if (
-                key not in existing.graph.nodes
-                or baseline not in existing.graph.forwards_plan(key)
-                or _metadata(migration, "source_sha256") != frozen_digest
-                or _metadata(migration, "initial_baseline") != "satisfied"
-                or _metadata(migration, "adopted_baseline") != baseline
-                or _metadata(migration, "adopted_baseline_sha256") != baseline_digest
-                or migration.operations
-                or type(migration).apply is not Migration.apply
-                or type(migration).mutate_state is not Migration.mutate_state
-            ):
-                raise RuntimeError(f"{origin}: existing origin is not the matching sealed baseline adoption")
-            return None
-        key = label, declaration["name"]
-        source = pending[key]
-        if source.digest != frozen_digest:
-            raise RuntimeError(f"{origin}: source digest does not match the frozen snapshot")
-        if source.applies_to(existing.project_state(nodes=[baseline])):
-            raise RuntimeError(f"{origin}: true guard at baseline; author the ordinary transition")
-        loader = _BindingLoader(pending)
-        relevant = {node[0] for node in loader.graph.forwards_plan(key)}
-        conflicts = {app: names for app, names in loader.detect_conflicts().items() if app in relevant}
-        if conflicts:
-            raise RuntimeError(f"multiple migration leaves: {conflicts}")
-        if source.applies_to(loader.project_state(nodes=[key], at_end=False)):
-            raise RuntimeError(f"{origin}: true guard at binding state; author the ordinary transition")
-        return source.satisfied().plan(
-            _directory(label) / f"{key[1]}.py",
-            initial_baseline=True,
-            adopted_baseline=baseline,
-            adopted_baseline_sha256=baseline_digest,
-        )
-
-    def adopt(self, origin: str, baseline: Node, *, dry_run: bool = False) -> tuple[Path, ...]:
-        """Append one sealed native empty origin without changing retained history.
-
-        Dry-run validates the same inputs and returns the prospective path.
-        An exact previously sealed adoption returns no paths and writes nothing.
-        """
-        plan = self.adoption_plan(origin, baseline)
-        if plan is None:
-            return ()
-        if dry_run:
-            return (plan.output_path,)
-        return self._materialize((plan,), lambda: self.adoption_plan(origin, baseline))
-
-    def check(self, app_labels: Iterable[str] | None = None) -> None:
-        """Refuse unmaterialized declarations without creating packages or history."""
-        pending = self.plan(app_labels=app_labels)
-        if pending:
-            raise RuntimeError("pending authored runtime migration " + ", ".join(p.origin for p in pending))
-
-    def check_native_history(self, apps: Apps) -> None:
-        """Require model-clean history and bound transitions without database access.
-
-        Compose check calls this after population. Disabled native migration
-        mappings remain authoritative, and tombstones retain historical state.
-        """
-        self.check()
-        enabled = {label for label in self.labels if MigrationLoader.migrations_module(label)[0] is not None}
-        if not enabled:
-            return
-        loader = MigrationLoader(None, ignore_no_migrations=True)
-        before, after = effective_states(loader, apps)
-        changes = MigrationAutodetector(before, after).changes(
-            graph=loader.graph,
-            trim_to_apps=enabled,
-            convert_apps=enabled,
-        )
-        if changes:
-            operations = ", ".join(
-                f"{label}: {operation.__class__.__name__}"
-                for label, migrations in sorted(changes.items())
-                for migration in migrations
-                for operation in migration.operations
-            )
-            raise RuntimeError(f"native migration history does not match composed models: {operations}")
-
-    @staticmethod
-    def _render(plan: TransitionPlan) -> bytes:
-        if not plan.source.endswith("\n"):
-            raise RuntimeError(f"{plan.origin}: source migration must end with a newline")
-        # Keep native relative imports anchored to the author package. Module
-        # docstrings and future imports must precede the injected assignment.
-        header = None
-        for index, node in enumerate(ast.parse(plan.source).body):
-            if (
-                index == 0
-                and isinstance(node, ast.Expr)
-                and isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, str)
-            ) or (isinstance(node, ast.ImportFrom) and node.module == "__future__"):
-                header = node
-            else:
-                break
-        original = plan.source.encode()
-        if header is None:
-            body = f"__package__ = {plan.source_package!r}\n".encode() + original
-        else:
-            lines = original.splitlines(keepends=True)
-            offset = sum(map(len, lines[: cast(int, header.end_lineno) - 1])) + cast(
-                int, header.end_col_offset
-            )
-            body = original[:offset] + f"; __package__ = {plan.source_package!r}".encode() + original[offset:]
-        body_digest = hashlib.sha256(body).hexdigest()
-        payload = (
-            body.decode()
-            + MATERIALIZED_FOOTER
-            + "\n"
-            + (
-                "from django.db.migrations import Migration as _ComposeInitialBaselineMigration\n"
-                "class Migration(_ComposeInitialBaselineMigration):\n"
-                "    operations = []\n"
-                if plan.initial_baseline
-                else ""
-            )
-            + f"Migration.dependencies = {list(plan.dependencies)!r}\n"
-            + f"Migration.run_before = {list(plan.run_before)!r}\n"
-            + f"Migration.compose_origin = {plan.origin!r}\n"
-            + f"Migration.compose_source_sha256 = {plan.source_sha256!r}\n"
-            + f"Migration.compose_body_sha256 = {body_digest!r}\n"
-            + ("Migration.compose_initial_baseline = 'satisfied'\n" if plan.initial_baseline else "")
-            + (
-                f"Migration.compose_adopted_baseline = {plan.adopted_baseline!r}\n"
-                f"Migration.compose_adopted_baseline_sha256 = {plan.adopted_baseline_sha256!r}\n"
-                if plan.adopted_baseline is not None
-                else ""
-            )
-        ).encode()
-        return payload + _SEAL_PREFIX + repr(hashlib.sha256(payload).hexdigest()).encode() + b"\n"
-
-    def materialize(
-        self,
-        apps: Apps,
-        app_labels: Iterable[str] | None = None,
-        *,
-        initial_baselines: frozenset[str] = frozenset(),
-        written_files: list[Path] | None = None,
-    ) -> tuple[Path, ...]:
-        """Snapshot sources, optionally satisfying declared first-authoring baselines.
-
-        initial_baselines is the command's exact newly initialized disk-label
-        delta, never inferred from initial-looking files or database contents.
-        written_files tracks exclusive destinations for an enclosing native
-        authoring rollback, including a write that raises after publication.
-        """
-        plans = self.plan(
-            apps=apps,
-            app_labels=app_labels,
-            allow_missing_packages=True,
-            initial_baselines=initial_baselines,
-        )
-        return self._materialize(
-            plans, lambda: self.plan(apps=apps, app_labels=app_labels), written_files=written_files
-        )
-
-    def _materialize(
-        self,
-        plans: tuple[TransitionPlan, ...],
-        validate: Callable[[], object],
-        *,
-        written_files: list[Path] | None = None,
-    ) -> tuple[Path, ...]:
-        """Publish validated native origins through one exclusive rollback owner."""
-        rendered = [(plan, self._render(plan)) for plan in plans]
-        packages = [
-            directory / "__init__.py"
-            for label in dict.fromkeys(plan.app_label for plan in plans)
-            for directory in (_directory(label, missing=True),)
-            if not (directory / "__init__.py").exists()
-        ]
-        written: list[Path] = []
-        try:
-            for path, content in [
-                *((path, b"") for path in packages),
-                *((plan.output_path, content) for plan, content in rendered),
-            ]:
-                if path.exists():
-                    raise RuntimeError(f"Migration destination appeared during authoring: {path}")
-                written.append(path)
-                if written_files is not None:
-                    written_files.append(path)
-                try:
-                    atomic_write(path, content, exclusive=True)
-                except FileExistsError:
-                    # Exclusive publication lost a race; that file is not ours.
-                    written.pop()
-                    if written_files is not None:
-                        written_files.pop()
-                    raise
-            importlib.invalidate_caches()
-            validate()
-        except BaseException:
-            for path in written:
-                path.unlink(missing_ok=True)
-            _forget_history({plan.app_label for plan in plans})
-            raise
-        return tuple(plan.output_path for plan in plans)
+        raise RuntimeError(f"native migration history does not match composed models: {operations}")
 
 
 def _storage_identifier(connection: BaseDatabaseWrapper, identifier: str) -> tuple[str, str]:
@@ -1084,9 +535,6 @@ def reset_migration_history(
                 writer = MigrationWriter(migration, include_header=False)
                 atomic_write(Path(writer.path), writer.as_string().encode(), exclusive=True)
         _forget_history(labels)
-        TransitionBinding(labels=(config.label for config in global_apps.get_app_configs())).check(
-            app_labels=labels
-        )
         fresh = MigrationExecutor(connection).loader
         nodes = {key for key in fresh.graph.nodes if key[0] in labels}
         recorder = MigrationRecorder(connection)

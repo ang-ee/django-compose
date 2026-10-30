@@ -111,31 +111,6 @@ assert not [error for error in run_checks() if error.id == "commands.E001"]
 """)
 
 
-@pytest.mark.parametrize("readonly", ["dry_run", "check_changes"])
-def test_native_readonly_authoring_does_not_materialize(host, readonly):
-    _, run = host
-    run(f"""
-before = files()
-with receipt_labels():
-    def action():
-        call_command("makemigrations", "alpha", {readonly}=True, interactive=False, verbosity=0)
-    expect(CommandError, "pending authored", action)
-assert files() == before
-""")
-
-
-def test_native_authoring_binds_before_autodetection(host):
-    _, run = host
-    run("""
-with receipt_labels():
-    call_command("makemigrations", "alpha", interactive=False, verbosity=0)
-assert Path("history/alpha/rename.py").exists()
-names = sorted(p.name for p in Path("history/alpha").glob("*.py"))
-assert names == ["0001_origin.py", "__init__.py", "rename.py"], names
-call_command("migrate", interactive=False, verbosity=0)
-""")
-
-
 @pytest.mark.parametrize("gate", ["pending", "dirty", "cross_app"])
 def test_reset_preconditions_leave_history_and_records_untouched(host, gate):
     root, run = host
@@ -172,10 +147,9 @@ assert records == set(MigrationRecorder(connection).applied_migrations())
 def test_reset_success_preserves_table_data(host):
     _, run = host
     run("""
-owner().materialize(apps)
+author_successor()
 call_command("migrate", interactive=False, verbosity=0)
 apps.get_model("alpha", "Record")._base_manager.create(new="existing")
-declarations.entries = []
 with receipt_labels():
     labels, removed, count = reset_migration_history(("alpha",))
 assert labels == ("alpha",)
@@ -190,9 +164,8 @@ assert ("alpha", "0001_initial") in MigrationExecutor(connection).loader.applied
 def test_reset_restores_every_file_and_recorder_on_failure(host, failure):
     _, run = host
     run(f"""
-owner().materialize(apps)
+author_successor()
 call_command("migrate", interactive=False, verbosity=0)
-declarations.entries = []
 from stat import S_IMODE
 for name, mode in (("0001_origin.py", 0o644), ("rename.py", 0o754)):
     Path("history/alpha", name).chmod(mode)
@@ -259,10 +232,9 @@ assert not Path("other.sqlite3").exists()
 def test_reset_keeps_unrelated_helper_source(host):
     _, run = host
     run("""
-owner().materialize(apps)
+author_successor()
 call_command("migrate", interactive=False, verbosity=0)
 Path("history/alpha/_helper.py").write_text("VALUE = 'durable helper'\\n")
-declarations.entries = []
 with receipt_labels():
     labels, removed, recorded = reset_migration_history(("alpha",))
 assert removed == 2
@@ -283,54 +255,13 @@ class Migration(migrations.Migration):
 """,
     )
     run("""
-owner().materialize(apps)
+author_successor()
 call_command("migrate", interactive=False, verbosity=0)
 beta = Path("history/beta/0001_noop.py").read_bytes()
-declarations.entries = []
 with receipt_labels():
     reset_migration_history(("alpha",))
 assert Path("history/beta/0001_noop.py").read_bytes() == beta
 assert ("beta", "0001_noop") in MigrationExecutor(connection).loader.applied_migrations
-""")
-
-
-def test_native_update_refuses_authored_history_but_allows_ordinary_native_history(host):
-    _, run = host
-    run("""
-from django_compose.management.commands.makemigrations import Command
-owner().materialize(apps)
-loader = MigrationLoader(None)
-sealed = loader.disk_migrations[("alpha", "rename")]
-command = Command()
-command.include_header = False
-command.dry_run = False
-before = files()
-expect(CommandError, "immutable", lambda: command.write_migration_files(
-    {"alpha": [sealed]}, {"alpha": str(Path("history/alpha/rename.py"))}))
-assert files() == before
-ordinary = migrations.Migration("0002_new", "alpha")
-ordinary.dependencies = [("alpha", "rename")]
-command.verbosity = 0
-command.scriptable = False
-command.written_files = []
-command.write_migration_files({"alpha": [ordinary]})
-assert Path("history/alpha/0002_new.py").exists()
-assert "compose_origin" not in Path("history/alpha/0002_new.py").read_text()
-""")
-
-
-def test_native_writer_checks_all_destinations_before_first_write(host):
-    _, run = host
-    run("""
-from django_compose.management.commands.makemigrations import Command
-command = Command()
-command.include_header = False
-command.dry_run = False
-first = migrations.Migration("unique", "alpha")
-second = migrations.Migration("0001_origin", "alpha")
-before = files()
-expect(CommandError, "overwrite", lambda: command.write_migration_files({"alpha": [first, second]}))
-assert files() == before
 """)
 
 
@@ -445,12 +376,11 @@ from django.db import connections
 from django.db.migrations.recorder import MigrationRecorder
 connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
 assert not settings.DATABASE_ROUTERS
-owner().materialize(apps)
+author_successor()
 for alias in ("default", "other"):
     executor = MigrationExecutor(connections[alias])
     executor.migrate(executor.loader.graph.leaf_nodes())
     apps.get_model("alpha", "Record")._base_manager.using(alias).create(new=alias)
-declarations.entries = []
 original = files()
 recorded = {alias: set(MigrationRecorder(connections[alias]).applied_migrations())
             for alias in ("default", "other")}
@@ -460,20 +390,6 @@ for alias in ("default", "other"):
     assert set(MigrationRecorder(connections[alias]).applied_migrations()) == recorded[alias]
     values = apps.get_model("alpha", "Record")._base_manager.using(alias).values_list("new", flat=True)
     assert list(values) == [alias]
-""")
-
-
-def test_reset_refuses_rebinding_retained_completed_transition(host):
-    _, run = host
-    run("""
-owner().materialize(apps)
-call_command("migrate", interactive=False, verbosity=0)
-before = files()
-from django.db.migrations.recorder import MigrationRecorder
-records = set(MigrationRecorder(connection).applied_migrations())
-expect(RuntimeError, "false guard", lambda: reset_migration_history(("alpha",)))
-assert files() == before
-assert records == set(MigrationRecorder(connection).applied_migrations())
 """)
 
 
@@ -604,28 +520,6 @@ with patch.object(migrations.RemoveField, "allow_migrate_model", return_value=Fa
     with patch.object(connection, "cursor", side_effect=AssertionError("excluded operation")):
         assert DropGuardAutodetector(before, after).changes(loader.graph)["alpha"]
 assert allowed.call_args.args == ("default", before.apps.get_model("alpha", "Record"))
-""")
-
-
-def test_offline_binding_keeps_uncertain_feature_routes_without_queries(host):
-    root, run = host
-    initial = root / "history/alpha/0001_origin.py"
-    initial.write_text(
-        initial.read_text().replace(
-            "    ])]", "    ], options={'required_db_features': ['compose_server_feature']})]"
-        )
-    )
-    run("""
-from unittest.mock import PropertyMock
-loader = MigrationLoader(None)
-after = loader.project_state()
-after.remove_model("alpha", "record")
-after.add_model(ModelState("beta", "Unrelated", [("id", models.AutoField(primary_key=True))]))
-with patch.object(connection, "cursor", side_effect=AssertionError("offline binding queried")):
-    with patch.object(type(connection.features), "compose_server_feature", create=True,
-                      new_callable=PropertyMock, side_effect=AssertionError("offline feature queried")):
-        assert TransitionBinding(labels=("alpha", "beta"), declarations=[]).plan(apps=after.apps) == ()
-assert not Path("database.sqlite3").exists()
 """)
 
 

@@ -6,8 +6,7 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import DEFAULT_DB_ALIAS, connections
 
 from django_compose.management import require_serving_mode
-from django_compose.management.commands.makemigrations import history_labels
-from django_compose.migrations import reset_migration_history
+from django_compose.migrations import history_labels, reset_migration_history
 
 
 class Command(BaseCommand):
