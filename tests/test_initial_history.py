@@ -683,3 +683,70 @@ call_command("migrate", "alpha", interactive=False, verbosity=0)
 """,
         )
     )
+
+
+def test_relative_native_package_path_rolls_back_after_reconciliation_and_retries(baseline_host):
+    write(baseline_host, "archive/__init__.py", '__path__ = ["relocated"]\n').chmod(0o640)
+    write(baseline_host, "relocated/__init__.py", "# retained initializer\n").chmod(0o600)
+    settings_path = baseline_host / "settings.py"
+    settings_path.write_text(
+        settings_path.read_text().replace(
+            "configure(globals())",
+            'MIGRATION_MODULES = {"alpha": "archive.deep.alpha"}\nconfigure(globals())',
+        )
+    )
+    source = baseline_host / "alpha/compose_migrations/alpha/record_bootstrap.py"
+    source.write_text(
+        source.read_text()
+        .replace("from django.db import migrations", "from django.db import migrations, models")
+        .replace(
+            "operations = [migrations.RunPython(forwards, migrations.RunPython.noop)]",
+            "operations = [migrations.RunPython(forwards, migrations.RunPython.noop), "
+            'migrations.AddField("entry", "temporary", models.CharField(max_length=10, default=""))]',
+        )
+    )
+    successful(invoke(baseline_host, "compose"))
+    successful(
+        invoke(
+            baseline_host,
+            script="""
+from pathlib import Path
+from stat import S_IMODE
+from unittest.mock import patch
+import django
+django.setup()
+from django.core.management import call_command
+from django.core.management.commands.makemigrations import Command as NativeCommand
+from django.db import connection
+from django.db.migrations.recorder import MigrationRecorder
+
+def files():
+    return {p: (p.read_bytes(), S_IMODE(p.stat().st_mode)) for root in ("archive", "relocated")
+            for p in Path(root).rglob("*.py")}
+before = files()
+native = NativeCommand.handle
+calls = 0
+def fail(self, *args, **options):
+    global calls
+    calls += 1
+    result = native(self, *args, **options)
+    if calls == 2:
+        assert any("RemoveField" in p.read_text() for p in Path("relocated").rglob("*.py"))
+        raise RuntimeError("injected after relative-path reconciliation")
+    return result
+with patch.object(NativeCommand, "handle", fail):
+    try:
+        call_command("makemigrations", "alpha", interactive=False, verbosity=0)
+    except RuntimeError as error:
+        assert "injected after relative-path reconciliation" in str(error), str(error)
+    else:
+        raise AssertionError("reconciliation failure injection did not run")
+assert files() == before, (files(), before)
+assert MigrationRecorder(connection).applied_migrations() == {}
+call_command("makemigrations", "alpha", interactive=False, verbosity=0)
+assert all(files()[p] == original for p, original in before.items())
+call_command("makemigrations", "alpha", check_changes=True, dry_run=True, interactive=False, verbosity=0)
+call_command("migrate", "alpha", interactive=False, verbosity=0)
+""",
+        )
+    )

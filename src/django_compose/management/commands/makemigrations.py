@@ -73,6 +73,7 @@ class Command(NativeCommand):
             raise
 
     def _remember(self, path: Path) -> None:
+        path = path.resolve()
         if path not in self._originals:
             self._originals[path] = _file_state(path)
 
@@ -102,10 +103,10 @@ class Command(NativeCommand):
                 if part:
                     prefix += "." + part
                     directory /= part
-                path = directory / "__init__.py"
+                path = (directory / "__init__.py").resolve()
                 initializers.setdefault(path, (prefix, _file_state(path)))
         try:
-            directory = Path(writer.basedir)
+            directory = Path(writer.basedir).resolve()
         finally:
             for path, (prefix, original) in initializers.items():
                 if _file_state(path) != original:

@@ -103,7 +103,7 @@ def _directory(label: str, *, missing: bool = False) -> Path:
         module = importlib.import_module(package)
         if not hasattr(module, "__path__"):
             raise ValueError("Migrations must be a Python package")
-        return Path(module_dir(module))
+        return Path(module_dir(module)).resolve()
     except ModuleNotFoundError as error:
         if (
             not missing
@@ -114,12 +114,12 @@ def _directory(label: str, *, missing: bool = False) -> Path:
         parent, _, name = package.rpartition(".")
         config = global_apps.get_app_config(label)
         if parent == config.name:
-            return Path(config.path) / name
+            return (Path(config.path) / name).resolve()
         try:
             parent_module = importlib.import_module(parent)
             if not hasattr(parent_module, "__path__"):
                 raise ValueError("Migration parent must be a Python package")
-            return Path(module_dir(parent_module)) / name
+            return (Path(module_dir(parent_module)) / name).resolve()
         except (ImportError, ValueError) as parent_error:
             raise ImproperlyConfigured(
                 f"Initialize importable migration parent package {parent!r}"
