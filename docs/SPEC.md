@@ -409,7 +409,9 @@ A retry retains ownership of files written by an interrupted build.
 A failed build remains `IN_PROGRESS`; reverting source bytes does not revive it.
 Stale cleanup removes only previously recorded generated paths. Normal build
 and clean preserve migration directories and unowned files, and refuse foreign
-or symlinked trees. First composition also admits a migration-only scaffold:
+or symlinked trees. Atomic publication uses the
+[file-permission policy](packaging.md#prepare-the-application-artifact) for new
+and existing files. First composition also admits a migration-only scaffold:
 label directories containing native `migrations/` subtrees, with optional zero-byte
 root/label `__init__.py` files. It preserves every history byte and file mode,
 including disabled history graphs. Unknown files, symlinks and special files fail;

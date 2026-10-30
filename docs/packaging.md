@@ -80,6 +80,14 @@ source distributions. Git-ignored output still needs explicit inclusion in your
 application artifact; configure your build backend's file selection accordingly.
 The library has no automatic build-backend adapter.
 
+Choose the build process's umask for the intended serving permissions. Newly
+published files use ordinary file-creation permissions: for example, umask `022`
+produces mode `0644`, while `077` produces `0600`. Atomic replacement preserves
+an existing file's mode, and an explicitly supplied mode takes precedence.
+Recomposition therefore preserves existing private files; `compose --if-stale`
+may skip publication entirely. Changing an existing artifact's permissions is
+an explicit deployment decision.
+
 Compose for the intended deployment layout. Compiler inputs include the output
 directory and selected source/configuration implementations; copying output to a
 different effective configuration can make it stale. For example, a container
