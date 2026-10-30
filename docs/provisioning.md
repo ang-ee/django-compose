@@ -12,8 +12,8 @@ python manage.py provision --database default --check --wait-db 0
 ```
 
 Provision holds the native receipt lease throughout mutation. It commits an
-`in_progress` singleton in `django_compose_provision`, checks migration bindings
-and retained imports, checks consistent native migration history, runs Django's
+`in_progress` singleton in `django_compose_provision`, checks native model/history
+agreement and retained imports, checks consistent native migration history, runs Django's
 `migrate` for the selected alias, calls app hooks in populated AppConfig order,
 and runs Django's database checks before committing `complete`. All commands and
 hooks share the same process and command IO. Native command system-check policies

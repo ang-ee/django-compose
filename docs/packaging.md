@@ -156,3 +156,11 @@ identities and dependency metadata, and runs the composition typing tests before
 uploading the selected packages' archives with `PYPI_API_TOKEN`. Select only
 packages whose version is new; existing PyPI files are immutable. Publish new fork versions
 there before updating this library's typing requirements and lockfile.
+
+## Open release gates
+
+This migration candidate is not release-ready. Native Watchman daemon acceptance
+and a shared CI/release gate that makes PostgreSQL proofs mandatory and publishes
+only its exact checked archives remain open. The workflows described above are
+the current implementation, not evidence that these gates are complete. No version
+bump or publication is part of this candidate.

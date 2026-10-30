@@ -60,13 +60,6 @@ def component_wheel(directory: Path, package: str, *, dependency: str | None = N
     }
     if dependency is None:
         members[package + "/validators.py"] = "def retained(value):\n    pass\n"
-        members[package + "/legacy.py"] = """from django.db import migrations
-def applies(state):
-    return "old_title" in state.models["installed_catalog", "item"].fields
-class Migration(migrations.Migration):
-    dependencies = []
-    operations = [migrations.RenameField("item", "old_title", "title")]
-"""
         members[package + "/models.py"] = """from django.db import models
 from django_compose.models import Composable
 from .validators import retained
@@ -234,74 +227,59 @@ assert set(state.apps.get_model("installed_catalog", "Grandchild")._meta.parents
     )
     assert "compose-smoke-reviews provides enabled app installed_reviews" in refusal, refusal
 
-    # An installed addon may introduce an origin after this host's final-schema
-    # initial already exists and has been applied. Adoption appends history only.
-    (host / "settings.py").write_text(
-        settings.replace(
-            "configure(globals())",
-            """COMPOSE_TRANSITION_SOURCE = [{
-    "declaring_app": "installed_catalog", "name": "rename_legacy",
-    "app_label": "installed_catalog", "module": "installed_catalog.legacy",
-    "initial_baseline": "satisfied",
-}]
-configure(globals())""",
-        )
-    )
-    run([*compiler, "compose"], cwd=host, env=env)
+    # Reuse this installed host for both a populated upgrade and fresh history.
+    # Native RunPython owns data work; recorder state makes repeated migrate safe.
+    migration = host / "runtime/installed_catalog/migrations/0002_native_data.py"
+    migration.write_text("""from django.db import migrations
+
+def forwards(apps, schema_editor):
+    Item = apps.get_model("installed_catalog", "Item")
+    rows = Item.objects.using(schema_editor.connection.alias)
+    if not rows.exists():
+        rows.create(title="native seed")
+    else:
+        for row in rows.all():
+            row.title += " migrated"
+            row.save(using=schema_editor.connection.alias, update_fields=["title"])
+
+class Migration(migrations.Migration):
+    dependencies = [("installed_catalog", "0001_initial")]
+    operations = [migrations.RunPython(forwards, migrations.RunPython.noop)]
+""")
     histories = {
         path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
         for path in sorted((host / "runtime").glob("*/migrations/*.py"))
     }
-    database = (host / "shop.sqlite3").read_bytes()
-    refusal = run(
-        [*compiler, "makemigrations", "installed_catalog", "--check", "--dry-run"],
-        cwd=host,
-        env=env,
-        success=False,
-    )
-    assert "false guard cannot prove" in refusal, refusal
-    adoption = [
-        *compiler,
-        "adopt_transition",
-        "installed_catalog:rename_legacy",
-        "--baseline",
-        "installed_catalog.0001_initial",
-    ]
-    run([*adoption, "--dry-run"], cwd=host, env=env)
-    assert set((host / "runtime").glob("*/migrations/*.py")) == set(histories)
-    run(adoption, cwd=host, env=env)
-    origin = host / "runtime/installed_catalog/migrations/rename_legacy.py"
-    assert set((host / "runtime").glob("*/migrations/*.py")) == {*histories, origin}
-    authored = origin.read_bytes()
-    run(adoption, cwd=host, env=env)
-    assert origin.read_bytes() == authored
-    assert (host / "shop.sqlite3").read_bytes() == database
-    for path, expected in histories.items():
-        assert (path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) == expected, path
-    run([*compiler, "migrate", "--noinput"], cwd=host, env=env)
-    run([*compiler, "compose", "--check"], cwd=host, env=env)
-    run(
-        [
-            str(python),
-            "-c",
-            """import django
+    for database, title in (
+        ("shop.sqlite3", "installed component migrated"),
+        ("fresh.sqlite3", "native seed"),
+    ):
+        (host / "settings.py").write_text(settings.replace("shop.sqlite3", database))
+        run([*compiler, "compose"], cwd=host, env=env)
+        for _ in range(2):
+            run([*compiler, "migrate", "--noinput"], cwd=host, env=env)
+        run([*compiler, "compose", "--check"], cwd=host, env=env)
+        run(
+            [
+                str(python),
+                "-c",
+                f"""import django
 django.setup()
 from django.apps import apps
 from django.db import connection
-from django.db.migrations.loader import MigrationLoader
-loader = MigrationLoader(connection)
-node = ("installed_catalog", "rename_legacy")
-assert loader.disk_migrations[node].operations == []
-assert node in loader.applied_migrations
-row = apps.get_model("installed_catalog", "Child").objects.get()
-assert (row.title, row.detail, row.rating, row.reviewed) == (
-    "installed component", "child", 5, True,
-)
+from django.db.migrations.recorder import MigrationRecorder
+Item = apps.get_model("installed_catalog", "Item")
+assert list(Item.objects.values_list("title", flat=True)) == [{title!r}]
+assert MigrationRecorder(connection).migration_qs.filter(
+    app="installed_catalog", name="0002_native_data",
+).count() == 1
 """,
-        ],
-        cwd=host,
-        env=env,
-    )
+            ],
+            cwd=host,
+            env=env,
+        )
+        for path, expected in histories.items():
+            assert (path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) == expected, path
 
 
 def main() -> None:
@@ -323,7 +301,6 @@ def main() -> None:
             "build.py",
             "typing.py",
             "management/commands/makemigrations.py",
-            "management/commands/adopt_transition.py",
             "management/commands/provision.py",
         ):
             assert f"django_compose/{required}" in names, required
@@ -338,12 +315,20 @@ def main() -> None:
             "django-yamlconf",
         }, metadata
         assert sorted(metadata.get_all("Provides-Extra", [])) == ["typing"]
-        for removed in ("runtime.py", "composer.py", "appgraph.py", "hatch.py", "yamlconf.py"):
+        for removed in (
+            "runtime.py",
+            "composer.py",
+            "appgraph.py",
+            "hatch.py",
+            "yamlconf.py",
+            "management/commands/adopt_transition.py",
+        ):
             assert f"django_compose/{removed}" not in names, removed
         assert not any(name.startswith(("angee/", "tests/", "examples/")) for name in names)
     with tarfile.open(sdist) as archive:
         names = set(archive.getnames())
         prefix = sdist.name.removesuffix(".tar.gz")
+        assert f"{prefix}/docs/proposals/0003-existing-baseline-adoption.md" not in names
         for required in (
             "docs/SPEC.md",
             "uv.lock",
