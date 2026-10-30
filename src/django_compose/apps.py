@@ -54,13 +54,11 @@ class BuildComposeConfig(AppConfig):
         if selected_mode == "check":
             verify(snap, output_module)
         integrations = resolve_integrations(snap.integration_paths)
-        transitions = snap.transition_records
         self.plan = emit(
             snap,
             self.apps.get_app_configs(),
             mode=selected_mode,
             integrations=integrations,
-            transitions=transitions,
             output_dir=output_dir,
             output_module=output_module,
         )
@@ -92,11 +90,9 @@ class BuildComposeConfig(AppConfig):
             )
             self.receipt = self.plan.finalize()
             if self.compose_mode == "check":
-                from django_compose.migrations import TransitionBinding
+                from django_compose.migrations import check_native_history
 
-                binding = TransitionBinding(labels=self.plan.labels, declarations=self.plan.transitions)
-                assert self.apps is not None
-                binding.check_native_history(self.apps)
+                check_native_history(self.apps, labels=self.plan.labels)
             _finish_startup_verification()
         finally:
             self.plan.close()

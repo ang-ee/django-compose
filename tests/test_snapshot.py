@@ -14,10 +14,7 @@ from django_compose.autoreload import InputReport
 from django_compose.serving import Receipt, installed_apps, migration_modules, read_receipt, verify
 from django_compose.snapshot import (
     Entry,
-    discover_transitions,
     snapshot,
-    transition_declarations,
-    transition_fingerprints,
 )
 
 
@@ -86,14 +83,9 @@ def test_fingerprints_reread_and_report_inputs_without_distribution_metadata(tmp
     app.mkdir()
     (app / "__init__.py").write_text("raise AssertionError('parent executed')")
     integration = app / "hooks.py"
-    transition = app / "transition.py"
     integration.write_text("first")
-    transition.write_text("first")
     monkeypatch.syspath_prepend(str(tmp_path))
     entries = (Entry("fingerprintprobe", "probe", "django.apps.AppConfig", str(app), "fingerprintprobe"),)
-    records = (
-        {"declaring_app": "fingerprintprobe", "name": "move", "app_label": "probe", "module": "transition"},
-    )
 
     def unexpected():
         raise AssertionError("fingerprinting must not query distribution metadata")
@@ -103,24 +95,18 @@ def test_fingerprints_reread_and_report_inputs_without_distribution_metadata(tmp
     def capture():
         report = InputReport()
         monkeypatch.setattr("django_compose.autoreload.inputs", report)
-        result = snapshot(entries, integration_paths=("fingerprintprobe.hooks.Hook",), transitions=records)
-        assert {integration, transition} <= report.files
-        report.files.clear()
-        transitions = transition_fingerprints(records)
-        assert report.files == {transition}
-        return result, transitions
+        result = snapshot(entries, integration_paths=("fingerprintprobe.hooks.Hook",))
+        assert integration in report.files
+        return result
 
-    before, before_transitions = capture()
+    before = capture()
     integration.write_text("other")
-    transition.write_text("other")
-    after, after_transitions = capture()
+    after = capture()
     assert before.digest() != after.digest()
     assert (
         dict(before.files)["integration:fingerprintprobe.hooks"]
         != dict(after.files)["integration:fingerprintprobe.hooks"]
     )
-    assert before.transitions != after.transitions
-    assert before_transitions != after_transitions
     assert "fingerprintprobe" not in sys.modules
 
 
@@ -149,28 +135,6 @@ def test_receipt_never_executes_code(tmp_path):
         read_receipt(tmp_path)
 
 
-def test_transition_normalization_has_single_origin_owner():
-    declaration = {
-        "declaring_app": "source",
-        "name": "conversion",
-        "app_label": "target",
-        "module": "source.transition",
-    }
-    assert dict(transition_declarations([declaration])[0]) == declaration
-    with pytest.raises(ImproperlyConfigured, match="Duplicate"):
-        transition_declarations([declaration, declaration])
-
-
-def test_relative_transition_modules_are_normalized_at_snapshot_owner():
-    declaration = {
-        "declaring_app": "author",
-        "name": "conversion",
-        "app_label": "target",
-        "module": "transitions.rename",
-    }
-    assert transition_declarations([declaration])[0]["module"] == "author.transitions.rename"
-
-
 def test_mode_change_after_snapshot_is_refused(monkeypatch):
     snap = snapshot(())
     monkeypatch.setenv("DJANGO_COMPOSE_MODE", "write")
@@ -178,9 +142,8 @@ def test_mode_change_after_snapshot_is_refused(monkeypatch):
         snap.check_mode()
 
 
-@pytest.mark.parametrize("kind", ["integration", "transition"])
 @pytest.mark.parametrize("namespace_parent", [False, True])
-def test_nested_fingerprints_never_execute_model_importing_packages(tmp_path, kind, namespace_parent):
+def test_nested_fingerprints_never_execute_model_importing_packages(tmp_path, namespace_parent):
     package = tmp_path / "probeapp"
     nested = package / "integrations"
     nested.mkdir(parents=True)
@@ -200,15 +163,10 @@ import json
 import sys
 from django.conf import settings
 settings.configure(INSTALLED_APPS=[])
-from django_compose.snapshot import snapshot, transition_fingerprints
+from django_compose.snapshot import snapshot
 expected = hashlib.sha256({model_source!r}.encode()).hexdigest()
-if {kind!r} == "integration":
-    result = snapshot((), integration_paths=("probeapp.integrations.hooks.Hook",))
-    assert dict(result.files)["integration:probeapp.integrations.hooks"] == expected
-else:
-    result = transition_fingerprints([{{"declaring_app": "probeapp", "name": "conversion",
-        "app_label": "probeapp", "module": "integrations.hooks"}}])
-    assert result == (("probeapp:conversion", expected),)
+result = snapshot((), integration_paths=("probeapp.integrations.hooks.Hook",))
+assert dict(result.files)["integration:probeapp.integrations.hooks"] == expected
 assert not any(name == "probeapp" or name.startswith("probeapp.") for name in sys.modules)
 """
     environment = dict(os.environ, PYTHONPATH=os.pathsep.join([str(tmp_path), *sys.path]))
@@ -359,72 +317,6 @@ def test_generic_declared_excludes_replace_hardcoded_vocabulary(tmp_path):
     assert "app/tests/source.py" in explicit
 
 
-def test_default_transitions_freeze_records_order_and_bytes_without_imports(tmp_path):
-    entries = []
-    for name in ("second", "first"):
-        app = tmp_path / name
-        directory = app / "compose_migrations" / "target"
-        directory.mkdir(parents=True)
-        (directory / "__init__.py").write_text("raise AssertionError('never imported')")
-        (directory / "0001_initial.py").write_text("raise AssertionError('never executed')")
-        entries.append(Entry(name, name, "django.apps.AppConfig", str(app), name))
-    discovered = discover_transitions(iter(entries))
-    snap = snapshot(entries)
-    assert discovered == snap.transition_records
-    assert [record["declaring_app"] for record in snap.transition_records] == ["second", "first"]
-    assert snap.transition_records[0] == {
-        "declaring_app": "second",
-        "name": "0001_initial",
-        "app_label": "target",
-        "module": "second.compose_migrations.target.0001_initial",
-    }
-    with pytest.raises(TypeError):
-        snap.transition_records[0]["name"] = "changed"
-    assert snap.digest() == snapshot(entries, transitions=snap.transition_records).digest()
-    annotated = [dict(discovered[0], initial_baseline="satisfied"), *discovered[1:]]
-    explicit = snapshot(entries, namespace={"COMPOSE_TRANSITION_SOURCE": annotated})
-    assert explicit.transitions == snap.transitions
-    assert explicit.digest() != snap.digest()
-    assert "initial_baseline" not in discovered[0]
-    assert explicit.transition_records[1] == discovered[1]
-    path = tmp_path / "second/compose_migrations/target/0001_initial.py"
-    path.write_text("changed")
-    assert snap.transitions != snapshot(entries).transitions
-    assert snapshot(entries, namespace={"COMPOSE_TRANSITION_SOURCE": ()}).transition_records == ()
-
-
-def test_transition_target_is_fingerprinted_even_when_module_bytes_are_identical(tmp_path):
-    app = tmp_path / "author"
-    app.mkdir()
-    (app / "transition.py").write_text("")
-    entries = (Entry("author", "author", "django.apps.AppConfig", str(app), "author"),)
-    record = {"declaring_app": "author", "name": "move", "app_label": "one", "module": "transition"}
-    first = snapshot(entries, transitions=(record,))
-    record["app_label"] = "two"
-    assert first.digest() != snapshot(entries, transitions=(record,)).digest()
-
-
-def test_matching_direct_and_namespace_transition_callable_runs_once(tmp_path, monkeypatch):
-    from types import ModuleType
-
-    module = ModuleType("source_declarations")
-    calls = []
-
-    def declarations():
-        calls.append(True)
-        return ()
-
-    module.declarations = declarations
-    monkeypatch.setitem(sys.modules, "source_declarations", module)
-    snap = snapshot(
-        (),
-        transitions="source_declarations.declarations",
-        namespace={"COMPOSE_TRANSITION_SOURCE": "source_declarations.declarations"},
-    )
-    assert snap.transition_records == ()
-    assert calls == [True]
-
-
 @pytest.mark.parametrize("owner", ["selected", "config_base", "mixin"])
 def test_external_config_hook_implementation_changes_fingerprint_and_discovery(tmp_path, owner):
     package = tmp_path / "inputprobe"
@@ -568,14 +460,6 @@ def test_fingerprint_setting_names_are_validated(declared):
         snapshot((), namespace={"COMPOSE_FINGERPRINT_SETTINGS": declared})
 
 
-@pytest.mark.parametrize("name", ["../rename", "rename.py", "a/b", "_private", "Rename", "", "a-b"])
-def test_invalid_transition_names_fail_at_normalization(name):
-    with pytest.raises(ImproperlyConfigured, match="transition declaration|migration name"):
-        transition_declarations(
-            [{"declaring_app": "author", "name": name, "app_label": "alpha", "module": "transitions.rename"}]
-        )
-
-
 def test_dependency_edges_are_detached_immutable_digest_inputs(tmp_path):
     entries = tuple(
         Entry(name, name, "django.apps.AppConfig", str(tmp_path), name) for name in ("base", "consumer")
@@ -626,34 +510,27 @@ def test_opaque_closure_is_derived_not_a_snapshot_input():
     assert "COMPOSE_CLOSURE" not in structural_settings({"COMPOSE_CLOSURE": object()})
 
 
-@pytest.mark.parametrize("value", ["", "skip", "Satisfied", True, None])
-def test_transition_initial_baseline_rejects_other_values(value):
-    with pytest.raises(ImproperlyConfigured):
-        transition_declarations(
-            [
-                {
-                    "declaring_app": "app",
-                    "name": "rename",
-                    "app_label": "app",
-                    "module": "rename",
-                    "initial_baseline": value,
-                }
-            ]
-        )
+@pytest.mark.parametrize("value", [(), [], None, "missing.callable"])
+def test_removed_transition_setting_fails_without_resolving_source(value):
+    with pytest.raises(ImproperlyConfigured, match="native project migrations"):
+        snapshot((), namespace={"COMPOSE_TRANSITION_SOURCE": value})
 
 
-def test_transition_initial_baseline_is_frozen_and_fingerprinted(tmp_path, monkeypatch):
-    package = tmp_path / "baselineapp"
-    package.mkdir()
-    (package / "rename.py").write_text("# unchanged historical source\n")
+def test_removed_transition_argument_is_rejected():
+    with pytest.raises(TypeError, match="transitions"):
+        snapshot((), transitions=())
+
+
+def test_compiler_revision_invalidates_previous_receipts(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    root = tmp_path / "generated"
+    root.mkdir()
     monkeypatch.syspath_prepend(str(tmp_path))
-    record = {"declaring_app": "baselineapp", "name": "rename", "app_label": "app", "module": "rename"}
-    before = snapshot((), transitions=[record])
-    record["initial_baseline"] = "satisfied"
-    after = snapshot((), transitions=[record])
-    assert before.transitions == after.transitions
-    assert before.digest() != after.digest()
-    assert "initial_baseline" not in before.transition_records[0]
-    assert after.transition_records[0]["initial_baseline"] == "satisfied"
-    with pytest.raises(TypeError):
-        after.transition_records[0]["initial_baseline"] = "other"
+    current = snapshot(())
+    previous = replace(current, compiler="django-compose:1")
+    assert current.compiler == "django-compose:2"
+    assert current.digest() != previous.digest()
+    (root / "__init__.py").write_text(Receipt((), (), previous.digest(), {}, previous.compiler).source())
+    with pytest.raises(ImproperlyConfigured, match="compose"):
+        verify(current, "generated")

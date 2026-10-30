@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
 import os
 import sys
@@ -21,7 +20,7 @@ from django.utils.module_loading import import_string
 from django_compose.autoreload import report_inputs, report_watch_paths
 from django_compose.sources import SourceResolver
 
-COMPILER = "django-compose:1"
+COMPILER = "django-compose:2"
 DEFAULT_EXCLUDES = ("**/__pycache__/**", "**/migrations/**", "**/tests/**")
 
 NON_INPUT_SETTINGS = frozenset(
@@ -37,7 +36,6 @@ STRUCTURAL_SETTINGS = frozenset(
         "COMPOSE_OUTPUT_DIR",
         "COMPOSE_OUTPUT_MODULE",
         "COMPOSE_INTEGRATIONS",
-        "COMPOSE_TRANSITION_SOURCE",
         "COMPOSE_EXTERNAL_ARTIFACT_ROOTS",
         "COMPOSE_FINGERPRINT_GLOBS",
         "COMPOSE_FINGERPRINT_SETTINGS",
@@ -123,8 +121,6 @@ class Snapshot:
     entries: tuple[Entry, ...]
     files: tuple[tuple[str, str], ...]
     integration_paths: tuple[str, ...]
-    transitions: tuple[tuple[str, str], ...]
-    transition_records: tuple[Mapping[str, str], ...]
     authored_migration_modules: Mapping[str, str | None]
     settings: Mapping[str, Any]
     compiler: str = COMPILER
@@ -143,8 +139,6 @@ class Snapshot:
             "dependencies": self.dependencies,
             "files": self.files,
             "integrations": self.integration_paths,
-            "transitions": self.transitions,
-            "transition_records": self.transition_records,
             "migrations": self.authored_migration_modules,
             "settings": self.settings,
             "compiler": self.compiler,
@@ -175,92 +169,6 @@ def app_entries(entries: Iterable[str | Entry]) -> tuple[Entry, ...]:
     return tuple(result)
 
 
-def transition_declarations(source: Any) -> tuple[Mapping[str, str], ...]:
-    """Normalize the explicit pre-setup transition declaration surface once."""
-    if isinstance(source, str):
-        module, separator, name = source.rpartition(".")
-        if not separator:
-            raise ImproperlyConfigured("COMPOSE_TRANSITION_SOURCE must name a callable")
-        source = getattr(importlib.import_module(module), name)()
-    declarations = []
-    origins: set[str] = set()
-    for declaration in source:
-        required = {"declaring_app", "name", "app_label", "module"}
-        if not isinstance(declaration, Mapping) or not required <= set(declaration) <= required | {
-            "initial_baseline"
-        }:
-            raise ImproperlyConfigured(f"Invalid transition declaration: {declaration!r}")
-        if not all(isinstance(value, str) and value for value in declaration.values()):
-            raise ImproperlyConfigured(f"Invalid transition declaration: {declaration!r}")
-        if "initial_baseline" in declaration and declaration["initial_baseline"] != "satisfied":
-            raise ImproperlyConfigured("Transition initial_baseline must be 'satisfied' or absent")
-        origin = f"{declaration['declaring_app']}:{declaration['name']}"
-        name = declaration["name"]
-        if not ("_" + name).isidentifier() or name != name.lower() or name.startswith("_"):
-            raise ImproperlyConfigured(f"{origin}: name must be a lower-case migration name")
-        if origin in origins:
-            raise ImproperlyConfigured(f"Duplicate transition origin: {origin}")
-        origins.add(origin)
-        normalized = dict(declaration)
-        if not normalized["module"].startswith(normalized["declaring_app"] + "."):
-            normalized["module"] = normalized["declaring_app"] + "." + normalized["module"]
-        declarations.append(MappingProxyType(normalized))
-    return tuple(declarations)
-
-
-def discover_transitions(entries: Iterable[Entry]) -> tuple[Mapping[str, str], ...]:
-    """Read immutable default records in selected-app and filename order.
-
-    Pass resolved identities, normally Closure.app_entries. Discovery reports
-    watched paths but imports no apps or migration modules. Settings adapters
-    can copy and annotate owner-declared records before supplying an explicit
-    COMPOSE_TRANSITION_SOURCE; snapshot's default uses this same owner.
-    """
-    records = []
-    for entry in entries:
-        directory = Path(entry.path) / "compose_migrations"
-        report_inputs(globs=[(directory, "*/*.py")])
-        for path in sorted(directory.glob("*/*.py")):
-            if path.name == "__init__.py" or not path.is_file():
-                continue
-            label = path.parent.name
-            if not label.isidentifier():
-                raise ImproperlyConfigured(f"Invalid default transition path: {path}")
-            records.append(
-                {
-                    "declaring_app": entry.name,
-                    "name": path.stem,
-                    "app_label": label,
-                    "module": f"{entry.name}.compose_migrations.{label}.{path.stem}",
-                }
-            )
-    return transition_declarations(records)
-
-
-def _fingerprints(
-    records: tuple[Mapping[str, str], ...], resolver: SourceResolver
-) -> tuple[tuple[str, str], ...]:
-    result = []
-    for declaration in records:
-        location = resolver.locate(declaration["module"])
-        if location.path is not None:
-            report_inputs(files=[location.path])
-        if location.path is None or not location.path.is_file():
-            raise ImproperlyConfigured(f"Cannot fingerprint module {declaration['module']!r}")
-        result.append(
-            (
-                f"{declaration['declaring_app']}:{declaration['name']}",
-                hashlib.sha256(location.path.read_bytes()).hexdigest(),
-            )
-        )
-    return tuple(result)
-
-
-def transition_fingerprints(source: Any) -> tuple[tuple[str, str], ...]:
-    """Hash declared transition modules without executing their model imports."""
-    return _fingerprints(transition_declarations(source), SourceResolver())
-
-
 def _effective_sequence(
     values: Mapping[str, Any], key: str, argument: Iterable[str] | None, default: Iterable[str] = ()
 ) -> tuple[str, ...]:
@@ -282,18 +190,22 @@ def snapshot(
     fingerprint_excludes: Iterable[str] | None = None,
     settings_keys: Iterable[str] = (),
     namespace: Mapping[str, Any] | None = None,
-    transitions: Any = None,
     authored_migration_modules: Mapping[str, str | None] | None = None,
     dependencies: Mapping[str, tuple[str, ...]] | None = None,
 ) -> Snapshot:
     """Freeze effective compiler inputs once, without importing source models.
 
     Explicit integration/glob/exclusion arguments and namespace declarations must
-    agree. Extra setting keys extend COMPOSE_FINGERPRINT_SETTINGS. An omitted
-    transition source discovers compose_migrations/<label>/<name>.py in app order.
+    agree. Extra setting keys extend COMPOSE_FINGERPRINT_SETTINGS.
     Dependencies retain already-resolved native app-name edges; targets must
     precede their dependants in entries. This function never resolves app edges.
     """
+    values = namespace if namespace is not None else {}
+    if "COMPOSE_TRANSITION_SOURCE" in values:
+        raise ImproperlyConfigured(
+            "COMPOSE_TRANSITION_SOURCE is no longer supported; review pending schema and data work "
+            "and author native project migrations before upgrading"
+        )
     normalized = app_entries(entries)
     positions = {entry.name: index for index, entry in enumerate(normalized)}
     edges = {} if dependencies is None else dependencies
@@ -307,7 +219,6 @@ def snapshot(
                 raise ImproperlyConfigured(f"Snapshot dependency target is not selected: {target!r}")
             if positions[target] >= positions[name]:
                 raise ImproperlyConfigured(f"Snapshot dependency {target!r} must precede {name!r}")
-    values = namespace if namespace is not None else {}
     integrations = _effective_sequence(values, "COMPOSE_INTEGRATIONS", integration_paths)
     globs = tuple(sorted(set(_effective_sequence(values, "COMPOSE_FINGERPRINT_GLOBS", fingerprint_globs))))
     excludes = tuple(
@@ -320,19 +231,6 @@ def snapshot(
         )
     )
     resolver = SourceResolver(normalized)
-    if transitions is None and "COMPOSE_TRANSITION_SOURCE" not in values:
-        records = discover_transitions(normalized)
-    else:
-        records = transition_declarations(
-            values.get("COMPOSE_TRANSITION_SOURCE", ()) if transitions is None else transitions
-        )
-        if (
-            transitions is not None
-            and "COMPOSE_TRANSITION_SOURCE" in values
-            and transitions != values["COMPOSE_TRANSITION_SOURCE"]
-        ):
-            if records != transition_declarations(values["COMPOSE_TRANSITION_SOURCE"]):
-                raise ImproperlyConfigured("Conflicting snapshot argument and COMPOSE_TRANSITION_SOURCE")
     authored = (
         values.get("MIGRATION_MODULES", {})
         if authored_migration_modules is None
@@ -355,7 +253,6 @@ def snapshot(
             "COMPOSE_FINGERPRINT_GLOBS": globs,
             "COMPOSE_FINGERPRINT_EXCLUDES": excludes,
             "COMPOSE_WATCH_PATHS": report_watch_paths(values.get("COMPOSE_WATCH_PATHS", ())),
-            "COMPOSE_TRANSITION_SOURCE": records,
             "COMPOSE_EXTERNAL_ARTIFACT_ROOTS": tuple(
                 sorted(set(values.get("COMPOSE_EXTERNAL_ARTIFACT_ROOTS", ())))
             ),
@@ -418,8 +315,6 @@ def snapshot(
         normalized,
         tuple(sorted(files.items())),
         integrations,
-        _fingerprints(records, resolver),
-        records,
         _freeze(authored),
         _freeze(effective_settings),
         dependencies=_freeze(edges),
