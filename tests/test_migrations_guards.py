@@ -150,8 +150,7 @@ def test_reset_success_preserves_table_data(host):
 author_successor()
 call_command("migrate", interactive=False, verbosity=0)
 apps.get_model("alpha", "Record")._base_manager.create(new="existing")
-with receipt_labels():
-    labels, removed, count = reset_migration_history(("alpha",))
+labels, removed, count = reset_migration_history(("alpha",))
 assert labels == ("alpha",)
 assert removed == 2
 assert count == 1
@@ -181,9 +180,8 @@ if {failure!r} == "authoring":
 else:
     target = "django.db.migrations.recorder.MigrationRecorder.record_unapplied"
     effect = RuntimeError("injected failure")
-with receipt_labels():
-    with patch(target, side_effect=effect):
-        expect(RuntimeError, "injected failure", lambda: reset_migration_history(("alpha",)))
+with patch(target, side_effect=effect):
+    expect(RuntimeError, "injected failure", lambda: reset_migration_history(("alpha",)))
 assert before == files()
 assert modes == {{str(path): S_IMODE(path.stat().st_mode) for path in Path("history").rglob("*.py")}}
 assert records == set(MigrationRecorder(connection).applied_migrations())
@@ -235,8 +233,7 @@ def test_reset_keeps_unrelated_helper_source(host):
 author_successor()
 call_command("migrate", interactive=False, verbosity=0)
 Path("history/alpha/_helper.py").write_text("VALUE = 'durable helper'\\n")
-with receipt_labels():
-    labels, removed, recorded = reset_migration_history(("alpha",))
+labels, removed, recorded = reset_migration_history(("alpha",))
 assert removed == 2
 assert Path("history/alpha/_helper.py").read_text() == "VALUE = 'durable helper'\\n"
 """)
@@ -258,8 +255,7 @@ class Migration(migrations.Migration):
 author_successor()
 call_command("migrate", interactive=False, verbosity=0)
 beta = Path("history/beta/0001_noop.py").read_bytes()
-with receipt_labels():
-    reset_migration_history(("alpha",))
+reset_migration_history(("alpha",))
 assert Path("history/beta/0001_noop.py").read_bytes() == beta
 assert ("beta", "0001_noop") in MigrationExecutor(connection).loader.applied_migrations
 """)

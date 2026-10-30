@@ -32,8 +32,7 @@ before, after = effective_states(loader, apps)
 assert ("alpha", "record") in after.models
 assert not DropGuardAutodetector(before, after).changes(loader.graph)
 check_native_history(apps, labels=("alpha", "beta"))
-with receipt_labels():
-    call_command("makemigrations", "alpha", interactive=False, verbosity=0)
+call_command("makemigrations", "alpha", interactive=False, verbosity=0)
 assert not list(Path("history/alpha").glob("0002*"))
 assert not updated.called
 """

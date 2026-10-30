@@ -216,19 +216,18 @@ class MigrationImportReport:
             return HistoricalImport(path, source.module, providers, "namespace")
         return HistoricalImport(path, source.module, source.distributions, source.kind)
 
+    def _in_history_package(self, module: str) -> bool:
+        return any(
+            module == package or module.startswith(package + ".") for package in self._history_helper_packages
+        )
+
     def _record(self, path: Path, module: str) -> None:
         source = self.resolver.resolve(module)
         self.items.append(self._edge(path, source))
         if (
             source.path is not None
             and source.path.is_file()
-            and (
-                source.kind in {"app", "project"}
-                or any(
-                    module == package or module.startswith(package + ".")
-                    for package in self._history_helper_packages
-                )
-            )
+            and (source.kind in {"app", "project"} or self._in_history_package(module))
         ):
             self._scan(source.path, module)
         # Importing a child also executes its parent packages. Inspect local
@@ -240,7 +239,7 @@ class MigrationImportReport:
             if (
                 parent_source.path is not None
                 and parent_source.path.is_file()
-                and (parent_source.kind in {"app", "project"} or parent in self._history_helper_packages)
+                and (parent_source.kind in {"app", "project"} or self._in_history_package(parent))
             ):
                 self._scan(parent_source.path, parent)
 

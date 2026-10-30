@@ -99,8 +99,6 @@ from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.state import ProjectState, ModelState
 from django_compose.declarations import MigrationPolicy
 from django_compose.migrations import check_native_history, DropGuardAutodetector, reset_migration_history
-from contextlib import nullcontext
-receipt_labels = nullcontext
 
 def author_successor():
     source = Path("author/transitions/rename.py").read_text()
@@ -109,14 +107,6 @@ def author_successor():
 
 def files():
     return {str(p): p.read_bytes() for p in Path("history").rglob("*.py")}
-def refresh():
-    import sys
-    for name in tuple(sys.modules):
-        if name.startswith(("history.", "author.transitions.")):
-            del sys.modules[name]
-    for path in Path(".").rglob("*.pyc"):
-        path.unlink()
-    importlib.invalidate_caches()
 def expect(error, text, action):
     try:
         action()

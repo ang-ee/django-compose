@@ -25,7 +25,6 @@ from django_compose.autoreload import inputs, report_inputs, write_report
 MIGRATION_COMMANDS = frozenset(
     {
         "makemigrations",
-        "adopt_transition",
         "migrate",
         "check_migrations",
         "retire_history",

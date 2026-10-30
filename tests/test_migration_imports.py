@@ -478,3 +478,44 @@ assert not any(item.module == "unrelated_missing_dependency" for item in items)
 assert any("helper-provider" in value for value in report.removal_refusals(["helper-provider"]))
 assert any("missing_dependency" in value for value in report.removal_refusals(["absent-provider"]))
 """)
+
+
+@pytest.mark.parametrize("historical_anchor", [False, True])
+def test_nested_installed_initializer_blocks_provider_removal(host, historical_anchor):
+    root, run = host
+    package = "disabled.history" if historical_anchor else "history.beta"
+    write(root, "disabled/__init__.py")
+    write(root, "disabled/history/__init__.py")
+    base = package.replace(".", "/")
+    initializer = f"{base}/sub/__init__.py"
+    helper = f"{base}/sub/helper.py"
+    write(root, initializer, "import retained_dependency\n")
+    write(root, helper, "def fill(apps, editor): pass\n")
+    write(root, "retained_dependency.py", "value = 1\n")
+    installed_distribution(root, "helper-provider", [initializer, helper])
+    installed_distribution(root, "dependency-provider", ["retained_dependency.py"])
+    write(
+        root,
+        "history/beta/0001_nested.py",
+        (f"__package__ = {package!r}\n" if historical_anchor else "")
+        + """from .sub.helper import fill
+from django.db import migrations
+class Migration(migrations.Migration):
+    dependencies = []
+    operations = [migrations.RunPython(fill)]
+""",
+    )
+    run("""
+import sys
+from django_compose.migration_imports import MigrationImportReport
+report = MigrationImportReport()
+items = report.collect()
+assert any(item.module == "retained_dependency" and
+           "dependency-provider" in item.distributions for item in items)
+assert any("dependency-provider" in value for value in
+           report.removal_refusals(["dependency-provider"]))
+assert "retained_dependency" not in sys.modules
+assert not any(name.endswith(".sub.helper") for name in sys.modules)
+expect(CommandError, "retained import retained_dependency requires dependency-provider",
+       lambda: call_command("check_migrations", imports=True, removing=["dependency-provider"]))
+""")
