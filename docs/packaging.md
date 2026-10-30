@@ -1,6 +1,6 @@
 # Installation and deployment
 
-The current version is the development preview `0.1.0.dev6`, including component
+The current version is the development preview `0.1.0.dev7`, including component
 selection, isolated inspection and native provisioning.
 Python 3.14 is the verified environment. The declared constraints are Python
 `>=3.14` and Django `>=6.1.2,<6.2`; see [dependencies](dependencies.md) and
@@ -9,10 +9,10 @@ Python 3.14 is the verified environment. The declared constraints are Python
 ## Install from PyPI
 
 ```sh
-python -m pip install django-compose==0.1.0.dev6
+python -m pip install django-compose==0.1.0.dev7
 ```
 
-Use `django-compose[typing]==0.1.0.dev6` for the optional composition plugin and
+Use `django-compose[typing]==0.1.0.dev7` for the optional composition plugin and
 its published typing dependencies; see [advanced typing](dependencies.md#advanced-typing).
 
 ## Install locally
@@ -36,7 +36,7 @@ environment:
 # In the django-compose checkout, with uv installed:
 uv build --wheel
 # In the project environment, using the actual archive path:
-python -m pip install /path/to/django-compose/dist/django_compose-0.1.0.dev6-py3-none-any.whl
+python -m pip install /path/to/django-compose/dist/django_compose-0.1.0.dev7-py3-none-any.whl
 ```
 
 The base installation includes Django, packaging and django-yamlconf. Optional extras are described in
