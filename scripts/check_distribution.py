@@ -377,7 +377,8 @@ assert Item.objects.get(pk=item.pk).rating == 5
         installed_components(directory, python, uv, wheel, environment)
     print(
         "Wheel/sdist contents and fresh installed-host build, serve, ORM, "
-        "migration, provisioning, drift, cleanup, installed component closure, MTI and import audit checks passed."
+        "migration, provisioning, drift, cleanup, installed component closure, "
+        "MTI and import audit checks passed."
     )
 
 

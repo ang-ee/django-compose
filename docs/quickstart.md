@@ -6,7 +6,7 @@ This example builds one ordinary Django model from two reusable apps. The
 one `catalog_item` table.
 
 You need [uv](https://docs.astral.sh/uv/) and Python 3.14. This walkthrough uses the
-development checkout (`0.1.0.dev1`), supporting Django 6.1. The example
+development checkout (`0.1.0.dev2`), supporting Django 6.1. The example
 needs only base dependencies and uses SQLite. The optional typing extra is unnecessary.
 
 ## Run the checked-in project

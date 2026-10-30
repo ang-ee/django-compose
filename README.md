@@ -26,14 +26,14 @@ This is useful when several projects share a model but need different optional
 capabilities. For a single project with a fixed model structure, ordinary Django
 models and abstract bases may already be sufficient.
 
-**Status:** development preview `0.1.0.dev1`; Python 3.14 and Django 6.1 are supported.
+**Status:** development checkout `0.1.0.dev2`; Python 3.14 and Django 6.1 are supported.
 The base dependencies are Django, packaging and django-yamlconf.
 
 ```sh
-python -m pip install django-compose==0.1.0.dev1
+python -m pip install /path/to/django-compose
 ```
 
-For advanced composed-model analysis, install `django-compose[typing]==0.1.0.dev1`;
+For advanced composed-model analysis, install `'/path/to/django-compose[typing]'`;
 see [typing dependencies](https://github.com/ang-ee/django-compose/blob/main/docs/dependencies.md#advanced-typing). The example below
 uses this checkout and does not require another framework.
 

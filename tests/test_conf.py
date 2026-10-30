@@ -539,7 +539,7 @@ def test_native_logging_stream_and_opaque_values_survive_container_isolation(pro
     stream = ns["LOGGING"]["handlers"]["console"]["stream"]
     ns["INSTALLED_APPS"] = [
         app("""import sys
-SETTINGS = {'ADDON_VALUE': 1}
+SETTINGS = {'COMPONENT_VALUE': 1}
 def settings(namespace):
     assert namespace['LOGGING']['handlers']['console']['stream'] is sys.stderr
     namespace['LOGGING']['handlers']['console']['class'] = 'changed'
@@ -551,7 +551,7 @@ def settings(namespace):
     assert ns["LOGGING"]["handlers"]["console"]["stream"] is stream
     assert ns["LOGGING"]["handlers"]["console"]["class"] == "logging.StreamHandler"
     assert ns["CALLBACK_OPTIONS"] == {"nested": [{"project"}]}
-    assert ns["ADDON_VALUE"] == 1
+    assert ns["COMPONENT_VALUE"] == 1
 
 
 @pytest.mark.parametrize("template", ["{TASK_INPUT}", ["{TASK_INPUT}"], {"nested": ["{TASK_INPUT}"]}])

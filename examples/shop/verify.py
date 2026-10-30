@@ -18,8 +18,8 @@ from django.apps import apps
 from django.conf import settings
 from django.test import Client
 
-from django_compose.components import installed_components
 from django_compose.asgi import application
+from django_compose.components import installed_components
 from django_compose.serving import artifact_path, receipt_lease, verified_receipt
 
 

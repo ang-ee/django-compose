@@ -29,8 +29,12 @@ uv run --no-sync pytest -q tests/test_migrations.py
 `make dist-check` builds wheel and sdist, checks metadata and archive contents,
 and exercises a fresh wheel installation outside the checkout. The installation
 test first uses base dependencies, then installed component wheels with settings
-contributions; it covers composition, native migration history, serving, ORM behavior, stale
-output refusal and retained-import reporting. CI runs the same Makefile targets.
+contributions; it covers composition, native migration history, provisioning,
+serving, ORM behavior, stale output refusal and retained-import reporting.
+CI runs the same Makefile targets with a disposable PostgreSQL service. The dev
+dependencies include its native driver and pool for the
+[PostgreSQL proof](docs/provisioning.md#optional-postgresql-proof); local runs
+skip that proof unless its dedicated test-environment file is supplied.
 The Checks workflow uploads archives without publishing them. The separate
 [release workflow](docs/packaging.md#publish-this-library) publishes checked
 archives to PyPI when explicitly dispatched or triggered by a version tag.
@@ -40,7 +44,8 @@ archives to PyPI when explicitly dispatched or triggered by a version tag.
 Django owns app identity/population, model construction, fields, managers, ORM,
 migration state and execution. Extend those native contracts instead of adding
 parallel registries, parsers or lifecycle systems. django-compose owns only the
-composition, deterministic output and reusable migration-binding seams.
+composition, deterministic output, reusable migration-binding seams and verified
+database preparation through native app hooks.
 
 Keep commands and other entrypoints thin. Put a missing rule on its existing
 owner, migrate callers and remove superseded code and guidance. Public behavior,

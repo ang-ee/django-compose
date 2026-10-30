@@ -1,6 +1,8 @@
 # Installation and deployment
 
-The current version is the development preview `0.1.0.dev1`.
+These docs describe the `0.1.0.dev2` development checkout. The published
+`0.1.0.dev1` preview predates component names and native provisioning; use a local
+checkout or wheel below when adopting those APIs.
 Python 3.14 is the verified environment. The declared constraints are Python
 `>=3.14` and Django `>=6.1.2,<6.2`; see [dependencies](dependencies.md).
 
@@ -34,7 +36,7 @@ environment:
 # In the django-compose checkout, with uv installed:
 uv build --wheel
 # In the project environment, using the actual archive path:
-python -m pip install /path/to/django-compose/dist/django_compose-0.1.0.dev1-py3-none-any.whl
+python -m pip install /path/to/django-compose/dist/django_compose-0.1.0.dev2-py3-none-any.whl
 ```
 
 The base installation includes Django, packaging and django-yamlconf. Optional extras are described in
@@ -94,6 +96,10 @@ history to the deployment database before starting the application:
 ```sh
 python manage.py migrate --noinput
 ```
+
+For projects with database preparation hooks or a readiness gate, use
+[`provision`](provisioning.md) instead; it runs native migration application as
+part of the verified sequence and records completion for the selected alias.
 
 Use Django's normal database selection and your project's rollout procedure for
 multiple databases. `compose --check` validates build/history agreement; it does

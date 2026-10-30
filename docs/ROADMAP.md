@@ -1,6 +1,6 @@
 # Current scope and planned work
 
-The current development preview is `0.1.0.dev1`. The
+The current development checkout is `0.1.0.dev2`. The
 [specification](SPEC.md) describes implemented behavior; the [quick start](quickstart.md)
 and [configuration guide](configuration.md) use that API today.
 

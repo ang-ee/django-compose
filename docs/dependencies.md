@@ -43,7 +43,7 @@ The `typing` extra is unnecessary for building or running a project. Install it
 in the project's environment when you want composed-model analysis:
 
 ```sh
-python -m pip install 'django-compose[typing]==0.1.0.dev1'
+python -m pip install '/path/to/django-compose[typing]'
 ```
 
 The extra installs published Angee forks of mypy and django-stubs, keeping their

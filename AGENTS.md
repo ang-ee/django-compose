@@ -6,8 +6,8 @@ package; this package never imports a consumer framework, host, or product.
 
 Find the owner first. Django owns application identity and population, model
 construction, fields, managers, migration state, execution, routing, and history.
-This package owns only the missing composition, deterministic emission, and
-reusable migration binding seams. Do not add parallel registries or parsers.
+This package owns composition, deterministic emission, reusable migration binding
+and verified database preparation. Do not add parallel registries or parsers.
 
 Keep entrypoints thin, names consistent, and policy on the owning object.
 Preserve native extension points and fail explicitly on competing declarations.
