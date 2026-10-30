@@ -5,7 +5,8 @@ This example builds one ordinary Django model from two reusable apps. The
 `is_recommended()`. Selecting both produces a concrete `catalog.Item` stored in
 one `catalog_item` table.
 
-You need [uv](https://docs.astral.sh/uv/) and Python 3.14. This walkthrough uses the
+You need [uv](https://docs.astral.sh/uv/) and Python 3.14 on a
+[supported platform](dependencies.md#supported-platforms). This walkthrough uses the
 development checkout (`0.1.0.dev2`), supporting Django 6.1. The example
 needs only base dependencies and uses SQLite. The optional typing extra is unnecessary.
 

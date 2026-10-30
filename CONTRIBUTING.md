@@ -1,6 +1,7 @@
 # Contributing
 
-Use Python 3.14 and read [AGENTS.md](AGENTS.md), the
+Use Python 3.14 on a [supported platform](docs/dependencies.md#supported-platforms).
+Read [AGENTS.md](AGENTS.md), the
 [documentation index](docs/README.md), and the [specification](docs/SPEC.md) for the
 area you change. This is an independent Django library: reproduce behavior in a
 plain Django project, without requiring a downstream framework or live deployment.

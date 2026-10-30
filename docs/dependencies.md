@@ -13,6 +13,13 @@ Python 3.14 and Django 6.1 are the verified development environment. Support for
 different Django series needs its own lifecycle, migration and typing validation;
 the current Django constraint does not admit other series.
 
+## Supported platforms
+
+The current release requires Unix file locking and inherited file descriptors.
+Linux is exercised in CI and macOS in local checks. Native Windows execution is
+unsupported: serving uses `fcntl.flock`, and the development launcher passes
+open descriptors to subprocesses.
+
 ## Base installation
 
 Django owns app configuration, model

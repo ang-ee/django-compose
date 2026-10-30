@@ -3,7 +3,8 @@
 The current version is the development preview `0.1.0.dev2`, including component
 selection, isolated inspection and native provisioning.
 Python 3.14 is the verified environment. The declared constraints are Python
-`>=3.14` and Django `>=6.1.2,<6.2`; see [dependencies](dependencies.md).
+`>=3.14` and Django `>=6.1.2,<6.2`; see [dependencies](dependencies.md) and
+[supported platforms](dependencies.md#supported-platforms).
 
 ## Install from PyPI
 

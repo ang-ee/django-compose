@@ -28,6 +28,7 @@ models and abstract bases may already be sufficient.
 
 **Status:** development preview `0.1.0.dev2`; Python 3.14 and Django 6.1 are supported.
 The base dependencies are Django, packaging and django-yamlconf.
+See [supported platforms](https://github.com/ang-ee/django-compose/blob/main/docs/dependencies.md#supported-platforms) before installing.
 
 ```sh
 python -m pip install django-compose==0.1.0.dev2
