@@ -221,11 +221,15 @@ class ModelComposition:
             inherited_names = {
                 name for native in inherited.values() for name in (native.name, native.attname)
             }
-            inherited_columns = {
-                native.column
-                for native in inherited.values()
-                if native.concrete and native.column is not None
-            }
+            inherited_managers: set[str] = set()
+            ancestor = parent
+            while ancestor is not None:
+                inherited_managers.update(
+                    manager.name
+                    for contributor in (*self.donors(ancestor), ancestor)
+                    for manager in contributor._meta.managers
+                )
+                ancestor = self.parent(ancestor)
             local_names: dict[str, models.Field[Any, Any]] = {}
             local_columns: dict[str, models.Field[Any, Any]] = {}
             for contributor in (*self.donors(source), source):
@@ -242,13 +246,7 @@ class ModelComposition:
                             f"{', '.join(sorted(forbidden))}"
                         )
                 for native in _fields(contributor):
-                    if (
-                        native.name in inherited_names
-                        or native.attname in inherited_names
-                        or native.concrete
-                        and native.column is not None
-                        and native.column in inherited_columns
-                    ):
+                    if native.name in inherited_names or native.attname in inherited_names:
                         raise ImproperlyConfigured(
                             f"{source._meta.label} redeclares parent field {native.name!r}"
                         )
@@ -280,7 +278,10 @@ class ModelComposition:
                         raise ImproperlyConfigured(
                             f"{source._meta.label} composes manager {manager.name!r} twice"
                         )
-            for manager_name in managers.keys() & local_names.keys():
+            for manager_name in sorted(
+                (managers.keys() & (local_names.keys() | inherited_names))
+                | (inherited_managers & local_names.keys())
+            ):
                 raise ImproperlyConfigured(
                     f"{source._meta.label} composes field and manager {manager_name!r} twice"
                 )
