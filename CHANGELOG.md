@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0.dev6
 
 - Allow transition owners to declare an adoption-safe initial baseline through
   `initial_baseline: "satisfied"`, preserving true-guard data work and immutable
