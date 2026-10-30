@@ -96,6 +96,62 @@ def runtime_host(tmp_path: Path, models_source: str, factory_source: str) -> tup
     return config, env
 
 
+def test_runtime_proxy_relations_share_native_setter_and_getter_types(tmp_path):
+    config, env = runtime_host(
+        tmp_path,
+        "from django.db import models\n"
+        "class Anchor(models.Model):\n    pass\n"
+        "class Proxy(Anchor):\n    class Meta:\n        proxy = True\n"
+        "class Other(models.Model):\n    pass\n"
+        "class AuthoredRow(models.Model):\n"
+        '    anchor = models.ForeignKey(Proxy, on_delete=models.CASCADE, related_name="+")\n'
+        "    optional = models.ForeignKey(Proxy, null=True, on_delete=models.CASCADE, related_name='+')\n"
+        '    unique = models.OneToOneField(Proxy, on_delete=models.CASCADE, related_name="+")\n',
+        "from django.db import models\n"
+        "from modelapp import models as declarations\n"
+        "def install():\n"
+        '    setattr(declarations, "RuntimeRow", type("RuntimeRow", (models.Model,), {\n'
+        '        "__module__": declarations.__name__,\n'
+        '        "Meta": type("Meta", (), {"app_label": "modelapp"}),\n'
+        '        "anchor": models.ForeignKey(declarations.Proxy, '
+        'on_delete=models.CASCADE, related_name="+"),\n'
+        '        "optional": models.ForeignKey(declarations.Proxy, null=True, '
+        'on_delete=models.CASCADE, related_name="+"),\n'
+        '        "unique": models.OneToOneField(declarations.Proxy, '
+        'on_delete=models.CASCADE, related_name="+"),\n'
+        "    }))\n",
+    )
+    source = tmp_path / "consumer.py"
+    consumer = (
+        "from typing import assert_type\n"
+        "from modelapp.models import Anchor, Proxy, Other, AuthoredRow, RuntimeRow\n"
+        "def consume(anchor: Anchor, authored: AuthoredRow, runtime: RuntimeRow) -> None:\n"
+        "    authored.anchor = anchor\n    runtime.anchor = anchor\n"
+        "    authored.optional = anchor\n    runtime.optional = anchor\n"
+        "    authored.unique = anchor\n    runtime.unique = anchor\n"
+        "    assert_type(authored.anchor, Proxy)\n    assert_type(runtime.anchor, Proxy)\n"
+        "    assert_type(authored.optional, Proxy | None)\n"
+        "    assert_type(runtime.optional, Proxy | None)\n"
+        "    assert_type(authored.unique, Proxy)\n    assert_type(runtime.unique, Proxy)\n"
+        "    authored.optional = None\n    runtime.optional = None\n"
+        "    AuthoredRow(anchor=anchor, optional=anchor, unique=anchor)\n"
+        "    RuntimeRow(anchor=anchor, optional=anchor, unique=anchor)\n"
+    )
+    source.write_text(consumer)
+    for _ in range(2):
+        result = check(config, env, source)
+        assert result.returncode == 0, result.stdout + result.stderr
+    source.write_text(
+        consumer
+        + "def invalid(other: Other, authored: AuthoredRow, runtime: RuntimeRow) -> None:\n"
+        + "    authored.anchor = other\n    runtime.anchor = other\n"
+    )
+    invalid = check(config, env, source)
+    assert invalid.returncode == 1, invalid.stdout + invalid.stderr
+    assert invalid.stdout.count("[assignment]") == 2, invalid.stdout + invalid.stderr
+    assert invalid.stdout.count(": error:") == 2, invalid.stdout + invalid.stderr
+
+
 def test_native_fields_members_relations_managers_and_real_errors(tmp_path):
     config, env = host(tmp_path)
     source = tmp_path / "consumer.py"

@@ -93,9 +93,9 @@ class CompositionContext(DjangoContext):
         self.dependencies: dict[str, set[str]] = {}
 
         # The same discovery owner serves builds and optional static analysis.
-        from django_compose.build import discover
+        from django_compose.model_composition import ModelComposition
 
-        composition = discover(tuple(self.apps_registry.get_app_configs()))
+        composition = ModelComposition.discover(tuple(self.apps_registry.get_app_configs()))
         self.required_ancestors = composition.required_ancestors
         for source in composition.ordered_models:
             name = helpers.get_class_fullname(source)
@@ -399,9 +399,8 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
                 field_type = reparametrize_field_type(field_type, *descriptors)
                 if isinstance(field, models.ForeignKey):
                     related_model = self.django_context.get_field_related_model_cls(field)
-                    related = self.django_context.lookup_model_typeinfo(api, related_model)
-                    concrete_related = helpers.lookup_fully_qualified_typeinfo(
-                        api, helpers.get_class_fullname(related_model)
+                    related, concrete_related = self.django_context.get_related_model_typeinfos(
+                        api, related_model
                     )
                     if related is None or concrete_related is None:
                         raise helpers.IncompleteDefnException(helpers.get_class_fullname(related_model))
