@@ -1,13 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.1.0.dev8
 
 - Replace reusable transition discovery, binding, baseline/adoption and sealing
   with ordinary project-authored Django migrations. Preserve existing native
   history and independent destructive-change/import-audit protections. This is
   an explicit [prerelease API cutoff](docs/migrations.md#upgrade-from-the-removed-prerelease-protocol).
 - Keep native Watchman daemon acceptance and a shared mandatory PostgreSQL
-  CI/release gate open; this candidate is not release-ready.
+  CI/release gate open for the stable 0.1.0 release.
 
 ## 0.1.0.dev7
 
