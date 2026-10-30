@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0.dev3
 
 - Reorganize documentation around the project workflow, public APIs and app hooks,
   with a shorter introduction and quick start.
