@@ -45,7 +45,7 @@ archives to PyPI when explicitly dispatched or triggered by a version tag.
 Django owns app identity/population, model construction, fields, managers, ORM,
 migration state and execution. Extend those native contracts instead of adding
 parallel registries, parsers or lifecycle systems. django-compose owns only the
-composition, deterministic output, reusable migration-binding seams and verified
+composition, deterministic output, native history-retention seams and verified
 database preparation through native app hooks.
 
 Keep commands and other entrypoints thin. Put a missing rule on its existing
@@ -71,3 +71,6 @@ independently as well as running the checks. Promote accepted contract changes
 into current documentation; proposals record decisions rather than maintaining
 a second API reference. Preserve license notices and attribution when changing
 or distributing code.
+
+Native Watchman daemon acceptance and a shared mandatory PostgreSQL CI/release
+gate remain open; this candidate does not establish release readiness.

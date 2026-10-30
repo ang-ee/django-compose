@@ -27,7 +27,6 @@ The launcher exposes these Django management commands:
 | `runserver` | Compose before Django's development-server reloads | [Development](configuration.md#serve-the-project) |
 | `provision` | Apply migrations and app preparation hooks; `--check` verifies readiness | [Provisioning](provisioning.md) |
 | `check_migrations` | Compare models/history; `--imports` audits retained Python dependencies | [History checks](migrations.md#disable-delete-or-uninstall) |
-| `adopt_transition` | Explicitly adopt an opted-in transition against a retained initial migration; `--dry-run` validates without writes | [Baseline adoption](migrations.md#adopt-an-explicit-retained-initial-baseline) |
 | `retire_history`, `reset_migration_history` | Explicit, guarded history maintenance | [Advanced migrations](migrations.md#advanced-destructive-changes-and-history-cutoffs) |
 
 Build before serving; the serving process verifies output rather than rebuilding.
@@ -95,7 +94,6 @@ loading project settings. It is a **standalone command**, unavailable through
 | `AppConfig.compose_asgi()` | Return `asgi.AsgiContribution(http_mounts=..., lifespans=..., protocols=...)` for `django_compose.asgi.application` | [ASGI contract](SPEC.md#serving-composition) |
 | `AppConfig.compose_provision(context)` | Prepare the database after migrations using `provision.ProvisionContext` and its `call()` helper | [Provisioning](provisioning.md) |
 | `COMPOSE_INTEGRATIONS` | Dotted classes implementing build protocols below | [Build integrations](extensions.md#supported-protocols) |
-| `compose_migrations/` | Reusable native migration transitions | [Transitions](migrations.md#advanced-reusable-transitions) |
 
 URL and ASGI modules require completed `django.setup()`. Settings contributions
 run before app population; integrations run during build. Ordinary model behavior
@@ -138,13 +136,8 @@ project startup normally delegates verification to `configure`.
 - [`snapshot.app_entries(entries)`](SPEC.md#application-selection) normalizes `Entry` identities;
   [`snapshot.snapshot(entries, *, ...)`](SPEC.md#settings-and-snapshots) freezes `Snapshot` inputs for integrations;
   ordinary projects use `configure` to keep input ordering in one place.
-- [`snapshot.discover_transitions(entries)`](migrations.md#advanced-reusable-transitions)
-  reads immutable transition records from resolved app identities without importing
-  migration code. Integrations can annotate copies before the snapshot is frozen.
-- `migrations.TransitionBinding.adoption_plan(origin, baseline)` validates one
-  explicit baseline adoption; `.adopt(origin, baseline, *, dry_run=False)` authors
-  its empty native migration. The caller attests that the named initial satisfies
-  the opted-in transition; this does not prove past data work completed.
-  See [baseline adoption](migrations.md#adopt-an-explicit-retained-initial-baseline).
+- `migrations.check_native_history(apps, *, labels)` compares effective native
+  state without database access; `migrations.history_labels()` reads retained
+  receipt labels. Projects author schema/data work through Django's native history.
 - The optional `django_compose.typing` mypy plugin analyzes composed models through
   django-stubs. See [installation, configuration and limitations](dependencies.md#advanced-typing).

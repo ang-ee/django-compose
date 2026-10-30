@@ -13,5 +13,7 @@ Current boundaries and remaining verification:
 - StatReloader edit, failure/recovery and file creation/deletion checks have run.
   Watchman adapter tests cover the same declarations; acceptance against a native
   Watchman daemon remains outstanding.
+- CI and publication still need one shared mandatory PostgreSQL check gate and
+  exact checked-archive transfer. The migration candidate is not release-ready.
 
 Changes to a public contract use the [proposal process](proposals/README.md).

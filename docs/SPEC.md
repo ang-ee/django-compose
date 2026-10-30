@@ -15,7 +15,7 @@ defines supported versions and platforms.
 - [Integration protocols](#integration-protocols)
 - [Generated output and freshness](#generated-output-and-freshness)
 - [Artifact access](#artifact-access)
-- [Native history and transitions](#native-history-and-transitions)
+- [Native history](#native-history)
 - [Database preparation and readiness](#database-preparation-and-readiness)
 - [Serving composition](#serving-composition)
 - [Typing and import boundaries](#typing-and-import-boundaries)
@@ -252,13 +252,12 @@ keep ordering and input ownership in one place. See the
 | `COMPOSE_FINGERPRINT_EXCLUDES` | Source exclusion patterns; defaults to `**/tests/**`, `**/migrations/**`, `**/__pycache__/**` |
 | `COMPOSE_FINGERPRINT_SETTINGS` | Additional setting names affecting the build; empty by default |
 | `COMPOSE_EXTERNAL_ARTIFACT_ROOTS` | Permitted integration output directories; empty by default |
-| `COMPOSE_TRANSITION_SOURCE` | Explicit transition declarations or dotted pre-setup-safe callable; omission selects default discovery |
 | `COMPOSE_CLOSURE` | Derived selected Closure, available to contribution callbacks |
 | `COMPOSE_SNAPSHOT` | Derived Snapshot used by lifecycle configurations |
 
 Mandatory inputs include resolved app/config identities, source Python and
 extra-glob bytes, selected config MRO implementation modules, integration modules,
-transition records/bytes, `DEFAULT_AUTO_FIELD`, `AUTH_USER_MODEL`, authored
+`DEFAULT_AUTO_FIELD`, `AUTH_USER_MODEL`, authored
 migration mappings, every `COMPOSE_*` value except derived `COMPOSE_ROOTS`,
 `COMPOSE_SNAPSHOT`, `COMPOSE_CLOSURE` and execution-only `COMPOSE_COMMAND_CONTEXT`, and compiler identity. Built-in/frozen config owners use a
 deterministic interpreter implementation/version identity instead of file bytes.
@@ -283,28 +282,6 @@ metadata. Migration import audits additionally determine providers through exact
 RECORD or PEP 610 ownership, with one lazy index per audit. Native app/config
 modules are imported to select configurations and must remain safe before Django
 setup. Snapshot and serving do not import the model compiler or execute integrations.
-
-Without `COMPOSE_TRANSITION_SOURCE`, each selected app contributes sorted
-`compose_migrations/<label>/<name>.py` files in app order, including numeric
-migration names. The public owner is
-`snapshot.discover_transitions(entries: Iterable[Entry]) -> tuple[Mapping[str, str], ...]`.
-It accepts resolved identities such as `Closure.app_entries`, preserves their
-order, reports watched paths and returns immutable normalized records without
-importing apps or migration modules. Default snapshot discovery calls this same
-function. A settings adapter can use the already resolved `COMPOSE_CLOSURE` during
-an app's `settings(namespace)` callback, annotate copies using owner-declared
-facts, and return concrete `COMPOSE_TRANSITION_SOURCE` records before the snapshot.
-Preserve other records and any explicitly authored replacement source; selecting
-apps again or reading lazy Django settings during configuration is unnecessary.
-An explicit source replaces discovery. Records require
-`declaring_app`, `name`, `app_label` and `module` string keys, and optionally
-`initial_baseline: "satisfied"`; other keys or baseline values are invalid.
-Omission retains strict guard handling. The explicit transition-owner provider
-supplies this assertion; default discovery does not infer it from source modules.
-Modules relative to the declaring app are normalized once. Duplicate
-`<declaring_app>:<name>` origins fail. `Snapshot.transition_records` retains the frozen normalized records;
-`Snapshot.transitions` stores their origin/sha256 pairs. Build and native history
-use the same records.
 
 ## Setup lifecycle
 
@@ -349,8 +326,8 @@ hooks, and finalizes in the final `ready()` callback:
    no mutation.
 
 All native `ready()` callbacks see concrete models and models-phase files.
-`BuildComposeConfig.ready()` additionally compares native migration history and
-pending transitions in check mode. Ordinary write composition does not load
+`BuildComposeConfig.ready()` additionally compares native migration history in
+check mode. Ordinary write composition does not load
 migration history, query a deployment database, author migrations or apply them.
 Native source import hooks still execute as part of Django population.
 
@@ -453,13 +430,13 @@ existing bytes. Preserve native history as explained in [packaging](packaging.md
 path and current hash before returning a Path. During build-ready callbacks it
 supports models-phase artifacts before final publication.
 
-## Native history and transitions
+## Native history
 
 For generated labels, history defaults to `<output_module>.<label>.migrations`.
 `serving.migration_modules(authored, receipt, output_module)` derives retained
 defaults from the record, then applies authored overrides, including `None`.
 `HISTORY_LABELS` retains model labels, previous history, on-disk migration
-packages and transition targets, minus `RETIRED_LABELS`. History-only configs use
+packages, minus `RETIRED_LABELS`. History-only configs use
 `django_compose.history.History_<label>`, generated dynamically from retained
 receipt facts; they load no old source models or app lifecycle.
 
@@ -470,87 +447,18 @@ record labels minus retired and snapshot-selected app labels. An enabled app
 that loses its last model remains active and yields a native model deletion.
 All package migration comparisons use this state calculation.
 
-For composed apps with migrations enabled, concrete models and no native disk history,
-`makemigrations` first authors the initial schema through Django's native command,
-then binds guarded reusable transitions and reconciles ordinary model changes.
-Selected-app authoring includes prerequisite apps initialized by native dependency
-expansion. Initial `--check` retains Django's exit status 1 for missing history;
-`--dry-run` previews without writing or binding. `--merge`, `--empty` and `--update`
-are refused before initial schema authoring. If native expansion requires changes
-to an app with existing history, the command refuses before writes and asks the
-caller to author that app's transitions first; existing history bytes remain intact.
-Initial authoring, binding and final reconciliation share an exception rollback
-boundary: restore affected pre-call migration bytes and permissions, remove exact
-newly authored files and invalidate migration imports, without recorder writes.
-A failed attempt can retry from the same disk history. This is exception safety,
-not crash-atomic publication of multiple files.
+`makemigrations` delegates authoring to Django using the shared drop-guard
+autodetector. Django owns `--check`, `--dry-run`, `--empty`, `--merge`, `--update`,
+serialization and file destinations. There is no custom multi-phase authoring or
+whole-command rollback journal; native command semantics apply. Authoring may
+read routed databases for destructive-change safety, but does not write migration
+recorder rows. Native `migrate` owns application and recording.
 
-`TransitionBinding` uses frozen snapshot records by default, or explicit
-`declarations=`. It binds native migration origins `<declaring_app>:<name>` to
-the project's actual graph leaves. Each source provides a native `Migration`
-and a pure `applies(ProjectState) -> bool` guard. Ordinary planning and
-`makemigrations` refuse a pending false guard unless its owner declares `initial_baseline: "satisfied"` and the label acquired
-its first native disk nodes in this successful command's initial-authoring phase,
-including native prerequisite expansion. The assertion means the final-schema
-initial baseline satisfies this transition on every database adopting it,
-including existing rows adopted through native `migrate --fake-initial`. It does
-not assert that the original operations executed. Existing initial-looking
-files, reset-created initials and global read-only checks supply no exemption.
-True guards always retain their operations, including bootstrap and backfill
-work. A false-guard baseline binding substitutes Django's native empty migration
-before downstream graph state calculation. Its materialization footer seals a
-native zero-operation Migration subclass and `compose_initial_baseline =
-"satisfied"`, omitting any source-class state or database lifecycle overrides. This
-durable origin must be retained like any other native history node after its
-source declaration is removed. Its source bytes and source SHA remain unchanged;
-adding the optional declaration does not rewrite or invalidate existing origins.
-Immutable source/body digests, dependencies, `run_before`, `replaces` and complete
-squash chains are preserved. Materialized history remains executable after its
-source declaration is removed. Changed immutable sources, duplicate origins,
-missing prerequisites and cycles fail. Dry-run/check never author history.
-Legacy `angee_origin` and `angee_source_sha256` metadata is read only for
-historical adoption; new metadata uses `compose_origin` and
-`compose_source_sha256`.
-
-Explicit existing-baseline adoption uses
-`TransitionBinding.adoption_plan(origin, baseline)` and
-`TransitionBinding.adopt(origin, baseline, *, dry_run=False)`, or the thin
-`adopt_transition DECLARING_APP:NAME --baseline APP_LABEL.MIGRATION_NAME
-[--dry-run]` management command. The selected normalized declaration and source
-SHA must match `COMPOSE_SNAPSHOT.transition_records` and `transitions`, and the
-owner must already assert `initial_baseline: "satisfied"`.
-
-The explicit action is the caller's attestation that the named retained initial
-is the baseline covered by that owner assertion. Native graph structure and
-false guards establish the action's scope; they prove neither historical data
-completion nor schema equivalence. The named anchor must be same-target-label,
-retained on disk and active in Django's graph, and an ancestor of the unique
-current target leaf. It must have `Migration.initial is True`, or `initial is
-None` and be a native same-app graph root. This root criterion is conservative
-scope for adoption, not a reimplementation of Django's soft-initial detection;
-`run_before` can affect native graph roots. A true guard either after the named
-anchor or at the resolved binding pre-state refuses adoption. Unrelated current
-model drift remains for ordinary `makemigrations`.
-
-Only the selected pending declaration is loaded. Native graph resolution freezes
-its dependency and `run_before` edges; missing or pending explicit prerequisites
-or successors, cycles and ambiguous relevant leaves refuse. Unrelated pending
-sources are not imported or implicitly adopted. The new sealed native empty
-origin depends on the current retained target leaf, preserving existing files.
-The footer retains the existing source/body seals and baseline-satisfaction
-marker, plus `compose_adopted_baseline` (the anchor Node) and
-`compose_adopted_baseline_sha256` (the exact native anchor file hash).
-
-`adoption_plan` returns a `TransitionPlan`, or `None` for an exact retained
-adoption. `adopt` returns the authored path tuple, the prospective path tuple
-for dry-run, or an empty tuple for an exact repeat. A repeat validates the sealed
-origin's native empty semantics, selected source, matching anchor and anchor SHA
-without rewriting or rebinding it, including after later native descendants.
-Existing ordinary or first-authoring origins are not silently converted to
-adoptions. Dry-run validates without writes; failed publication removes only
-its newly authored files through the same exclusive rollback owner as normal
-binding. Authoring never queries the database or writes the migration recorder;
-Django's subsequent `migrate` owns application and recording.
+`migrations.check_native_history(apps, *, labels)` compares native graph state
+with effective composed state without database access. `migrations.history_labels()`
+reads retained labels from the build record. Compiler revision is 2; the receipt
+schema is unchanged. For the prerelease cutoff and retained historical files,
+see [upgrade guidance](migrations.md#upgrade-from-the-removed-prerelease-protocol).
 
 `DropGuardAutodetector`, shared by native `makemigrations` and `migrate`, requires
 relevant rows or columns to be empty on every database eligible for the native
@@ -562,16 +470,11 @@ and unavailable eligible databases cannot prove safety. Explicit integration-own
 row exemptions use `MigrationPolicy`. See the [storage proof's supported cases
 and limits](migrations.md#advanced-destructive-changes-and-history-cutoffs).
 
-Reusable transition planning remains database-free. It conservatively retains
-feature-dependent aliases when checking the feature could connect, and refuses
-ambiguous shared storage that requires database visibility to resolve. Explicit
-migration authoring, purge and history maintenance use database-aware checks.
-
 Retirement requires consistent fully applied history across all configured
 migration-relevant aliases and refuses retained incoming cross-app dependencies.
 The alias scope includes native data-operation routing hints; custom database
 behavior that cannot establish a narrower scope requires all configured aliases.
-Optional purge authors/applies a final deletion transition on that same alias
+Optional purge authors/applies a final native deletion migration on that same alias
 scope; purge alone is not retirement. Successful retirement updates the record;
 the next compose removes the history-only config. Databases absent from command
 settings lie outside that proof. Guarded history reset additionally requires a
@@ -579,9 +482,9 @@ fully applied, model-clean graph and uses transactional recorder changes with
 filesystem rollback preserving original bytes and permissions. Normal build and
 clean never reset history.
 
-`check_migrations` checks native state and pending transitions.
+`check_migrations` checks native state.
 `check_migrations --imports` statically audits selected migration sources,
-authored mappings, project/transition helpers and literal dynamic imports. It
+authored mappings, project and historical helpers and literal dynamic imports. It
 classifies exact distribution providers, interpreter-owned modules, app/project
 sources and unresolved/unsupported imports. Native loader diagnostics may import
 ordinary migration modules, but the audit issues no database queries and applies
