@@ -6,9 +6,13 @@ import json
 import os
 import subprocess
 import sys
+from importlib import metadata
 from pathlib import Path
 
 import pytest
+
+from django_compose.autoreload import InputReport
+from django_compose.management import _fallback_inputs
 
 
 def invoke(
@@ -148,6 +152,26 @@ def test_command_help_does_not_enter_context(tmp_path: Path) -> None:
     result = invoke(tmp_path, "probe", "--settings=alternate", f"--pythonpath={tmp_path}", "--help")
     assert result.returncode == 0, result.stderr
     assert "first-enter" not in result.stdout
+
+
+def test_fallback_settings_input_is_reported_without_import_or_distribution_metadata(tmp_path, monkeypatch):
+    package = tmp_path / "fallbackprobe"
+    package.mkdir()
+    (package / "__init__.py").write_text("raise AssertionError('parent executed')")
+    source = package / "settings.py"
+    source.write_text("raise AssertionError('settings executed')")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "fallbackprobe.settings")
+    report = InputReport()
+    monkeypatch.setattr("django_compose.management.report_inputs", report.add)
+
+    def unexpected():
+        raise AssertionError("fallback reporting must not query distribution metadata")
+
+    monkeypatch.setattr(metadata, "distributions", unexpected)
+    _fallback_inputs()
+    assert report.files == {source}
+    assert not any(name.startswith("fallbackprobe") for name in sys.modules)
 
 
 def test_cold_failed_settings_report_retains_absent_candidates(tmp_path: Path) -> None:

@@ -100,7 +100,7 @@ def _fallback_inputs() -> None:
         from django_compose.sources import SourceResolver
 
         try:
-            location = SourceResolver(()).resolve(module)
+            location = SourceResolver().locate(module)
             if location.path is not None:
                 report_inputs(files=[location.path])
         except ImportError, ImproperlyConfigured, ValueError:

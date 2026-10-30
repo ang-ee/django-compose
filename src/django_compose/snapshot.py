@@ -235,7 +235,7 @@ def _fingerprints(
 ) -> tuple[tuple[str, str], ...]:
     result = []
     for declaration in records:
-        location = resolver.resolve(declaration["module"])
+        location = resolver.locate(declaration["module"])
         if location.path is not None:
             report_inputs(files=[location.path])
         if location.path is None or not location.path.is_file():
@@ -388,7 +388,7 @@ def snapshot(
             if owner is not object:
                 modules[f"config:{owner.__module__}"] = owner.__module__
     for key, module in sorted(modules.items()):
-        location = resolver.resolve(module)
+        location = resolver.locate(module)
         if location.path is not None:
             report_inputs(files=[location.path])
         if location.kind in {"builtin", "frozen"}:

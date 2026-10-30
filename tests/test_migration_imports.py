@@ -10,6 +10,26 @@ from test_migrations import host as host
 from test_migrations import write
 
 
+def test_one_lazy_distribution_index_per_native_migration_audit(host):
+    _, run = host
+    run("""
+from importlib import metadata
+from django_compose.migration_imports import MigrationImportReport
+native = metadata.distributions
+with patch.object(metadata, "distributions", wraps=native) as distributions:
+    report = MigrationImportReport()
+    assert distributions.call_count == 0
+    assert report.collect()
+    assert distributions.call_count == 1
+    assert report.removal_refusals(["Django"])
+    assert distributions.call_count == 1
+    another = MigrationImportReport()
+    assert distributions.call_count == 1
+    assert another.collect()
+    assert distributions.call_count == 2
+""")
+
+
 def test_selected_authored_history_nested_helpers_dynamic_and_state_refs(host):
     root, run = host
     write(root, "helpers/__init__.py")

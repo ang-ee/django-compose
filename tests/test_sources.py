@@ -5,6 +5,8 @@ import sys
 from importlib import metadata
 from pathlib import Path
 
+import pytest
+
 from django_compose.snapshot import Entry
 from django_compose.sources import SourceResolver, distribution_names, resolve_module
 
@@ -21,7 +23,8 @@ def distribution(root: Path, name: str, files=(), project: Path | None = None):
     return metadata.PathDistribution(info)
 
 
-def test_enabled_app_source_precedes_sys_path_without_importing_packages(tmp_path, monkeypatch):
+@pytest.mark.parametrize("method", ["locate", "resolve"])
+def test_enabled_app_source_precedes_sys_path_without_importing_packages(tmp_path, monkeypatch, method):
     wrong = tmp_path / "wrong" / "sourceprobe"
     right = tmp_path / "right" / "sourceprobe"
     for root, value in ((wrong, "wrong"), (right, "right")):
@@ -30,13 +33,40 @@ def test_enabled_app_source_precedes_sys_path_without_importing_packages(tmp_pat
         (root / "integrations" / "__init__.py").write_text("raise AssertionError('parent executed')")
         (root / "integrations" / "leaf.py").write_text(value)
     monkeypatch.syspath_prepend(str(wrong.parent))
-    monkeypatch.setattr(metadata, "distributions", lambda: ())
+
+    def distributions():
+        assert method == "resolve", "location must not query distribution metadata"
+        return ()
+
+    monkeypatch.setattr(metadata, "distributions", distributions)
     entry = Entry("sourceprobe", "probe", "django.apps.AppConfig", str(right), "sourceprobe")
-    source = resolve_module("sourceprobe.integrations.leaf", (entry,))
+    source = getattr(SourceResolver((entry,)), method)("sourceprobe.integrations.leaf")
     assert source.path == right / "integrations/leaf.py"
     assert source.kind == "app"
     assert source.app == "sourceprobe"
     assert not any(name.startswith("sourceprobe") for name in sys.modules)
+
+
+def test_namespace_location_retains_all_portions_without_distribution_metadata(tmp_path, monkeypatch):
+    locations = tuple(tmp_path / name / "namespaceprobe" for name in ("first", "second"))
+    for location in locations:
+        location.mkdir(parents=True)
+        monkeypatch.syspath_prepend(str(location.parent))
+    leaf = locations[0] / "leaf.py"
+    leaf.write_text("raise AssertionError('must not execute')")
+
+    def unexpected():
+        raise AssertionError("location must not query distribution metadata")
+
+    monkeypatch.setattr(metadata, "distributions", unexpected)
+    resolver = SourceResolver()
+    namespace = resolver.locate("namespaceprobe")
+    assert namespace.path == locations[1]
+    assert namespace.search_locations == tuple(reversed(locations))
+    assert namespace.distributions == ()
+    assert namespace.kind == "project"
+    assert resolver.locate("namespaceprobe.leaf").path == leaf
+    assert "namespaceprobe" not in sys.modules
 
 
 def test_record_ownership_is_exact_for_shared_namespace(tmp_path, monkeypatch):

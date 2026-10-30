@@ -6,7 +6,7 @@ import json
 import sys
 import sysconfig
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import metadata
 from importlib.machinery import BuiltinImporter, FrozenImporter, ModuleSpec, PathFinder
 from pathlib import Path
@@ -93,12 +93,12 @@ class SourceResolver:
             search = list(spec.submodule_search_locations)
         return None
 
-    def resolve(self, module: str) -> ModuleSource:
+    def _locate(self, module: str) -> tuple[ModuleSource, tuple[Path, ...]]:
         if not module or not all(part and ("_" + part).isidentifier() for part in module.split(".")):
-            return ModuleSource(module, None, "unresolved")
+            return ModuleSource(module, None, "unresolved"), ()
         for finder, kind in ((BuiltinImporter, "builtin"), (FrozenImporter, "frozen")):
             if finder.find_spec(module) is not None:
-                return ModuleSource(module, None, kind)
+                return ModuleSource(module, None, kind), ()
         spec = None
         for entry in self.entries:
             if module == entry.name:
@@ -114,11 +114,11 @@ class SourceResolver:
         if spec is None:
             spec = self._find(module.split("."))
         if spec is None:
-            return ModuleSource(module, None, "unresolved")
+            return ModuleSource(module, None, "unresolved"), ()
         locations = tuple(Path(path).resolve() for path in spec.submodule_search_locations or ())
         path = Path(spec.origin).resolve() if spec.origin else next(iter(locations), None)
         if path is None:
-            return ModuleSource(module, None, "unresolved")
+            return ModuleSource(module, None, "unresolved"), ()
         paths = sysconfig.get_paths()
         site_roots = {Path(paths[key]).resolve() for key in ("purelib", "platlib")}
         if (
@@ -126,17 +126,25 @@ class SourceResolver:
             and path.is_relative_to(Path(paths["stdlib"]).resolve())
             and not any(path.is_relative_to(root) for root in site_roots)
         ):
-            return ModuleSource(module, path, "stdlib")
+            return ModuleSource(module, path, "stdlib"), ()
         ownership_paths = (path,) if spec.origin else locations
-        names = tuple(
-            sorted({name for source in ownership_paths for name in self.distribution_names(source)})
-        )
         app = next(
             (entry.name for entry in self.entries if path.is_relative_to(Path(entry.path).resolve())), None
         )
-        return ModuleSource(
-            module, path, "distribution" if names else "app" if app else "project", names, app, locations
+        return (
+            ModuleSource(module, path, "app" if app else "project", app=app, search_locations=locations),
+            ownership_paths,
         )
+
+    def locate(self, module: str) -> ModuleSource:
+        """Locate without imports or distribution metadata; kind excludes installed ownership."""
+        return self._locate(module)[0]
+
+    def resolve(self, module: str) -> ModuleSource:
+        """Locate and attribute exact installed ownership, indexing metadata once per resolver."""
+        source, ownership_paths = self._locate(module)
+        names = tuple(sorted({name for path in ownership_paths for name in self.distribution_names(path)}))
+        return replace(source, kind="distribution", distributions=names) if names else source
 
 
 def resolve_module(module: str, entries: Iterable[AppSource] = ()) -> ModuleSource:

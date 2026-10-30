@@ -5,12 +5,14 @@ import json
 import os
 import subprocess
 import sys
+from importlib import metadata
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 
+from django_compose.autoreload import InputReport
 from django_compose.serving import Receipt, installed_apps, migration_modules, read_receipt, verify
-from django_compose.snapshot import Entry, snapshot, transition_declarations
+from django_compose.snapshot import Entry, snapshot, transition_declarations, transition_fingerprints
 
 
 def test_snapshot_fingerprints_files_and_settings(tmp_path):
@@ -43,6 +45,10 @@ def test_snapshot_fingerprints_files_and_settings(tmp_path):
 
 
 def test_receipt_verify_checks_content_and_interruption(tmp_path, monkeypatch):
+    def unexpected():
+        raise AssertionError("receipt verification must not query distribution metadata")
+
+    monkeypatch.setattr(metadata, "distributions", unexpected)
     root = tmp_path / "generated"
     root.mkdir()
     (root / ".compose.lock").touch()
@@ -67,6 +73,49 @@ def test_receipt_verify_checks_content_and_interruption(tmp_path, monkeypatch):
     with pytest.raises(ImproperlyConfigured, match="interrupted"):
         verify(snap, "generated")
     sys.modules.pop("generated", None)
+
+
+def test_fingerprints_reread_and_report_inputs_without_distribution_metadata(tmp_path, monkeypatch):
+    app = tmp_path / "fingerprintprobe"
+    app.mkdir()
+    (app / "__init__.py").write_text("raise AssertionError('parent executed')")
+    integration = app / "hooks.py"
+    transition = app / "transition.py"
+    integration.write_text("first")
+    transition.write_text("first")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    entries = (Entry("fingerprintprobe", "probe", "django.apps.AppConfig", str(app), "fingerprintprobe"),)
+    records = (
+        {"declaring_app": "fingerprintprobe", "name": "move", "app_label": "probe", "module": "transition"},
+    )
+
+    def unexpected():
+        raise AssertionError("fingerprinting must not query distribution metadata")
+
+    monkeypatch.setattr(metadata, "distributions", unexpected)
+
+    def capture():
+        report = InputReport()
+        monkeypatch.setattr("django_compose.autoreload.inputs", report)
+        result = snapshot(entries, integration_paths=("fingerprintprobe.hooks.Hook",), transitions=records)
+        assert {integration, transition} <= report.files
+        report.files.clear()
+        transitions = transition_fingerprints(records)
+        assert report.files == {transition}
+        return result, transitions
+
+    before, before_transitions = capture()
+    integration.write_text("other")
+    transition.write_text("other")
+    after, after_transitions = capture()
+    assert before.digest() != after.digest()
+    assert (
+        dict(before.files)["integration:fingerprintprobe.hooks"]
+        != dict(after.files)["integration:fingerprintprobe.hooks"]
+    )
+    assert before.transitions != after.transitions
+    assert before_transitions != after_transitions
+    assert "fingerprintprobe" not in sys.modules
 
 
 def test_settings_projection_keeps_authored_entries_and_none():

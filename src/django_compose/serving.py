@@ -186,7 +186,7 @@ def read_receipt(output_module: Path | str) -> Receipt | None:
 
 
 def output_directory(output_module: str) -> Path:
-    source = SourceResolver().resolve(output_module)
+    source = SourceResolver().locate(output_module)
     if len(source.search_locations) != 1:
         raise ImproperlyConfigured(f"Missing generated package {output_module!r}; run compose")
     root = source.search_locations[0]
