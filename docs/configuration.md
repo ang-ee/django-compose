@@ -315,6 +315,27 @@ receipt changed since startup.
 It coordinates processes sharing the same filesystem lock domain, not separate
 hosts with unrelated copies. Deploy immutable application artifacts accordingly.
 
+## App settings with authored models
+
+A Django project using ordinary authored concrete models can apply selected
+apps' settings contributions through `apply_app_settings`:
+
+```python
+from django_compose.addons import enabled_apps
+from django_compose.conf import apply_app_settings
+
+INSTALLED_APPS = ["catalog.apps.CatalogConfig"]
+closure = enabled_apps(INSTALLED_APPS)
+apply_app_settings(globals(), closure)
+```
+
+Call this phase once after authoring the project's settings. It applies the same
+ordered `SETTINGS`, yamlconf rules, authored precedence and callbacks used by
+`configure`; callbacks receive the supplied closure as `COMPOSE_CLOSURE`. Django's
+installed app list remains project-authored. This phase needs no generated output,
+snapshot or receipt. Use `configure` for a project that also composes models;
+it already calls this phase.
+
 ## Native yamlconf loader handoff
 
 A deployment loader that prepares native django-yamlconf attribute records before

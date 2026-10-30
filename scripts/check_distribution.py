@@ -216,8 +216,9 @@ def main() -> None:
         assert any(name.endswith("/licenses/LICENSE") for name in names)
         metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
         metadata = email.parser.Parser().parsestr(archive.read(metadata_name).decode())
-        base_dependencies = [value for value in metadata.get_all("Requires-Dist", []) if ";" not in value]
-        assert {Requirement(value).name.lower() for value in base_dependencies} == {
+        dependencies = [Requirement(value) for value in metadata.get_all("Requires-Dist", [])]
+        assert all(dependency.url is None for dependency in dependencies), metadata
+        assert {dependency.name.lower() for dependency in dependencies if dependency.marker is None} == {
             "django",
             "packaging",
             "django-yamlconf",

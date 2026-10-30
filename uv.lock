@@ -7,6 +7,55 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "angee-django-stubs"
+version = "6.1.2.post1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "angee-django-stubs-ext" },
+    { name = "django" },
+    { name = "types-pyyaml" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e3/7d/3da39f3734c2a995662218694f1353f3ee82a52beaca4cc6dae2660e0a0b/angee_django_stubs-6.1.2.post1.tar.gz", hash = "sha256:1d625478140b7c429a9eadfb12697b4d9d35852d4445bea48cc0ad49cd061a9b", size = 302998, upload-time = "2026-10-30T01:10:33.692Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b7/86/a3b903c135d7c0ddccb6d2997cf142187e9ceaa6ecd52868ade7cb859bdf/angee_django_stubs-6.1.2.post1-py3-none-any.whl", hash = "sha256:be83a24fb1302f45a34cc75ab8164f6cee3d51fe57136c2bfced960ec54acabb", size = 566726, upload-time = "2026-10-30T01:10:32.486Z" },
+]
+
+[package.optional-dependencies]
+compatible-mypy = [
+    { name = "angee-mypy" },
+]
+
+[[package]]
+name = "angee-django-stubs-ext"
+version = "6.1.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "django" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7a/d1/3841735ba1ed533a40073001bb613195c8bbd450c8ff3725d6b7248312cf/angee_django_stubs_ext-6.1.2.tar.gz", hash = "sha256:d3a3c9ff3f7e3fe5d2b368a4456ff0d2577db10b30c675903eacdd38d60d7eca", size = 7211, upload-time = "2026-10-30T00:59:45.644Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c3/69/53e15444ab23c001481dcb259e1027e4315e0fddd4d6721840f87fab6d87/angee_django_stubs_ext-6.1.2-py3-none-any.whl", hash = "sha256:48bf76ede0a9df61a09f2a0831b3669c7ce81f68437e54545f8027153a1e9932", size = 10976, upload-time = "2026-10-30T00:59:41.561Z" },
+]
+
+[[package]]
+name = "angee-mypy"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ast-serialize" },
+    { name = "librt", marker = "platform_python_implementation != 'PyPy'" },
+    { name = "mypy-extensions" },
+    { name = "pathspec" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9f/63/038c8faab70bf8db1081be943be3724b39fc38756a5d66916b8301a86607/angee_mypy-2.1.0.tar.gz", hash = "sha256:8f667f6fefe3ade098a99bd3e1508dff0ee02ab4c6556564e9a8974d78961943", size = 3903078, upload-time = "2026-10-30T00:59:46.402Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8a/20/94475338f70992da331ae37f074c7c41b86fff84d09e572466bffba44338/angee_mypy-2.1.0-py3-none-any.whl", hash = "sha256:c197e6a379b1e9cf14cce5414ecd2857d85771f5c060ec8061b7b098ca0be5a2", size = 2694029, upload-time = "2026-10-30T00:59:42.659Z" },
+]
+
+[[package]]
 name = "asgiref"
 version = "3.13.0"
 source = { registry = "https://pypi.org/simple" }
@@ -299,7 +348,7 @@ wheels = [
 
 [[package]]
 name = "django-compose"
-version = "0.1.0.dev0"
+version = "0.1.0.dev1"
 source = { editable = "." }
 dependencies = [
     { name = "django" },
@@ -309,9 +358,9 @@ dependencies = [
 
 [package.optional-dependencies]
 typing = [
-    { name = "django-stubs", extra = ["compatible-mypy"] },
-    { name = "django-stubs-ext" },
-    { name = "mypy" },
+    { name = "angee-django-stubs", extra = ["compatible-mypy"] },
+    { name = "angee-django-stubs-ext" },
+    { name = "angee-mypy" },
 ]
 
 [package.dev-dependencies]
@@ -326,11 +375,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "angee-django-stubs", extras = ["compatible-mypy"], marker = "extra == 'typing'", specifier = "==6.1.2.post1" },
+    { name = "angee-django-stubs-ext", marker = "extra == 'typing'", specifier = "==6.1.2" },
+    { name = "angee-mypy", marker = "extra == 'typing'", specifier = "==2.1.0" },
     { name = "django", specifier = ">=6.1.2,<6.2" },
-    { name = "django-stubs", extras = ["compatible-mypy"], marker = "extra == 'typing'", git = "https://github.com/ang-ee/django-stubs.git?rev=423ed850e5f2d7ea9e67f3e0f9e8bee4be215988" },
-    { name = "django-stubs-ext", marker = "extra == 'typing'", git = "https://github.com/ang-ee/django-stubs.git?subdirectory=ext&rev=423ed850e5f2d7ea9e67f3e0f9e8bee4be215988" },
     { name = "django-yamlconf", specifier = ">=1.5" },
-    { name = "mypy", marker = "extra == 'typing'", git = "https://github.com/ang-ee/mypy.git?rev=ac3de6e4c34b04728e768e07d4842f4309ff6c45" },
     { name = "packaging", specifier = ">=26" },
 ]
 provides-extras = ["typing"]
@@ -343,31 +392,6 @@ dev = [
     { name = "pytest-django", specifier = ">=4.8" },
     { name = "ruff", specifier = ">=0.15.12" },
     { name = "twine", specifier = ">=6" },
-]
-
-[[package]]
-name = "django-stubs"
-version = "6.1.2"
-source = { git = "https://github.com/ang-ee/django-stubs.git?rev=423ed850e5f2d7ea9e67f3e0f9e8bee4be215988#423ed850e5f2d7ea9e67f3e0f9e8bee4be215988" }
-dependencies = [
-    { name = "django" },
-    { name = "django-stubs-ext" },
-    { name = "types-pyyaml" },
-    { name = "typing-extensions" },
-]
-
-[package.optional-dependencies]
-compatible-mypy = [
-    { name = "mypy" },
-]
-
-[[package]]
-name = "django-stubs-ext"
-version = "6.1.2"
-source = { git = "https://github.com/ang-ee/django-stubs.git?subdirectory=ext&rev=423ed850e5f2d7ea9e67f3e0f9e8bee4be215988#423ed850e5f2d7ea9e67f3e0f9e8bee4be215988" }
-dependencies = [
-    { name = "django" },
-    { name = "typing-extensions" },
 ]
 
 [[package]]
@@ -593,18 +617,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/52/b8/c63995bebbb9ac9c059350e0fb8c82c2420c85aeca7d34e40aecf3df9281/more_itertools-11.2.1.tar.gz", hash = "sha256:cbf08fd0af284dc69718b9b76a8e6203df624d70209ea511e4219d350c856f63", size = 154133, upload-time = "2026-10-14T18:50:30.407Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5d/57/3c4b1c6f2e0cc29ba023802458ea3d2a996f87085559e4a5f2192d549532/more_itertools-11.2.1-py3-none-any.whl", hash = "sha256:35a7377edd1dd6608dcb2cdf534ded55ea32d49448875ad042cd3f879fb1ded0", size = 74405, upload-time = "2026-10-14T18:50:29.116Z" },
-]
-
-[[package]]
-name = "mypy"
-version = "2.1.0"
-source = { git = "https://github.com/ang-ee/mypy.git?rev=ac3de6e4c34b04728e768e07d4842f4309ff6c45#ac3de6e4c34b04728e768e07d4842f4309ff6c45" }
-dependencies = [
-    { name = "ast-serialize" },
-    { name = "librt", marker = "platform_python_implementation != 'PyPy'" },
-    { name = "mypy-extensions" },
-    { name = "pathspec" },
-    { name = "typing-extensions" },
 ]
 
 [[package]]

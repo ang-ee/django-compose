@@ -1,9 +1,17 @@
 # Installation and deployment
 
-The package is currently **unreleased**, at `0.1.0.dev0`. Use a local checkout or
-an archive you have built; these examples do not assume a package-index release.
+The current version is the development preview `0.1.0.dev1`.
 Python 3.14 is the verified environment. The declared constraints are Python
 `>=3.14` and Django `>=6.1.2,<6.2`; see [dependencies](dependencies.md).
+
+## Install from PyPI
+
+```sh
+python -m pip install django-compose==0.1.0.dev1
+```
+
+Use `django-compose[typing]==0.1.0.dev1` for the optional composition plugin and
+its published typing dependencies; see [advanced typing](dependencies.md#advanced-typing).
 
 ## Install locally
 
@@ -26,7 +34,7 @@ environment:
 # In the django-compose checkout, with uv installed:
 uv build --wheel
 # In the project environment, using the actual archive path:
-python -m pip install /path/to/django-compose/dist/django_compose-0.1.0.dev0-py3-none-any.whl
+python -m pip install /path/to/django-compose/dist/django_compose-0.1.0.dev1-py3-none-any.whl
 ```
 
 The base installation includes Django, packaging and django-yamlconf. Optional extras are described in
@@ -122,8 +130,8 @@ gh workflow run release.yml --repo ang-ee/django-compose --ref main
 
 The version in `pyproject.toml` determines the uploaded release. PyPI does not
 allow replacing an uploaded distribution, so subsequent releases need a new
-version. Check the current [dependency release blocker](dependencies.md#advanced-typing)
-before publishing; a successful build alone does not establish PyPI eligibility.
+version. Distribution checks reject direct-URL requirements before upload;
+typing dependencies must be compatible published versions.
 
 The separate `Publish typing forks` workflow builds `angee-mypy`,
 `angee-django-stubs`, and `angee-django-stubs-ext` from full commit SHAs in their

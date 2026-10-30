@@ -16,7 +16,7 @@ make dist-check
 ```
 
 The full contributor environment includes the advanced typing extra and its
-pinned Git dependencies; see [dependencies](docs/dependencies.md). The user
+pinned published forks; see [dependencies](docs/dependencies.md). The user
 [quick start](docs/quickstart.md) needs only base dependencies.
 
 `make check` runs Ruff lint/format checks, mypy and pytest. For a focused test

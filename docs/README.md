@@ -30,5 +30,5 @@ Django continues to own model construction, queries and migrations.
 - [Roadmap](ROADMAP.md): current boundaries, planned work and consumer adoption.
 - [Contributing](../CONTRIBUTING.md): checks and repository workflow.
 
-The package is unreleased (`0.1.0.dev0`). Start from the checkout instructions in
+The current development preview is `0.1.0.dev1`. Start from the checkout instructions in
 [the quick start](quickstart.md); the optional extras are not required there.

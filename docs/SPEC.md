@@ -140,6 +140,12 @@ fingerprint settings and native reference chains, fail with the setting named.
 The check follows native yamlconf provenance and references, not arbitrary Python
 computations or direct `os.environ` reads.
 
+`django_compose.conf.apply_app_settings(namespace, closure: Closure) -> None`
+exposes this same contribution phase for projects with authored concrete models.
+It supplies `COMPOSE_CLOSURE` before callbacks and preserves the authored native
+app list, without creating a snapshot, receipt or generated output. Call it once;
+`configure` delegates to it internally. See [app settings with authored models](configuration.md#app-settings-with-authored-models).
+
 `django_compose.conf.expand_attribute_refs(attributes) -> None` is the native
 loader adapter for preserving this provenance. Loaders call it instead of
 upstream `django_yamlconf.expand_attribute_refs`, then use native `inject_attr`
@@ -413,8 +419,8 @@ uninstall anything. See [migration workflows](migrations.md).
 The optional `django_compose.typing` plugin extends django-stubs inference for
 composed fields, relations, managers, methods, properties, generics and ancestor
 demands, while retaining native diagnostics. It tracks source dependencies for
-cold, warm and incremental analysis. Its extra pins the supported upstream
-revisions; ordinary serving needs neither mypy nor django-stubs.
+cold, warm and incremental analysis. Its extra pins the supported published
+fork versions; ordinary serving needs neither mypy nor django-stubs.
 
 App selection, snapshots and serving are usable before Django setup when the
 selected app/config modules satisfy Django's pre-setup import requirements.

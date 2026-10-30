@@ -1,6 +1,6 @@
 # Current scope and planned work
 
-The package is currently unreleased at `0.1.0.dev0`. The
+The current development preview is `0.1.0.dev1`. The
 [specification](SPEC.md) describes implemented behavior; the [quick start](quickstart.md)
 and [configuration guide](configuration.md) use that API today.
 
@@ -15,10 +15,9 @@ history-only configurations and the managed development loop are implemented;
 see the [reference](SPEC.md), [integrations](extensions.md) and
 [configuration guide](configuration.md).
 
-A package-index release remains blocked on published typing dependencies exposing
-the native extension APIs currently supplied by the pinned forks. Keep the working
-pins until a compatible published set passes the typing matrix. Runtime use does
-not need the typing extra. See [dependencies](dependencies.md).
+The typing extra uses published forks that expose the required native extension
+APIs. Keep their compatible pins together and verify the typing matrix when
+updating them. Runtime use does not need the typing extra. See [dependencies](dependencies.md).
 
 Real StatReloader edit, failure/repair and file creation/deletion checks have run.
 Watchman adapter tests cover the same declarations, but a native Watchman daemon

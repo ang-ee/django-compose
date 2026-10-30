@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0.dev1
+
+- Report the composition lock path and wait duration when another reader or
+  writer blocks a build, without assuming that a development server holds it.
+- Publish checked wheel and source archives through the GitHub release workflow.
+- Keep the `typing` extra installable from PyPI with the published
+  `angee-django-stubs`, `angee-django-stubs-ext`, and `angee-mypy` forks.
+- Give `settings.COMPOSE_SNAPSHOT` and `settings.COMPOSE_CLOSURE` their exact
+  native types while preserving Django's ordinary settings diagnostics.
+- Expose `apply_app_settings(namespace, closure)` for applying selected apps'
+  settings contributions to a project with ordinary authored concrete models.
+
 ## 0.1.0.dev0 — unreleased
 
 - Compose reusable Django source apps and extension classes into ordinary

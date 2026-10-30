@@ -582,7 +582,9 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
             and isinstance(symbol.node, PlaceholderNode)
             and symbol.node.becomes_typeinfo
         ):
-            return create_new_manager_class_from_from_queryset_method
+            return partial(
+                create_new_manager_class_from_from_queryset_method, django_context=self.django_context
+            )
         return None
 
 

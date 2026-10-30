@@ -22,9 +22,16 @@ This is useful when several projects share a model but need different optional
 capabilities. For a single project with a fixed model structure, ordinary Django
 models and abstract bases may already be sufficient.
 
-**Status:** unreleased `0.1.0.dev0`; Python 3.14 and Django 6.1 are supported.
-The base dependencies are Django, packaging and django-yamlconf. The instructions below use this checkout;
-they do not require a published package or another framework.
+**Status:** development preview `0.1.0.dev1`; Python 3.14 and Django 6.1 are supported.
+The base dependencies are Django, packaging and django-yamlconf.
+
+```sh
+python -m pip install django-compose==0.1.0.dev1
+```
+
+For advanced composed-model analysis, install `django-compose[typing]==0.1.0.dev1`;
+see [typing dependencies](https://github.com/ang-ee/django-compose/blob/main/docs/dependencies.md#advanced-typing). The example below
+uses this checkout and does not require another framework.
 
 ## Try the example
 
@@ -60,13 +67,13 @@ history. Source apps remain installed when the generated project runs.
 
 ## Where to go next
 
-- [Quick start](docs/quickstart.md): walk through the source, generated files,
+- [Quick start](https://github.com/ang-ee/django-compose/blob/main/docs/quickstart.md): walk through the source, generated files,
   commands and ORM result.
-- [Model declarations](docs/models.md): add fields to one model or declare
+- [Model declarations](https://github.com/ang-ee/django-compose/blob/main/docs/models.md): add fields to one model or declare
   native multi-table inheritance.
-- [Project configuration](docs/configuration.md): use django-compose in your own
+- [Project configuration](https://github.com/ang-ee/django-compose/blob/main/docs/configuration.md): use django-compose in your own
   project with the current settings and `manage.py` integration.
-- [Documentation](docs/README.md): optional addon selection, integrations,
+- [Documentation](https://github.com/ang-ee/django-compose/blob/main/docs/README.md): optional addon selection, integrations,
   migrations, packaging, API reference and current limitations.
 
-The source is licensed under [LGPL-3.0-or-later](LICENSE).
+The source is licensed under [LGPL-3.0-or-later](https://github.com/ang-ee/django-compose/blob/main/LICENSE).
