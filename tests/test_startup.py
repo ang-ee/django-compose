@@ -200,14 +200,15 @@ def test_lease_refuses_exact_byte_change(generated):
         pass
 
 
-def test_writer_wait_is_bounded_by_native_shared_lock(generated):
-    root, snap = generated
-    serving.verify(snap, "runtime", retain_startup=True)
-    child = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            """
+@pytest.mark.parametrize("write", [False, True], ids=["reader", "writer"])
+def test_writer_wait_is_bounded_by_native_lock(generated, write):
+    root, _ = generated
+    with serving.receipt_lock(root, write=write):
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                """
 import sys, time
 from django_compose.serving import receipt_lock
 from django.core.exceptions import ImproperlyConfigured
@@ -216,15 +217,18 @@ try:
     with receipt_lock(sys.argv[1], wait=0.15):
         raise AssertionError('writer entered')
 except ImproperlyConfigured as error:
-    assert 'dev server holds this composition' in str(error)
+    assert str(error) == (
+        f'Timed out after 0.15s waiting for composition lock {sys.argv[1]}/.compose.lock; '
+        'another reader or writer holds it'
+    )
 assert 0.1 <= time.monotonic() - start < 2
 """,
-            str(root),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
+                str(root),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
     assert child.returncode == 0, child.stderr
 
 

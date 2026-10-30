@@ -70,7 +70,8 @@ def receipt_lock(
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
                         raise ImproperlyConfigured(
-                            "a dev server holds this composition; it recomposes on reload"
+                            f"Timed out after {wait:g}s waiting for composition lock {path}; "
+                            "another reader or writer holds it"
                         ) from None
                     time.sleep(min(0.05, max(0, deadline - time.monotonic())))
         try:
