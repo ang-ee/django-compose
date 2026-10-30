@@ -568,3 +568,118 @@ assert list(apps.get_model("alpha", "Entry")._base_manager.values_list("value", 
 """,
         )
     )
+
+
+@pytest.mark.parametrize("dynamic_path", [False, True])
+def test_nested_native_migration_packages_roll_back_and_retry(baseline_host, dynamic_path):
+    archive = write(baseline_host, "archive/__init__.py", "# existing archive initializer\n")
+    archive.chmod(0o640)
+    destination = "archive"
+    if dynamic_path:
+        write(baseline_host, "relocated/__init__.py", "# existing relocated initializer\n").chmod(0o600)
+        archive.write_text(
+            'from pathlib import Path\n__path__ = [str(Path(__file__).parent.parent / "relocated")]\n'
+        )
+        destination = "relocated"
+    settings_path = baseline_host / "settings.py"
+    settings_path.write_text(
+        settings_path.read_text().replace(
+            "configure(globals())",
+            'MIGRATION_MODULES = {"alpha": "archive.deep.alpha"}\nconfigure(globals())',
+        )
+    )
+    successful(invoke(baseline_host, "compose"))
+    successful(
+        invoke(
+            baseline_host,
+            script=f"""
+from pathlib import Path
+from stat import S_IMODE
+from unittest.mock import patch
+import django
+django.setup()
+from django.core.management import call_command
+from django.db import connection
+from django.db.migrations.recorder import MigrationRecorder
+from django_compose.migrations import TransitionBinding
+
+def files():
+    return {{p: (p.read_bytes(), S_IMODE(p.stat().st_mode)) for root in ("archive", "relocated")
+            for p in Path(root).rglob("*.py")}}
+before = files()
+def fail(plan):
+    directory = Path({destination!r}) / "deep"
+    assert (directory / "__init__.py").is_file()
+    assert (directory / "alpha/__init__.py").is_file()
+    assert (directory / "alpha/0001_initial.py").is_file()
+    raise RuntimeError("injected after nested initial authoring")
+with patch.object(TransitionBinding, "_render", staticmethod(fail)):
+    try:
+        call_command("makemigrations", "alpha", interactive=False, verbosity=0)
+    except Exception as error:
+        assert "injected after nested initial authoring" in str(error), str(error)
+    else:
+        raise AssertionError("failure injection did not run")
+assert files() == before, (files(), before)
+assert MigrationRecorder(connection).applied_migrations() == {{}}
+call_command("makemigrations", "alpha", interactive=False, verbosity=0)
+assert (Path({destination!r}) / "deep/alpha/0001_initial.py").is_file()
+assert (Path({destination!r}) / "deep/alpha/rename_legacy.py").is_file()
+assert all(files()[p] == original for p, original in before.items())
+call_command("makemigrations", "alpha", check_changes=True, dry_run=True, interactive=False, verbosity=0)
+call_command("migrate", "alpha", interactive=False, verbosity=0)
+""",
+        )
+    )
+
+
+def test_native_package_creation_failure_restores_initializer_bytes_and_modes(baseline_host):
+    write(baseline_host, "archive/__init__.py", "# existing archive initializer\n").chmod(0o640)
+    write(baseline_host, "archive/deep/__init__.py", "import missing_initializer_dependency\n").chmod(0o600)
+    settings_path = baseline_host / "settings.py"
+    settings_path.write_text(
+        settings_path.read_text().replace(
+            "configure(globals())",
+            'MIGRATION_MODULES = {"alpha": "archive.deep.alpha"}\nconfigure(globals())',
+        )
+    )
+    successful(invoke(baseline_host, "compose"))
+    successful(
+        invoke(
+            baseline_host,
+            script="""
+from pathlib import Path
+from stat import S_IMODE
+from unittest.mock import patch
+import sys
+import django
+django.setup()
+from django.core.management import call_command
+from django.db import connection
+from django.db.migrations.recorder import MigrationRecorder
+from django.db.migrations.writer import MigrationWriter
+
+def files():
+    return {p: (p.read_bytes(), S_IMODE(p.stat().st_mode)) for p in Path("archive").rglob("*.py")}
+before = files()
+basedir = MigrationWriter.basedir.fget
+def fail(writer):
+    result = basedir(writer)
+    assert Path("archive/deep/__init__.py").read_bytes() == b""
+    assert Path("archive/deep/alpha/__init__.py").is_file()
+    raise RuntimeError("injected after native initializer writes")
+with patch.object(MigrationWriter, "basedir", property(fail)):
+    try:
+        call_command("makemigrations", "alpha", interactive=False, verbosity=0)
+    except RuntimeError as error:
+        assert "injected after native initializer writes" in str(error), str(error)
+    else:
+        raise AssertionError("failure injection did not run")
+assert files() == before, (files(), before)
+assert "archive.deep" not in sys.modules
+assert MigrationRecorder(connection).applied_migrations() == {}
+call_command("makemigrations", "alpha", interactive=False, verbosity=0)
+call_command("migrate", "alpha", interactive=False, verbosity=0)
+""",
+        )
+    )

@@ -22,11 +22,14 @@ from django_compose.management import require_serving_mode
 from django_compose.migrations import (
     DropGuardAutodetector,
     TransitionBinding,
-    _directory,
     _forget_history,
     _metadata,
 )
 from django_compose.serving import read_receipt
+
+
+def _file_state(path: Path) -> tuple[bytes, int] | None:
+    return (path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) if path.exists() else None
 
 
 def history_labels() -> tuple[str, ...]:
@@ -48,11 +51,13 @@ class Command(NativeCommand):
         self._originals: dict[Path, tuple[bytes, int] | None] = {}
         self._bound_files: list[Path] = []
         self._changed_labels: set[str] = set()
+        self._migration_packages: dict[str, Path] = {}
 
     def handle(self, *app_labels: str, **options: Any) -> str | None:
         self._originals.clear()
         self._bound_files.clear()
         self._changed_labels.clear()
+        self._migration_packages.clear()
         try:
             return self._author(*app_labels, **options)
         except BaseException:
@@ -64,14 +69,51 @@ class Command(NativeCommand):
                 else:
                     content, mode = original
                     atomic_write(path, content, mode=mode)
-            _forget_history(self._changed_labels)
+            _forget_history(self._changed_labels, packages=self._migration_packages)
             raise
 
     def _remember(self, path: Path) -> None:
         if path not in self._originals:
-            self._originals[path] = (
-                (path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) if path.exists() else None
-            )
+            self._originals[path] = _file_state(path)
+
+    def _record_native_directory(self, writer: MigrationWriter, package: str) -> Path:
+        """Observe package writes; Django alone chooses and creates the directory.
+
+        basedir has no write hook. Snapshot initializer candidates below every
+        native imported ancestor, including AppConfig.path's direct-submodule
+        case, then journal only files changed by the native call. Do not select
+        a destination from these candidates or substitute a source pathfinder.
+        """
+        parts = package.split(".")
+        candidates: list[tuple[str, Path, list[str]]] = []
+        config = apps.get_app_config(writer.migration.app_label)
+        if package.rpartition(".")[0] == config.name:
+            candidates.append((config.name, Path(config.path), parts[-1:]))
+        for length in range(1, len(parts) + 1):
+            prefix = ".".join(parts[:length])
+            try:
+                directory = Path(module_dir(importlib.import_module(prefix)))
+            except ImportError, ValueError:
+                continue
+            candidates.append((prefix, directory, parts[length:]))
+        initializers: dict[Path, tuple[str, tuple[bytes, int] | None]] = {}
+        for prefix, directory, suffix in candidates:
+            for part in ("", *suffix):
+                if part:
+                    prefix += "." + part
+                    directory /= part
+                path = directory / "__init__.py"
+                initializers.setdefault(path, (prefix, _file_state(path)))
+        try:
+            directory = Path(writer.basedir)
+        finally:
+            for path, (prefix, original) in initializers.items():
+                if _file_state(path) != original:
+                    self._originals.setdefault(path, original)
+                    self._migration_packages[prefix] = path.parent
+            importlib.invalidate_caches()
+        self._migration_packages[package] = directory
+        return directory
 
     def _author(self, *app_labels: str, **options: Any) -> str | None:
         require_serving_mode()
@@ -107,6 +149,9 @@ class Command(NativeCommand):
                 self._initial_history = None
             if options.get("dry_run") or options.get("check_changes"):
                 return None
+            # Native writer may have imported a missing initializer as a
+            # namespace before writing it (including a same-process retry).
+            _forget_history(self._changed_labels, packages=self._migration_packages)
             # Only actual disk nodes created by this native initial phase prove
             # first authoring, including native prerequisite expansion.
             current = MigrationLoader(None, ignore_no_migrations=True)
@@ -161,7 +206,7 @@ class Command(NativeCommand):
                     raise CommandError(f"Migrations are disabled for app {label!r}")
                 writer = MigrationWriter(migration, self.include_header)
                 if not self.dry_run:
-                    directory = _directory(label, missing=True)
+                    directory = self._record_native_directory(writer, package)
                     self._changed_labels.add(label)
                     self._remember(directory / writer.filename)
                     self._remember(directory / "__init__.py")

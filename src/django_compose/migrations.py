@@ -857,13 +857,21 @@ class DropGuardAutodetector(MigrationAutodetector):
                 )
 
 
-def _forget_history(labels: Iterable[str]) -> None:
-    prefixes = [MigrationLoader.migrations_module(label)[0] for label in labels]
+def _forget_history(labels: Iterable[str], *, packages: Mapping[str, Path] | None = None) -> None:
+    # Native writer observation can retain paths even when restored package
+    # initializers no longer import successfully. Do not execute them to clean
+    # their import caches, or leave newly authored ancestor packages cached.
+    directories = dict(packages or {})
+    for label in labels:
+        package = MigrationLoader.migrations_module(label)[0]
+        if package is not None and package not in directories:
+            directories[package] = _directory(label, missing=True)
+    prefixes = tuple(directories)
     for name in tuple(sys.modules):
         if any(prefix and (name == prefix or name.startswith(prefix + ".")) for prefix in prefixes):
             sys.modules.pop(name, None)
-    for label in labels:
-        for bytecode in (_directory(label, missing=True) / "__pycache__").glob("*.pyc"):
+    for directory in set(directories.values()):
+        for bytecode in (directory / "__pycache__").glob("*.pyc"):
             bytecode.unlink()
     importlib.invalidate_caches()
 
