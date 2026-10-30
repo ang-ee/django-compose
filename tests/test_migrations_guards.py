@@ -710,3 +710,101 @@ expect(CommandError, "attached SQLite", lambda: DropGuardAutodetector(before, af
 assert model._base_manager.get().value == "valuable attached data"
 assert files() == original
 """)
+
+
+@pytest.mark.parametrize(
+    "owner,shared_alias", [("external", True), ("external", False), ("same_model", True)]
+)
+def test_implicit_m2m_field_removal_preserves_surviving_table_owners(host, owner, shared_alias):
+    _, run = host
+    run(f"""
+from django.db import connections, router
+from django.db.migrations.graph import MigrationGraph
+connections.settings["other"] = {{**settings.DATABASES["default"], "NAME": "other.sqlite3"}}
+before = ProjectState()
+before.add_model(ModelState("alpha", "Tag", [("id", models.AutoField(primary_key=True))]))
+fields = [("id", models.AutoField(primary_key=True)),
+          ("tags", models.ManyToManyField("alpha.Tag", db_table='"shared_links"'))]
+if {owner!r} == "same_model":
+    fields.append(("kept", models.ManyToManyField("alpha.Tag", db_table="shared_links", related_name="+")))
+else:
+    before.add_model(ModelState("beta", "Adopted", [("id", models.AutoField(primary_key=True))],
+                               options={{"db_table": "shared_links"}}))
+before.add_model(ModelState("alpha", "Item", fields))
+physical = before.clone()
+if {owner!r} == "same_model":
+    physical.remove_field("alpha", "item", "kept")
+with connection.schema_editor() as editor:
+    editor.create_model(physical.apps.get_model("alpha", "Tag"))
+    editor.create_model(physical.apps.get_model("alpha", "Item"))
+if not {shared_alias!r}:
+    with connections["other"].schema_editor() as editor:
+        editor.create_model(before.apps.get_model("beta", "Adopted"))
+assert before.apps.get_model("alpha", "Item").tags.through._base_manager.count() == 0
+after = before.clone()
+after.remove_field("alpha", "item", "tags")
+graph = MigrationGraph()
+for label in ("alpha", "beta"):
+    graph.add_node((label, "0001"), migrations.Migration("0001", label))
+original = files()
+class Routes:
+    def allow_migrate(self, db, app_label, model_name=None, **hints):
+        if model_name and model_name.endswith(("_tags", "_kept")):
+            raise AssertionError("independent through-model routing")
+        return db == ("other" if app_label == "beta" and not {shared_alias!r} else "default")
+with patch.object(router, "routers", [Routes()]):
+    if {shared_alias!r}:
+        expected = "beta.adopted" if {owner!r} == "external" else "alpha.item_kept"
+        expect(CommandError, "still owned by " + expected,
+               lambda: DropGuardAutodetector(before, after).changes(graph))
+        assert "shared_links" in connection.introspection.table_names()
+    else:
+        changes = DropGuardAutodetector(before, after).changes(graph)
+        for migration in changes["alpha"]:
+            with connection.schema_editor() as editor:
+                before = migration.apply(before, editor)
+        assert "shared_links" not in connection.introspection.table_names()
+        active = after.apps.get_model("beta", "Adopted")
+        assert active._base_manager.using("other").count() == 0
+        assert "shared_links" in connections["other"].introspection.table_names()
+assert files() == original
+""")
+
+
+def test_explicit_through_field_removal_preserves_native_table_and_rows(host):
+    _, run = host
+    run("""
+from django.db.migrations.graph import MigrationGraph
+before = ProjectState()
+before.add_model(ModelState("alpha", "Tag", [("id", models.AutoField(primary_key=True))]))
+before.add_model(ModelState("alpha", "Item", [
+    ("id", models.AutoField(primary_key=True)),
+    ("tags", models.ManyToManyField("alpha.Tag", through="alpha.Link")),
+]))
+before.add_model(ModelState("alpha", "Link", [
+    ("id", models.AutoField(primary_key=True)),
+    ("item", models.ForeignKey("alpha.Item", on_delete=models.CASCADE)),
+    ("tag", models.ForeignKey("alpha.Tag", on_delete=models.CASCADE)),
+], options={"db_table": "shared_links"}))
+tag = before.apps.get_model("alpha", "Tag")
+item = before.apps.get_model("alpha", "Item")
+link = before.apps.get_model("alpha", "Link")
+with connection.schema_editor() as editor:
+    for model in (tag, item, link):
+        editor.create_model(model)
+row = link._base_manager.create(item=item._base_manager.create(), tag=tag._base_manager.create())
+after = before.clone()
+after.remove_field("alpha", "item", "tags")
+graph = MigrationGraph()
+graph.add_node(("alpha", "0001"), migrations.Migration("0001", "alpha"))
+original = files()
+changes = DropGuardAutodetector(before, after).changes(graph)
+operations = [type(operation) for migration in changes["alpha"] for operation in migration.operations]
+assert operations == [migrations.RemoveField]
+for migration in changes["alpha"]:
+    with connection.schema_editor() as editor:
+        before = migration.apply(before, editor)
+assert "shared_links" in connection.introspection.table_names()
+assert link._base_manager.get().pk == row.pk
+assert files() == original
+""")

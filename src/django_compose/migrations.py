@@ -561,10 +561,15 @@ def _allows_migrate_model(operation: Operation, alias: str, model: Any, *, offli
     return operation.allow_migrate_model(alias, model)
 
 
-def _model_storage(model: Any) -> Iterator[Any]:
-    """Native schema deletion owns implicit through tables with their model."""
-    yield model
-    for field in model._meta.local_many_to_many:
+def _model_storage(model: Any, *, removed_field: str | None = None) -> Iterator[Any]:
+    """Tables deleted by native model deletion or implicit M2M field removal."""
+    if removed_field is None:
+        yield model
+        fields = model._meta.local_many_to_many
+    else:
+        field = model._meta.get_field(removed_field)
+        fields = (field,) if field.many_to_many else ()
+    for field in fields:
         through = field.remote_field.through
         if through._meta.auto_created:
             yield through
@@ -585,25 +590,30 @@ def _shared_table_drops(
     for label, migrations in sorted(changes.items()):
         for migration in migrations:
             for operation in migration.operations:
-                if not isinstance(operation, DeleteModel):
+                if isinstance(operation, DeleteModel):
+                    model = before.apps.get_model(label, operation.name)
+                    dropped = tuple(_model_storage(model))
+                elif isinstance(operation, RemoveField):
+                    model = before.apps.get_model(label, operation.model_name)
+                    dropped = tuple(_model_storage(model, removed_field=operation.name))
+                else:
                     continue
-                model = before.apps.get_model(label, operation.name)
+                if not dropped:
+                    continue
                 for alias in sorted(connections):
                     connection = connections[alias]
                     try:
                         if not _allows_migrate_model(operation, alias, model, offline=not database):
                             continue
-                        for storage in _model_storage(model):
+                        for storage in dropped:
                             table = storage._meta.db_table
                             identity = _storage_identifier(connection, table)
                             remaining = set()
                             for owner, active_storage in owners:
                                 if (
-                                    owner._meta.label_lower == model._meta.label_lower
-                                    or not _allows_migrate_model(
-                                        operation, alias, owner, offline=not database
-                                    )
-                                ):
+                                    isinstance(operation, DeleteModel)
+                                    and owner._meta.label_lower == model._meta.label_lower
+                                ) or not _allows_migrate_model(operation, alias, owner, offline=not database):
                                     continue
                                 active_table = active_storage._meta.db_table
                                 other = _storage_identifier(connection, active_table)
@@ -626,7 +636,7 @@ def _shared_table_drops(
                                             remaining.add(active_storage._meta.label_lower)
                             if remaining:
                                 raise CommandError(
-                                    f"unsafe autodetected model deletion: table {table!r} "
+                                    f"unsafe autodetected table deletion: table {table!r} "
                                     f"is still owned by {', '.join(sorted(remaining))} on {alias!r}"
                                 )
                     except (DatabaseError, ImproperlyConfigured) as error:
@@ -666,8 +676,8 @@ class DropGuardAutodetector(MigrationAutodetector):
                         model = self.from_state.apps.get_model(label, operation.model_name)
                         field = model._meta.get_field(operation.name)
                         if field.many_to_many:
-                            through = field.remote_field.through
-                            if not through._meta.auto_created:
+                            through = next(_model_storage(model, removed_field=operation.name), None)
+                            if through is None:
                                 continue
                             table, column = through._meta.db_table, None
 
