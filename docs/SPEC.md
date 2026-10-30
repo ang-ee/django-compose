@@ -124,8 +124,10 @@ The standalone `django-compose inspect-apps [--group GROUP] [APP_ENTRY ...]`
 and `python -m django_compose inspect-apps ...` commands print this object as JSON
 without importing native management dispatch or project settings. Zero roots
 produce an empty selection. Import diagnostics go to stderr, separately from
-JSON stdout; selection failures exit with status 1. This is a standalone command,
-not a Django management command.
+JSON stdout, including native writes to file descriptor 1 and inherited subprocess
+stdout. A reserved response descriptor carries only JSON; malformed or empty
+responses raise `ImproperlyConfigured`. Selection failures exit with status 1.
+This is a standalone command, not a Django management command.
 
 ## Settings and snapshots
 
@@ -178,9 +180,13 @@ It delegates native expansion while updating only `evalue` fields; `value` and
 `history` templates remain intact. Native logged errors retain upstream behavior;
 strict loaders use `conf.fail_on_yamlconf_errors()` around loading, expansion
 and injection. This context manager raises `ImproperlyConfigured` with the native
-message for `django_yamlconf` ERROR records, preserves normal warning behavior,
-and always removes its temporary handler. Compiler contributions use the same
-context. Ordinary upstream expansion
+message for `django_yamlconf` ERROR records. It temporarily enables that logger
+and lowers its threshold enough to admit ERROR, retaining previous lower-level
+record admission. It restores the original explicit level and disabled flag and
+removes its handler on exit, including nested scopes and failures. If process-wide
+`logging.disable` suppresses ERROR, it refuses entry with `ImproperlyConfigured`
+instead of changing unrelated loggers. Compiler contributions use the same context.
+Ordinary upstream expansion
 mutates list/dict templates: once erased from both value and history, their
 reference origins cannot be recovered from already-expanded metadata. See the
 [native loader handoff](configuration.md#native-yamlconf-loader-handoff).

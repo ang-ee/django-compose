@@ -362,8 +362,12 @@ It preserves opaque native values, including logging streams. Native logged erro
 retain upstream behavior outside `fail_on_yamlconf_errors()`. Wrap native loading,
 expansion and injection in that context to turn logged errors into
 `ImproperlyConfigured` with the native message. Warnings keep their normal
-behavior and the temporary handler is removed on exit, including failures and
-nested scopes. App contributions use this same strict context.
+behavior. The scope enables `django_yamlconf` ERROR records even if that logger
+was disabled or inherited a higher logging threshold, then restores its original
+level and disabled flag and removes the temporary handler on exit. Nested scopes
+restore the enclosing scope. If process-wide `logging.disable` suppresses ERROR,
+the context refuses entry with `ImproperlyConfigured` rather than change logging
+for unrelated loggers. App contributions use this same strict context.
 
 Pass the resulting `_YAMLCONF_ATTRIBUTES` unchanged in the settings namespace.
 `configure()` owns structural-setting identification and rejects direct, historical

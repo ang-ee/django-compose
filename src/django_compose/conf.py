@@ -79,16 +79,27 @@ class _Errors(logging.Handler):
 def fail_on_yamlconf_errors() -> Iterator[None]:
     """Raise ImproperlyConfigured for django-yamlconf ERROR records in this scope.
 
-    Wrap native loading, expansion and injection operations. Warnings retain
-    their normal logging behavior; the temporary handler is always removed.
+    Wrap native loading, expansion and injection operations. Enable this logger
+    and admit ERROR records for the scope, restoring its level and disabled
+    state on exit. Lower-level records retain their prior admission behavior.
+    Refuse process-wide logging.disable settings that suppress ERROR rather
+    than change logging for unrelated loggers.
     """
     handler = _Errors(logging.ERROR)
     logger = logging.getLogger("django_yamlconf")
+    if logger.manager.disable >= logging.ERROR:
+        raise ImproperlyConfigured("Cannot enforce yamlconf errors while logging.disable suppresses ERROR")
+    previous_level, previous_disabled = logger.level, logger.disabled
+    level = logging.ERROR if previous_disabled else min(logger.getEffectiveLevel(), logging.ERROR)
+    logger.setLevel(level)
+    logger.disabled = False
     logger.addHandler(handler)
     try:
         yield
     finally:
         logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+        logger.disabled = previous_disabled
 
 
 class _Reference:

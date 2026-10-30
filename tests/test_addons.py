@@ -15,6 +15,7 @@ from django.core.exceptions import ImproperlyConfigured
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
+from django_compose import addons
 from django_compose.addons import active_requirements, enabled_apps, inspect_apps, installed_addons
 
 GROUP = "testsite.addons"
@@ -546,10 +547,17 @@ def test_isolated_selection_projects_existing_closure_and_keeps_native_configs_i
     installed.distribution("inspected-dependency", app=dependency)
     installed.distribution("inspected-disabled", app="must_not_import", entry="must_not_import.apps.Config")
     expected = enabled_apps((root,), group=GROUP)
+    diagnostic = "import os; os.write(1, b'subprocess diagnostic\\n')"
     for entry in expected.app_entries:
         package = Path(entry.path)
         config = package / "apps.py"
-        config.write_text(config.read_text() + '\nprint("native config imported")\n')
+        config.write_text(
+            config.read_text()
+            + '\nprint("native config imported")\n'
+            + "import os, subprocess, sys\n"
+            + "os.write(1, b'native fd diagnostic\\n')\n"
+            + f"subprocess.run([sys.executable, '-B', '-c', {diagnostic!r}], check=True)\n"
+        )
         (package / "autoconfig.py").write_text("raise AssertionError('settings contributions loaded')\n")
         for module in tuple(sys.modules):
             if module == entry.name or module.startswith(entry.name + "."):
@@ -572,7 +580,19 @@ def test_isolated_selection_projects_existing_closure_and_keeps_native_configs_i
     output = capsys.readouterr()
     assert output.out == ""
     assert "native config imported" in output.err
+    assert "native fd diagnostic" in output.err
+    assert "subprocess diagnostic" in output.err
     assert not [cache for entry in expected.app_entries for cache in Path(entry.path).rglob("*.pyc")]
+
+
+@pytest.mark.parametrize("response", ["", "native diagnostic\n{}", "{"])
+def test_isolated_selection_reports_malformed_response_as_configuration_failure(monkeypatch, response):
+    def run(arguments, **kwargs):
+        return subprocess.CompletedProcess(arguments, 0, stdout=response, stderr="")
+
+    monkeypatch.setattr(addons.subprocess, "run", run)
+    with pytest.raises(ImproperlyConfigured, match="invalid JSON response"):
+        inspect_apps(())
 
 
 def test_isolated_selection_uses_fresh_native_process_from_configured_parent(tmp_path):

@@ -78,8 +78,11 @@ def inspect_apps(roots: Iterable[str], *, group: str | None = None) -> AppSelect
         if key not in {"DJANGO_SETTINGS_MODULE", "DJANGO_COMPOSE_MODE"}
     }
     child = """import json
+import os
 import sys
 from contextlib import redirect_stdout
+response = os.fdopen(os.dup(1), 'w')
+os.dup2(2, 1)
 try:
     request = json.load(sys.stdin)
     sys.path[:] = request.pop('pythonpath')
@@ -89,7 +92,8 @@ try:
 except Exception as error:
     print(str(error), file=sys.stderr)
     raise SystemExit(1)
-print(json.dumps(result, sort_keys=True))
+with response:
+    print(json.dumps(result, sort_keys=True), file=response)
 """
     result = subprocess.run(
         [sys.executable, "-B", "-c", child],
@@ -103,7 +107,10 @@ print(json.dumps(result, sort_keys=True))
         raise ImproperlyConfigured(result.stderr.strip() or "App selection subprocess failed")
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
-    return cast(AppSelection, json.loads(result.stdout))
+    try:
+        return cast(AppSelection, json.loads(result.stdout))
+    except json.JSONDecodeError as error:
+        raise ImproperlyConfigured("App selection subprocess returned an invalid JSON response") from error
 
 
 def _inspect_apps(roots: Iterable[str], *, group: str | None = None) -> AppSelection:
