@@ -22,6 +22,7 @@ def atomic_write(path: Path, content: bytes, *, exclusive: bool = False, mode: i
 
     Exclusive publication fails atomically if the destination already exists.
     An explicit mode also restores permissions when recreating a deleted file.
+    New files use ordinary creation permissions filtered by the process umask.
     """
     # Native loaders may otherwise accept same-second, same-size stale bytecode.
     caches: tuple[Path, ...] = ()
@@ -38,9 +39,11 @@ def atomic_write(path: Path, content: bytes, *, exclusive: bool = False, mode: i
         except FileNotFoundError:
             pass
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=".compose-", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
+    # The private directory protects incomplete bytes while native exclusive
+    # creation applies the umask, without changing process-wide permissions.
+    with tempfile.TemporaryDirectory(prefix=".compose-", dir=path.parent) as directory:
+        temporary = Path(directory) / path.name
+        with temporary.open("xb") as stream:
             stream.write(content)
             stream.flush()
             if mode is not None:
@@ -52,9 +55,6 @@ def atomic_write(path: Path, content: bytes, *, exclusive: bool = False, mode: i
             os.replace(temporary, path)
         for cache in caches:
             cache.unlink(missing_ok=True)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
 
 
 @dataclass

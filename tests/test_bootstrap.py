@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -75,7 +76,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
 def invoke(
-    root: Path, *arguments: str, script: str | None = None, **environment: str
+    root: Path, *arguments: str, script: str | None = None, umask: int = -1, **environment: str
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ, DJANGO_SETTINGS_MODULE="settings")
     env.update(environment)
@@ -84,7 +85,9 @@ def invoke(
     env["PYTHONPATH"] = os.pathsep.join([str(root), *sys.path])
     command = [sys.executable, "-B"]
     command += ["-c", script] if script is not None else ["-m", "django_compose", *arguments]
-    return subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, check=False)
+    return subprocess.run(
+        command, cwd=root, env=env, umask=umask, capture_output=True, text=True, check=False
+    )
 
 
 def successful(result: subprocess.CompletedProcess[str]) -> None:
@@ -145,6 +148,46 @@ def test_static_help_and_check_missing_never_write(tmp_path: Path) -> None:
     result = invoke(root, "compose", "--check")
     assert result.returncode != 0
     assert not (root / "runtime").exists()
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o077])
+def test_fresh_build_and_native_migrations_use_creation_permissions(tmp_path: Path, umask: int) -> None:
+    root = host(tmp_path)
+    successful(invoke(root, "compose", umask=umask))
+    successful(
+        invoke(
+            root,
+            umask=umask,
+            script=(
+                "import django; django.setup(); from django.core.management import call_command; "
+                "call_command('makemigrations', 'custom_boot', verbosity=0)"
+            ),
+        )
+    )
+    runtime = root / "runtime"
+    generated = {p.relative_to(runtime): p for p in runtime.rglob("*") if p.is_file()}
+    assert {
+        Path("__init__.py"),
+        Path("custom_boot/models.py"),
+        Path("custom_boot/apps.py"),
+        Path("custom_boot/migrations/__init__.py"),
+        Path("custom_boot/migrations/0001_initial.py"),
+        Path("capability/ready.txt"),
+    } <= generated.keys()
+    for relative, path in generated.items():
+        assert stat.S_IMODE(path.stat().st_mode) == 0o666 & ~umask, relative
+    assert not tuple(runtime.rglob(".compose-*"))
+
+    # Rebuilding must not widen intentionally private existing publications.
+    private = [runtime / name for name in ("__init__.py", "custom_boot/models.py", "capability/ready.txt")]
+    for path in private:
+        path.chmod(0o600)
+    source = root / "bootapp/models.py"
+    source.write_text(source.read_text().replace("max_length=30", "max_length=40"))
+    (runtime / "capability/ready.txt").write_text("drift")
+    successful(invoke(root, "compose", umask=0o022))
+    for path in private:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600, path
 
 
 @pytest.mark.parametrize("field_owner", ["source", "donor"])

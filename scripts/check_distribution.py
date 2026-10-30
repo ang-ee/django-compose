@@ -6,6 +6,7 @@ import email.parser
 import hashlib
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -18,8 +19,12 @@ from packaging.requirements import Requirement
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run(arguments: list[str], *, cwd: Path, env: dict[str, str], success: bool = True) -> str:
-    result = subprocess.run(arguments, cwd=cwd, env=env, text=True, capture_output=True, check=False)
+def run(
+    arguments: list[str], *, cwd: Path, env: dict[str, str], success: bool = True, umask: int = -1
+) -> str:
+    result = subprocess.run(
+        arguments, cwd=cwd, env=env, umask=umask, text=True, capture_output=True, check=False
+    )
     if (result.returncode == 0) != success:
         raise RuntimeError(
             f"Command {arguments!r} returned {result.returncode}\n{result.stdout}{result.stderr}"
@@ -300,8 +305,12 @@ def main() -> None:
             [*compiler, "compose", "--help", "--settings", "not_a_settings_module"], cwd=host, env=environment
         )
         assert not (host / "runtime").exists(), "Help started composition"
-        run([*compiler, "compose", "--settings", "settings"], cwd=host, env=environment)
+        run([*compiler, "compose", "--settings", "settings"], cwd=host, env=environment, umask=0o022)
         first = digest(host / "runtime")
+        assert "exports/models.graphql" in first
+        for name in first:
+            path = host / "runtime" / name
+            assert stat.S_IMODE(path.stat().st_mode) == 0o644, path
         assert all(
             "build-only-secret-proof" not in path.read_text() for path in (host / "runtime").rglob("*.py")
         )

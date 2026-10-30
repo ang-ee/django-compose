@@ -2,6 +2,8 @@
 
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -153,7 +155,7 @@ def test_artifact_accessor_checks_pending_ownership_hash_and_symlinks(tmp_path, 
 
 
 @pytest.mark.parametrize("name", ["pyproject.toml", "uv.lock"])
-@pytest.mark.parametrize("mode", [0o644, 0o640, 0o755])
+@pytest.mark.parametrize("mode", [0o600, 0o644, 0o640, 0o755])
 def test_atomic_replacement_and_rollback_preserve_authored_permissions(tmp_path, name, mode):
     path = tmp_path / name
     original = b"original metadata\n"
@@ -167,6 +169,89 @@ def test_atomic_replacement_and_rollback_preserve_authored_permissions(tmp_path,
     atomic_write(path, original)
     assert path.read_bytes() == original
     assert stat.S_IMODE(path.stat().st_mode) == mode
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o077])
+@pytest.mark.parametrize("exclusive", [False, True])
+@pytest.mark.parametrize("mode", [None, 0o644])
+def test_atomic_first_creation_uses_native_umask_unless_mode_is_explicit(tmp_path, umask, exclusive, mode):
+    path = tmp_path / "artifact.txt"
+    script = (
+        "from pathlib import Path; from django_compose.artifacts import atomic_write; "
+        f"atomic_write(Path({str(path)!r}), b'complete', exclusive={exclusive!r}, mode={mode!r})"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+        umask=umask,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert path.read_bytes() == b"complete"
+    assert stat.S_IMODE(path.stat().st_mode) == (mode if mode is not None else 0o666 & ~umask)
+    assert not tuple(tmp_path.glob(".compose-*"))
+
+
+def test_atomic_explicit_mode_overrides_existing_permissions(tmp_path):
+    path = tmp_path / "artifact.txt"
+    path.write_bytes(b"private")
+    path.chmod(0o600)
+
+    atomic_write(path, b"published", mode=0o640)
+
+    assert path.read_bytes() == b"published"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+@pytest.mark.parametrize("exclusive", [False, True])
+def test_atomic_scratch_is_private_until_complete_publication(tmp_path, monkeypatch, exclusive):
+    operation = "link" if exclusive else "replace"
+    publish = getattr(os, operation)
+    path = tmp_path / "artifact.txt"
+
+    def inspected_publish(source, destination):
+        source = Path(source)
+        assert stat.S_IMODE(source.parent.stat().st_mode) == 0o700
+        assert source.read_bytes() == b"complete"
+        assert not path.exists()
+        publish(source, destination)
+
+    monkeypatch.setattr(os, operation, inspected_publish)
+    atomic_write(path, b"complete", exclusive=exclusive)
+
+    assert path.read_bytes() == b"complete"
+    assert not tuple(tmp_path.glob(".compose-*"))
+
+
+@pytest.mark.parametrize("operation", ["fsync", "replace", "link"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_atomic_failed_publication_preserves_destination_and_cleans_scratch(
+    tmp_path, monkeypatch, operation, existing
+):
+    path = tmp_path / "models.py"
+    cache = tmp_path / "__pycache__/models.cpython-314.pyc"
+    cache.parent.mkdir()
+    cache.write_bytes(b"existing bytecode")
+    if existing:
+        path.write_bytes(b"original")
+        path.chmod(0o600)
+
+    def fail(*args):
+        raise OSError("publication failed")
+
+    monkeypatch.setattr(os, operation, fail)
+    with pytest.raises(OSError, match="publication failed"):
+        atomic_write(path, b"replacement", exclusive=operation == "link")
+
+    if existing:
+        assert path.read_bytes() == b"original"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    else:
+        assert not path.exists()
+    assert cache.read_bytes() == b"existing bytecode"
+    assert not tuple(tmp_path.glob(".compose-*"))
 
 
 def test_atomic_exclusive_creation_preserves_existing_file_and_cleans_temporary(tmp_path):
