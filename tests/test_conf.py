@@ -1,6 +1,7 @@
 """Project settings compose through native app and yamlconf owners before setup."""
 
 import importlib
+import logging
 import os
 import subprocess
 import sys
@@ -598,6 +599,97 @@ def test_native_loader_adapter_preserves_opaque_values_and_template_containers()
     assert original == {"nested": ["{BASE_DIR}/data"]}
     assert attributes["CUSTOM_INPUT"]["evalue"] == {"nested": ["/project/data"]}
     assert attributes["LOGGING"]["evalue"]["stream"] is sys.stderr
+
+
+def test_public_yamlconf_error_scope_fails_native_expansion_and_preserves_provenance():
+    import django_yamlconf
+
+    attributes = {}
+    template = {"nested": ["{MISSING}"]}
+    django_yamlconf.add_attr_info(attributes, "BROKEN", template, "loader")
+    logger = logging.getLogger("django_yamlconf")
+    previous = tuple(logger.handlers)
+
+    with pytest.raises(ImproperlyConfigured, match='Undefined attribute "\\{MISSING\\}"'):
+        with conf.fail_on_yamlconf_errors():
+            conf.expand_attribute_refs(attributes)
+
+    assert tuple(logger.handlers) == previous
+    assert attributes["BROKEN"]["value"] is template
+    assert template == {"nested": ["{MISSING}"]}
+    # Without the strict scope, the adapter retains native logged-error behavior.
+    conf.expand_attribute_refs(attributes)
+
+
+def test_public_yamlconf_error_scope_preserves_warnings_and_nested_cleanup(caplog):
+    logger = logging.getLogger("django_yamlconf")
+    previous = tuple(logger.handlers)
+
+    with conf.fail_on_yamlconf_errors():
+        logger.warning("native warning remains a warning")
+        with pytest.raises(ImproperlyConfigured, match="nested failure"):
+            with conf.fail_on_yamlconf_errors():
+                logger.error("nested %s", "failure")
+        with pytest.raises(ImproperlyConfigured, match="outer scope still active"):
+            logger.error("outer scope still active")
+
+    assert "native warning remains a warning" in caplog.text
+    assert tuple(logger.handlers) == previous
+    with pytest.raises(RuntimeError, match="loader failure"):
+        with conf.fail_on_yamlconf_errors():
+            raise RuntimeError("loader failure")
+    assert tuple(logger.handlers) == previous
+
+
+@pytest.mark.parametrize("suppressed", ["explicit", "inherited", "disabled"])
+def test_public_yamlconf_error_scope_enforces_errors_and_restores_logger_state(suppressed, caplog):
+    import django_yamlconf
+
+    logger = logging.getLogger("django_yamlconf")
+    previous = logger.level, logger.disabled, logging.root.level
+    handlers = tuple(logger.handlers)
+    logger.setLevel(logging.NOTSET if suppressed == "inherited" else logging.CRITICAL)
+    logger.disabled = suppressed == "disabled"
+    if suppressed == "inherited":
+        logging.root.setLevel(logging.CRITICAL)
+    if suppressed == "disabled":
+        logger.setLevel(logging.WARNING)
+    configured = logger.level, logger.disabled, logging.root.level
+    attributes = {}
+    django_yamlconf.add_attr_info(attributes, "BROKEN", "{MISSING}", "loader")
+    try:
+        with conf.fail_on_yamlconf_errors():
+            active = logger.level, logger.disabled
+            logger.warning("previously suppressed warning")
+            with pytest.raises(ImproperlyConfigured, match="Undefined attribute"):
+                with conf.fail_on_yamlconf_errors():
+                    conf.expand_attribute_refs(attributes)
+            assert (logger.level, logger.disabled) == active
+            with pytest.raises(ImproperlyConfigured, match="outer scope remains strict"):
+                logger.error("outer scope remains strict")
+        assert (logger.level, logger.disabled, logging.root.level) == configured
+        assert tuple(logger.handlers) == handlers
+        assert "previously suppressed warning" not in caplog.text
+    finally:
+        logger.setLevel(previous[0])
+        logger.disabled = previous[1]
+        logging.root.setLevel(previous[2])
+
+
+@pytest.mark.parametrize("disabled_level", [logging.ERROR, logging.CRITICAL])
+def test_public_yamlconf_error_scope_refuses_global_error_suppression(disabled_level):
+    logger = logging.getLogger("django_yamlconf")
+    previous = logger.manager.disable
+    state = logger.level, logger.disabled, tuple(logger.handlers)
+    logging.disable(disabled_level)
+    try:
+        with pytest.raises(ImproperlyConfigured, match="logging.disable suppresses ERROR"):
+            with conf.fail_on_yamlconf_errors():
+                pytest.fail("strict loading entered with ERROR records globally disabled")
+        assert logger.manager.disable == disabled_level
+        assert (logger.level, logger.disabled, tuple(logger.handlers)) == state
+    finally:
+        logging.disable(previous)
 
 
 @pytest.mark.parametrize(

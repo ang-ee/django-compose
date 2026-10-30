@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Iterator, Mapping, MutableMapping
+from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
 from types import MappingProxyType, ModuleType
@@ -60,8 +61,8 @@ def expand_attribute_refs(attributes: MutableMapping[str, Any]) -> None:
     from both value and history, those references cannot be recovered from an
     already-expanded cache. Preserve them here before expansion so configure can
     validate structural inputs against direct and transitive environment sources.
-    Upstream logged errors retain their native behavior; a strict loader installs
-    its own error handler, as contribution application does.
+    Upstream logged errors retain their native behavior; strict loaders wrap
+    native operations in fail_on_yamlconf_errors, as contribution application does.
     """
     expanded = _copy_settings(attributes)
     django_yamlconf.expand_attribute_refs(expanded)
@@ -72,6 +73,33 @@ def expand_attribute_refs(attributes: MutableMapping[str, Any]) -> None:
 class _Errors(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         raise ImproperlyConfigured(record.getMessage())
+
+
+@contextmanager
+def fail_on_yamlconf_errors() -> Iterator[None]:
+    """Raise ImproperlyConfigured for django-yamlconf ERROR records in this scope.
+
+    Wrap native loading, expansion and injection operations. Enable this logger
+    and admit ERROR records for the scope, restoring its level and disabled
+    state on exit. Lower-level records retain their prior admission behavior.
+    Refuse process-wide logging.disable settings that suppress ERROR rather
+    than change logging for unrelated loggers.
+    """
+    handler = _Errors(logging.ERROR)
+    logger = logging.getLogger("django_yamlconf")
+    if logger.manager.disable >= logging.ERROR:
+        raise ImproperlyConfigured("Cannot enforce yamlconf errors while logging.disable suppresses ERROR")
+    previous_level, previous_disabled = logger.level, logger.disabled
+    level = logging.ERROR if previous_disabled else min(logger.getEffectiveLevel(), logging.ERROR)
+    logger.setLevel(level)
+    logger.disabled = False
+    logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+        logger.disabled = previous_disabled
 
 
 class _Reference:
@@ -155,10 +183,7 @@ class _Contributions:
     def apply(self, values: Mapping[str, Any], owner: str) -> None:
         if not values:
             return
-        handler = _Errors(logging.ERROR)
-        logger = logging.getLogger("django_yamlconf")
-        logger.addHandler(handler)
-        try:
+        with fail_on_yamlconf_errors():
             attributes = vars(self.module)[_ATTRIBUTES]
             for key, value in values.items():
                 name = setting_name(key)
@@ -168,8 +193,6 @@ class _Contributions:
                 django_yamlconf.set_attr_value(attributes, self.module, owner, key, _copy_settings(value))
             expand_attribute_refs(attributes)
             django_yamlconf.inject_attr(attributes, self.module)
-        finally:
-            logger.removeHandler(handler)
         self._namespace.update(
             {
                 name: value

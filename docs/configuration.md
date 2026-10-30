@@ -344,13 +344,14 @@ A deployment loader that prepares native django-yamlconf attribute records befor
 `django_yamlconf.expand_attribute_refs(attributes)`, then inject the same records:
 
 ```python
-from django_compose.conf import configure, expand_attribute_refs
+from django_compose.conf import configure, expand_attribute_refs, fail_on_yamlconf_errors
 import django_yamlconf
 
 # The loader has populated native `attributes` with set_attr_value(), including
 # native environment sources, and `settings_module` contains deployment settings.
-expand_attribute_refs(attributes)
-django_yamlconf.inject_attr(attributes, settings_module)
+with fail_on_yamlconf_errors():
+    expand_attribute_refs(attributes)
+    django_yamlconf.inject_attr(attributes, settings_module)
 namespace.update(vars(settings_module))
 configure(namespace)
 ```
@@ -358,8 +359,15 @@ configure(namespace)
 The adapter delegates expansion to django-yamlconf and updates only each record's
 `evalue`; original `value` and `history` containers retain reference templates.
 It preserves opaque native values, including logging streams. Native logged errors
-retain upstream behavior; a strict loader must keep its error handler active
-around expansion. App contributions already install their strict handler.
+retain upstream behavior outside `fail_on_yamlconf_errors()`. Wrap native loading,
+expansion and injection in that context to turn logged errors into
+`ImproperlyConfigured` with the native message. Warnings keep their normal
+behavior. The scope enables `django_yamlconf` ERROR records even if that logger
+was disabled or inherited a higher logging threshold, then restores its original
+level and disabled flag and removes the temporary handler on exit. Nested scopes
+restore the enclosing scope. If process-wide `logging.disable` suppresses ERROR,
+the context refuses entry with `ImproperlyConfigured` rather than change logging
+for unrelated loggers. App contributions use this same strict context.
 
 Pass the resulting `_YAMLCONF_ATTRIBUTES` unchanged in the settings namespace.
 `configure()` owns structural-setting identification and rejects direct, historical
