@@ -106,6 +106,7 @@ root app names, and `required: frozenset[str]` of dependency-only app names.
 `components: Mapping[str, str]` maps selected canonical distribution names to
 their native app names. `dependencies` maps selected native app names to ordered
 direct dependency app names. These mappings are immutable.
+Each exact app/config entry is resolved once per call; later calls resolve afresh.
 
 Each participating distribution declares exactly one group entry point, keyed
 by native `AppConfig.name`, whose value is a native app/config string. Active
@@ -275,12 +276,13 @@ the namespace. Deployment secrets are excluded unless deliberately named.
 Default exclusions can be replaced and prune the default Python walk. Explicit
 extra globs include matching files even beneath excluded directories. Other
 subdirectories, including any directory named `web`, are ordinary source inputs.
-One shared `SourceResolver` locates modules through native path finders over
-selected app directories and then `sys.path`, and determines installed providers
-through exact RECORD or PEP 610 ownership. Integration and transition module
-resolution does not execute their parent packages. Native app/config modules
-are imported to select configurations and must remain safe before Django setup.
-Snapshot and serving do not import the model compiler or execute integrations.
+`SourceResolver` locates modules through native path finders over selected app
+directories and then `sys.path`, without executing parent packages. Path-only
+lookups for fingerprints, serving and reload inputs do not inspect distribution
+metadata. Migration import audits additionally determine providers through exact
+RECORD or PEP 610 ownership, with one lazy index per audit. Native app/config
+modules are imported to select configurations and must remain safe before Django
+setup. Snapshot and serving do not import the model compiler or execute integrations.
 
 Without `COMPOSE_TRANSITION_SOURCE`, each selected app contributes sorted
 `compose_migrations/<label>/<name>.py` files in app order, including numeric

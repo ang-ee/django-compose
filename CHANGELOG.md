@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Avoid distribution ownership scans for module-path lookups and reuse each exact
+  native app configuration within one dependency selection.
+
 ## 0.1.0.dev3
 
 - Reorganize documentation around the project workflow, public APIs and app hooks,
