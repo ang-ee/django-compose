@@ -243,6 +243,64 @@ for previous in (None, "check"):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("extended", [False, True])
+def test_derived_settings_types_preserve_native_and_subclass_hooks(tmp_path, extended):
+    config, env = host(tmp_path)
+    settings_module = tmp_path / "typing_settings.py"
+    ordinary_settings = settings_module.read_text()
+    settings_module.write_text(
+        "from authored import *\nfrom django_compose.conf import configure\nconfigure(globals())\n"
+        'globals()["EXTENSION_VALUE"] = 10\n'
+    )
+    if extended:
+        (tmp_path / "adapter.py").write_text(
+            "from collections.abc import Callable\nfrom functools import partial\n"
+            "from mypy.nodes import MemberExpr\nfrom mypy.plugin import AttributeContext\n"
+            "from mypy.types import Type\nfrom mypy_django_plugin.lib import fullnames\n"
+            "from django_compose.typing import CompositionPlugin\n"
+            "class Extension(CompositionPlugin):\n"
+            "    def get_attribute_hook(self, fullname: str):\n"
+            "        native = super().get_attribute_hook(fullname)\n"
+            "        if fullname.rpartition('.')[0] == fullnames.DUMMY_SETTINGS_BASE_CLASS and native:\n"
+            "            return partial(self.setting, native=native)\n"
+            "        return native\n"
+            "    def setting(self, ctx: AttributeContext, *,\n"
+            "                native: Callable[[AttributeContext], Type]) -> Type:\n"
+            "        if isinstance(ctx.context, MemberExpr) and ctx.context.name == 'EXTENSION_VALUE':\n"
+            "            return ctx.api.named_generic_type('builtins.int', [])\n"
+            "        return native(ctx)\n"
+            "def plugin(version: str):\n    return Extension\n"
+        )
+        config.write_text(config.read_text().replace("plugins = django_compose.typing", "plugins = adapter"))
+    source = tmp_path / "consumer.py"
+    source.write_text(
+        "from typing import assert_type\nfrom django.conf import settings\n"
+        "from django_compose.snapshot import Snapshot\nfrom django_compose.addons import Closure\n"
+        "assert_type(settings.COMPOSE_SNAPSHOT, Snapshot)\n"
+        "assert_type(settings.COMPOSE_CLOSURE, Closure)\n"
+        "assert_type(settings.COMPOSE_SNAPSHOT.digest(), str)\n"
+        "assert_type(settings.COMPOSE_CLOSURE.entries, tuple[str, ...])\n"
+        "assert_type(settings.SECRET_KEY, str)\nassert_type(settings.DEBUG, bool)\n"
+        + ("assert_type(settings.EXTENSION_VALUE, int)\n" if extended else "")
+    )
+    for _ in range(2):
+        valid = check(config, env, source)
+        assert valid.returncode == 0, valid.stdout + valid.stderr
+    source.write_text(
+        "from django.conf import settings\nsettings.COMPOSE_SNAPSHOT.digest(1)\nsettings.COMPOSE_MISSING\n"
+    )
+    invalid = check(config, env, source)
+    assert invalid.returncode == 1, invalid.stdout + invalid.stderr
+    assert invalid.stdout.count(": error:") == 2, invalid.stdout + invalid.stderr
+    assert "[call-arg]" in invalid.stdout, invalid.stdout
+    assert "'Settings' object has no attribute 'COMPOSE_MISSING'" in invalid.stdout, invalid.stdout
+    settings_module.write_text(ordinary_settings)
+    source.write_text("from django.conf import settings\nsettings.COMPOSE_CLOSURE\n")
+    absent = check(config, env, source)
+    assert absent.returncode == 1, absent.stdout + absent.stderr
+    assert "'Settings' object has no attribute 'COMPOSE_CLOSURE'" in absent.stdout, absent.stdout
+
+
 @pytest.mark.parametrize("composed", [False, True])
 def test_runtime_model_projection_with_independent_descriptor_plugin(tmp_path, composed):
     from typing_fixtures import (

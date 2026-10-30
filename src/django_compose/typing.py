@@ -22,6 +22,7 @@ from mypy.nodes import (
     ClassDef,
     Decorator,
     FuncDef,
+    MemberExpr,
     MypyFile,
     OverloadedFuncDef,
     PlaceholderNode,
@@ -30,7 +31,7 @@ from mypy.nodes import (
     Var,
 )
 from mypy.options import Options
-from mypy.plugin import ClassDefContext, DynamicClassDefContext, ReportConfigContext
+from mypy.plugin import AttributeContext, ClassDefContext, DynamicClassDefContext, ReportConfigContext
 from mypy.semanal_shared import PRIORITY_FALLBACKS, has_placeholder
 from mypy.server.trigger import make_trigger
 from mypy.types import CallableType, Instance, Overloaded, TypeType, get_proper_type
@@ -48,6 +49,7 @@ from mypy_django_plugin.transformers.managers import create_new_manager_class_fr
 from mypy_django_plugin.transformers.manytomany import M2MArguments, M2MThrough, M2MTo
 from mypy_django_plugin.transformers.models import ProcessManyToManyFields, process_model_class
 
+from django_compose.addons import Closure
 from django_compose.snapshot import Snapshot
 
 if TYPE_CHECKING:
@@ -187,6 +189,38 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
             **super().report_config_data(ctx),
             "compose_snapshot": snapshot.digest() if isinstance(snapshot, Snapshot) else None,
         }
+
+    def get_attribute_hook(self, fullname: str) -> Callable[[AttributeContext], MypyType] | None:
+        """Expose configure's derived facts through native Django settings lookup."""
+
+        native = super().get_attribute_hook(fullname)
+        if fullname.rpartition(".")[0] == fullnames.DUMMY_SETTINGS_BASE_CLASS and native is not None:
+            return partial(self._derived_setting, native=native)
+        return native
+
+    def _derived_setting(
+        self, ctx: AttributeContext, *, native: Callable[[AttributeContext], MypyType]
+    ) -> MypyType:
+        if not isinstance(ctx.context, MemberExpr):
+            return native(ctx)
+        name = ctx.context.name
+        derived: type[Snapshot] | type[Closure]
+        if name == "COMPOSE_SNAPSHOT" and isinstance(
+            getattr(self.django_context.settings, name, None), Snapshot
+        ):
+            derived = Snapshot
+        elif name == "COMPOSE_CLOSURE" and isinstance(
+            getattr(self.django_context.settings, name, None), Closure
+        ):
+            derived = Closure
+        else:
+            return native(ctx)
+        fullname = helpers.get_class_fullname(derived)
+        info = helpers.lookup_fully_qualified_typeinfo(helpers.get_typechecker_api(ctx), fullname)
+        if info is None:
+            ctx.api.fail(f"Unavailable derived setting type {fullname}", ctx.context)
+            return ctx.default_attr_type
+        return Instance(info, [])
 
     def get_additional_deps(self, file: MypyFile) -> list[tuple[int, str, int]]:
         extra = set(self.django_context.dependencies.get(file.fullname, ()))
