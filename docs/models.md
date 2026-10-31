@@ -194,9 +194,11 @@ followed by the original abstract model and then its concrete parent. Python
 resolves methods and properties through the resulting MRO. Use cooperative
 `super()` where multiple bases participate in a method.
 
-Managers remain native Django managers. An extension manager overrides a manager
-of the same name on the original declaration. Two extensions declaring distinct
-managers under the same name are refused. Shared abstract ancestry counts once.
+Managers remain native Django managers. A concrete-target extension manager
+overrides a same-named source manager. Abstract-contract contributions preserve
+the source manager as described [above](#extend-a-shared-abstract-contract).
+Two extensions declaring distinct managers under the same name are refused.
+Shared abstract ancestry counts once.
 
 The original declaration owns model-wide `Meta` policy, such as ordering.
 Extensions may add native constraints and set structural `abstract`/`app_label`

@@ -53,11 +53,11 @@ class ModelComposition:
             for source in sources:
                 if not source.__name__.isidentifier() or keyword.iskeyword(source.__name__):
                     raise ImproperlyConfigured(f"Invalid generated model name: {source.__name__!r}")
-                key = source._meta.label_lower
-                if key in self.models_by_label:
-                    raise ImproperlyConfigured(f"Duplicate source model label {key!r}")
-                self.models_by_label[key] = source
-        targets = {**(contracts or {}), **self.models_by_label}
+                self._add_target(self.models_by_label, source)
+        targets = dict(contracts or {})
+        for source in self.models_by_label.values():
+            if targets.get(source._meta.label_lower) is not source:
+                self._add_target(targets, source)
         expanded: dict[str, list[type[models.Model]]] = {}
         self._abstract_donors = {
             donor
@@ -175,7 +175,7 @@ class ModelComposition:
                     continue
                 if model._meta.app_label != config.label:
                     raise ImproperlyConfigured(f"{model._meta.label}: expected app_label {config.label!r}")
-                contracts[model._meta.label_lower] = model
+                cls._add_target(contracts, model)
                 if concrete:
                     sources.setdefault(config.label, []).append(model)
                 elif target is not None:
@@ -187,6 +187,20 @@ class ModelComposition:
             owners,
             contracts,
         )
+
+    @staticmethod
+    def _add_target(targets: dict[str, type[models.Model]], model: type[models.Model]) -> None:
+        """Require one declaration for each case-insensitive Django identity."""
+
+        key = model._meta.label_lower
+        previous = targets.get(key)
+        if previous is not None:
+            raise ImproperlyConfigured(
+                f"Duplicate composition target label {key!r}: "
+                f"{previous.__module__}.{previous.__qualname__} and "
+                f"{model.__module__}.{model.__qualname__}"
+            )
+        targets[key] = model
 
     def parent(self, source: type[models.Model]) -> type[models.Model] | None:
         """Return the immediate concrete parent, or None for a root identity."""

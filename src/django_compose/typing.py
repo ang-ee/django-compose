@@ -19,7 +19,7 @@ from django.db import models
 from mypy.checkmember import analyze_member_access
 from mypy.expandtype import expand_type, expand_type_by_instance
 from mypy.maptype import map_instance_to_supertype
-from mypy.mro import calculate_mro
+from mypy.mro import MroError, calculate_mro
 from mypy.nodes import (
     MDEF,
     CallExpr,
@@ -357,6 +357,34 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
         return super().get_additional_deps(file) + [
             self._new_dependency(module) for module in sorted(extra) if module != file.fullname
         ]
+
+    def get_customize_class_mro_hook(self, fullname: str) -> Callable[[ClassDefContext], None] | None:
+        native = super().get_customize_class_mro_hook(fullname)
+        module, _, name = fullname.rpartition(".")
+        model = self.django_context.model_modules.get(module, {}).get(name)
+        if model in self.django_context.static_names:
+            return partial(self._composed_mro, native=native)
+        return native
+
+    def _composed_mro(
+        self, ctx: ClassDefContext, *, native: Callable[[ClassDefContext], None] | None
+    ) -> None:
+        """Recompute native ancestry after source and donor projections settle."""
+
+        if native is not None:
+            native(ctx)
+        previous = ctx.cls.info.mro
+        ctx.cls.info.mro = []
+        try:
+            calculate_mro(ctx.cls.info)
+        except MroError:
+            ctx.cls.info.mro = previous
+            if ctx.api.final_iteration:
+                ctx.api.fail(f"Unresolved composed model MRO {ctx.cls.fullname}", ctx.cls)
+            else:
+                ctx.api.defer()
+        else:
+            ctx.cls.info.bad_mro = False
 
     def get_base_class_hook(self, fullname: str) -> Callable[[ClassDefContext], None] | None:
         native = super().get_base_class_hook(fullname)

@@ -1120,3 +1120,81 @@ class Policy(Composable, extends="coreapp.Record"):
         success=False,
     )
     assert "composes manager 'objects' twice" in result.stderr
+
+
+@pytest.mark.parametrize("first_concrete", [False, True])
+@pytest.mark.parametrize("second_concrete", [False, True])
+@pytest.mark.parametrize("packaged", [False, True])
+def test_competing_composition_target_identities(tmp_path, first_concrete, second_concrete, packaged):
+    first = f"""
+class Record(Composable{", concrete=True" if first_concrete else ""}):
+    class Meta:
+        abstract = True
+class Item(Record, concrete=True):
+    class Meta:
+        abstract = True
+"""
+    second = f"""
+class record(Composable{", concrete=True" if second_concrete else ""}):
+    class Meta:
+        abstract = True
+"""
+    header = "from django.db import models\nfrom django_compose.models import Composable\n"
+    result = run_host(
+        tmp_path,
+        {
+            "coreapp": "" if packaged else first + second,
+            "extraapp": """
+class Policy(Composable, extends="coreapp.Record"):
+    added = models.IntegerField(default=1)
+    class Meta:
+        abstract = True
+""",
+        },
+        "ModelComposition.discover(apps.get_app_configs())",
+        files={
+            "coreapp/models/__init__.py": "from .first import Record, Item\nfrom .second import record\n",
+            "coreapp/models/first.py": header + first,
+            "coreapp/models/second.py": header + second,
+        }
+        if packaged
+        else None,
+        setup="Path('coreapp/models.py').unlink()" if packaged else "",
+        success=False,
+    )
+    assert "Duplicate composition target label 'coreapp.record'" in result.stderr
+    assert ".Record and " in result.stderr
+    assert ".record" in result.stderr
+
+
+def test_reexported_contract_and_source_keep_one_identity(tmp_path):
+    run_host(
+        tmp_path,
+        {
+            "coreapp": """
+class Record(Composable):
+    class Meta:
+        abstract = True
+class Item(Record, concrete=True):
+    class Meta:
+        abstract = True
+RecordAlias = Record
+ItemAlias = Item
+""",
+            "extraapp": """
+class Policy(Composable, extends="coreapp.Record"):
+    added = models.IntegerField(default=1)
+    class Meta:
+        abstract = True
+""",
+        },
+        """
+from coreapp.models import Item
+from extraapp.models import Policy
+composition = ModelComposition.discover(apps.get_app_configs())
+assert tuple(composition.models_by_label) == ("coreapp.item",)
+assert composition.donors(Item) == (Policy,)
+emit_models(composition)
+assert apps.get_model("coreapp", "Item")._meta.get_field("added").default == 1
+""",
+    )
