@@ -845,3 +845,278 @@ assert apps.get_model("coreapp", "Leaf")._meta.get_field("extra").default == 1
     )
     if not valid:
         assert "coreapp.Leaf demands ancestor 'coreapp.parent' through extraapp.Required" in result.stderr
+
+
+def test_abstract_contract_selected_ancestry_and_native_managers(tmp_path):
+    run_host(
+        tmp_path,
+        {
+            "coreapp": """
+class Record(Composable):
+    shared = models.IntegerField(default=0)
+    link = models.ForeignKey("coreapp.Second", null=True, on_delete=models.CASCADE, related_name="+")
+    tags = models.ManyToManyField("coreapp.Second", related_name="+")
+    class Meta:
+        abstract = True
+class Unused(Composable):
+    class Meta:
+        abstract = True
+class CaptureQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        self.model.captured.append((self.db, self._hints.copy(), kwargs))
+        return super().update(**kwargs)
+class DomainQuerySet(CaptureQuerySet):
+    def selected(self):
+        return self.filter(value__gte=0)
+class DomainManager(models.Manager.from_queryset(DomainQuerySet)):
+    def __init__(self, floor):
+        super().__init__()
+        self.floor = floor
+    def get_queryset(self):
+        return super().get_queryset().filter(value__gte=self.floor)
+    def factory(self, value):
+        return self.create(value=value)
+class First(Record, concrete=True):
+    value = models.IntegerField(default=0)
+    objects = DomainManager(0)
+    raw = models.Manager()
+    captured = []
+    class Meta:
+        abstract = True
+        base_manager_name = "raw"
+        default_manager_name = "objects"
+class Second(Record, concrete=True):
+    class Meta:
+        abstract = True
+class Child(Record, inherits="coreapp.First"):
+    class Meta:
+        abstract = True
+""",
+            "extraapp": """
+class Policy(Composable, extends="coreapp.Record"):
+    code = models.IntegerField(default=1)
+    def policy(self):
+        return "enabled"
+    class Meta:
+        abstract = True
+        constraints = [models.CheckConstraint(condition=models.Q(code__gte=0), name="%(class)s_code")]
+class Empty(Composable, extends="coreapp.Unused"):
+    class Meta:
+        abstract = True
+""",
+        },
+        """
+composition = ModelComposition.discover(apps.get_app_configs())
+assert "coreapp.record" not in composition.models_by_label
+emit_models(composition)
+First = apps.get_model("coreapp", "First")
+Second = apps.get_model("coreapp", "Second")
+Child = apps.get_model("coreapp", "Child")
+assert First().policy() == Second().policy() == Child().policy() == "enabled"
+assert First._meta.get_field("code").model is First
+assert Child._meta.get_field("code").model is First
+assert Child._meta.get_field("shared").model is First
+assert Child._meta.get_field("link").model is First
+assert Child._meta.get_field("tags").model is First
+assert Child.tags.through is First.tags.through
+from django.db.migrations.state import ModelState
+assert set(ModelState.from_model(Child).fields) == {"first_ptr"}
+assert Child.compose_contributed_field_origins == ()
+assert First.compose_contributed_field_origins == (("code", "extraapp"),)
+assert First._base_manager.name == "raw"
+assert First._default_manager.name == "objects"
+assert First.objects.db_manager("default", hints={"purpose": "test"})._hints == {"purpose": "test"}
+from django.db import connection
+with connection.schema_editor() as schema:
+    schema.create_model(Second)
+    schema.create_model(First)
+    schema.create_model(Child)
+obj = First.objects.factory(2)
+assert First.objects.selected().get().pk == obj.pk
+assert First._base_manager.get().pk == obj.pk
+assert First.objects.floor == 0
+First.objects.db_manager("default", hints={"capture": True}).selected().update(value=3)
+assert First.captured == [("default", {"capture": True}, {"value": 3})]
+First.raw.create(value=-1)
+assert First.objects.count() == 1
+assert First._base_manager.count() == 2
+child = Child._base_manager.create(value=4, shared=5)
+assert First.raw.get(pk=child.pk).shared == 5
+assert Child._meta.db_table == "coreapp_child"
+""",
+    )
+
+
+def test_abstract_contract_diamond_order_and_cooperative_super(tmp_path):
+    run_host(
+        tmp_path,
+        {
+            "coreapp": """
+class Record(Composable):
+    shared = models.IntegerField(default=0)
+    def chain(self):
+        return ["source"]
+    class Meta:
+        abstract = True
+class Left(Record):
+    class Meta:
+        abstract = True
+class Right(Record):
+    class Meta:
+        abstract = True
+class Item(Left, Right, concrete=True):
+    class Meta:
+        abstract = True
+""",
+            "firstapp": """
+class First(Composable, extends="coreapp.Record"):
+    def chain(self):
+        return ["first", *super().chain()]
+    class Meta:
+        abstract = True
+""",
+            "secondapp": """
+class Second(Composable, extends="coreapp.Record"):
+    def chain(self):
+        return ["second", *super().chain()]
+    class Meta:
+        abstract = True
+""",
+        },
+        """
+composition = ModelComposition.discover(apps.get_app_configs())
+emit_models(composition)
+Item = apps.get_model("coreapp", "Item")
+assert Item().chain() == ["first", "second", "source"]
+assert [field.name for field in Item._meta.local_fields].count("shared") == 1
+""",
+    )
+
+
+@pytest.mark.parametrize("target", ["missing.Record", "coreapp.Missing", "coreapp.Helper"])
+def test_abstract_contract_unknown_or_inherited_helper_target(tmp_path, target):
+    result = run_host(
+        tmp_path,
+        {
+            "coreapp": """
+class Record(Composable):
+    class Meta:
+        abstract = True
+class Helper(Record):
+    class Meta:
+        abstract = True
+""",
+            "extraapp": f"""
+class Policy(Composable, extends={target!r}):
+    class Meta:
+        abstract = True
+""",
+        },
+        "ModelComposition.discover(apps.get_app_configs())",
+        success=False,
+    )
+    assert "extends unknown model" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "declaration, message",
+    [
+        ("value = models.IntegerField(default=1)", "field attribute 'value' twice"),
+        (
+            """class Meta:
+        abstract = True
+        constraints = [models.CheckConstraint(condition=models.Q(value__gte=0), name="same")]""",
+            "constraint 'same' twice",
+        ),
+    ],
+)
+def test_overlapping_abstract_and_concrete_contributions_collide(tmp_path, declaration, message):
+    result = run_host(
+        tmp_path,
+        {
+            "coreapp": """
+class Record(Composable):
+    class Meta:
+        abstract = True
+class Item(Record, concrete=True):
+    class Meta:
+        abstract = True
+""",
+            "firstapp": """
+class First(Composable, extends="coreapp.Record"):
+    value = models.IntegerField(default=0)
+    class Meta:
+        abstract = True
+        constraints = [models.CheckConstraint(condition=models.Q(value__gte=0), name="same")]
+""",
+            "secondapp": f"""
+class Second(Composable, extends="coreapp.Item"):
+    class Meta:
+        abstract = True
+    {declaration}
+""",
+        },
+        "ModelComposition.discover(apps.get_app_configs())",
+        success=False,
+    )
+    assert message in result.stderr
+
+
+def test_explicit_abstract_contract_can_extend_native_abstract_base(tmp_path):
+    run_host(
+        tmp_path,
+        {
+            "coreapp": """
+class Helper(Composable):
+    class Meta:
+        abstract = True
+class Contract(Helper, concrete=False):
+    class Meta:
+        abstract = True
+class Item(Contract, concrete=True):
+    class Meta:
+        abstract = True
+""",
+            "extraapp": """
+class Policy(Composable, extends="coreapp.Contract"):
+    code = models.IntegerField(default=0)
+    class Meta:
+        abstract = True
+""",
+        },
+        """
+composition = ModelComposition.discover(apps.get_app_configs())
+assert tuple(composition.models_by_label) == ("coreapp.item",)
+emit_models(composition)
+assert apps.get_model("coreapp", "Item")._meta.get_field("code").default == 0
+""",
+    )
+
+
+def test_abstract_manager_contribution_cannot_replace_domain_factory(tmp_path):
+    result = run_host(
+        tmp_path,
+        {
+            "coreapp": """
+class Record(Composable):
+    class Meta:
+        abstract = True
+class DomainManager(models.Manager):
+    def factory(self):
+        return self.create()
+class Item(Record, concrete=True):
+    objects = DomainManager()
+    class Meta:
+        abstract = True
+""",
+            "extraapp": """
+class Policy(Composable, extends="coreapp.Record"):
+    objects = models.Manager()
+    class Meta:
+        abstract = True
+""",
+        },
+        "ModelComposition.discover(apps.get_app_configs())",
+        success=False,
+    )
+    assert "composes manager 'objects' twice" in result.stderr

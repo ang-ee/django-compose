@@ -19,7 +19,9 @@ class Composable(models.Model):
     apply only to the class declaring them. ``inherits`` implies concrete.
     ``demands`` applies through the complete MRO and combines with any
     declaration. Every source and mixin must explicitly remain abstract using
-    native Meta. Factories may pass the same keywords to ``type()``.
+    native Meta. Direct Composable bases and explicit ``concrete=False``
+    declarations are addressable abstract contracts without their own tables.
+    Factories may pass the same keywords to ``type()``.
     """
 
     compose_concrete: ClassVar[bool] = False
@@ -45,8 +47,8 @@ class Composable(models.Model):
             raise ImproperlyConfigured(f"{identity}: concrete must be a boolean")
         if sum((concrete is not _UNSET, extends is not None, inherits is not None)) > 1:
             raise ImproperlyConfigured(f"{identity}: concrete, extends and inherits are mutually exclusive")
-        if concrete is True or inherits is not None:
-            cls.compose_concrete = True
+        if concrete is not _UNSET or inherits is not None:
+            cls.compose_concrete = concrete is True or inherits is not None
         for name, value in (
             ("extends", extends),
             ("inherits", inherits),

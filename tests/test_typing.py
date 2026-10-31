@@ -711,3 +711,119 @@ def test_runtime_model_preserves_inherited_native_field_types(tmp_path):
     invalid = check(config, env, source)
     assert invalid.returncode == 1, invalid.stdout + invalid.stderr
     assert invalid.stdout.count("[assignment]") == 2, invalid.stdout + invalid.stderr
+
+
+def test_abstract_contract_shared_donor_has_no_arbitrary_receiver(tmp_path):
+    config, env = host(tmp_path)
+    (tmp_path / "modelapp/models.py").write_text("""
+from django.db import models
+from django_compose.models import Composable
+class Record(Composable):
+    class Meta:
+        abstract = True
+class First(Record, concrete=True):
+    first = models.IntegerField()
+    class Meta:
+        abstract = True
+class Second(Record, concrete=True):
+    second = models.CharField(max_length=20)
+    class Meta:
+        abstract = True
+class Policy(Composable, extends="modelapp.Record"):
+    code = models.IntegerField(default=0)
+    def label(self) -> str:
+        return "policy"
+    class Meta:
+        abstract = True
+""")
+    source = tmp_path / "consumer.py"
+    source.write_text("""
+from typing import assert_type
+from modelapp.models import First, Second, Policy
+
+def consume(first: First, second: Second, donor: Policy) -> None:
+    assert_type(first.code, int)
+    assert_type(second.code, int)
+    assert_type(first.label(), str)
+    assert_type(second.label(), str)
+    assert_type(donor.code, int)
+""")
+    for _ in range(2):
+        result = check(config, env, source)
+        assert result.returncode == 0, result.stdout + result.stderr
+    models_path = tmp_path / "modelapp/models.py"
+    models_path.write_text(
+        models_path.read_text().replace(
+            "code = models.IntegerField(default=0)",
+            "code = models.IntegerField(default=0)\n    extra = models.IntegerField(default=1)",
+        )
+    )
+    source.write_text(
+        source.read_text() + "    assert_type(first.extra, int)\n    assert_type(second.extra, int)\n"
+    )
+    result = check(config, env, source)
+    assert result.returncode == 0, result.stdout + result.stderr
+    source.write_text(source.read_text() + "    donor.second\n")
+    result = check(config, env, source)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert '"Policy" has no attribute "second"' in result.stdout
+
+
+def test_native_models_package_reexports_keep_composition_targets(tmp_path):
+    config, env = host(tmp_path)
+    model_file = tmp_path / "modelapp/models.py"
+    model_file.unlink()
+    package = tmp_path / "modelapp/models"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        "from .connections import Entity as Entity, Child as Child\nfrom .donations import Extra as Extra\n"
+    )
+    (package / "connections.py").write_text("""
+from django.db import models
+from django_compose.models import Composable
+class Entity(Composable, concrete=True):
+    title = models.CharField(max_length=20)
+    class Meta:
+        abstract = True
+class Child(Composable, inherits="modelapp.Entity"):
+    class Meta:
+        abstract = True
+""")
+    (package / "donations.py").write_text("""
+from django.db import models
+from django_compose.models import Composable
+class Extra(Composable, extends="modelapp.Entity"):
+    code = models.IntegerField(default=0)
+    class Meta:
+        abstract = True
+""")
+    (tmp_path / "modelapp/apps.py").write_text(
+        "from django.apps import AppConfig\n"
+        "class Config(AppConfig):\n"
+        "    name = 'modelapp'\n"
+        "    def ready(self):\n"
+        "        import sys\n"
+        "        from django.db import models\n"
+        "        entity = self.apps.get_model('modelapp', 'Entity')\n"
+        "        history = type('HistoricalLink', (models.Model,), {\n"
+        "            '__module__': entity.__module__,\n"
+        "            'Meta': type('Meta', (), {'app_label': 'modelapp'}),\n"
+        "            'entity': models.ForeignKey(entity, on_delete=models.CASCADE),\n"
+        "        })\n"
+        "        setattr(sys.modules[entity.__module__], 'HistoricalLink', history)\n"
+    )
+    source = tmp_path / "consumer.py"
+    source.write_text("""
+from typing import assert_type
+from modelapp.models import Entity, Child
+from typed_runtime.modelapp.models import Entity as RuntimeEntity, HistoricalLink
+
+def consume(entity: Entity, child: Child, runtime: RuntimeEntity, history: HistoricalLink) -> None:
+    assert_type(entity.code, int)
+    assert_type(child.title, str)
+    assert_type(child.code, int)
+    assert_type(runtime.title, str)
+    assert_type(history.entity, RuntimeEntity)
+""")
+    result = check(config, env, source)
+    assert result.returncode == 0, result.stdout + result.stderr

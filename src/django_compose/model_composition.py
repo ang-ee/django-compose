@@ -39,12 +39,12 @@ class ModelComposition:
         sources_by_label: dict[str, tuple[type[models.Model], ...]],
         extensions: dict[str, tuple[type[models.Model], ...]],
         model_owners: dict[type[models.Model], str] | None = None,
+        contracts: Mapping[str, type[models.Model]] | None = None,
     ) -> None:
         self.sources_by_label = {
             label: tuple(sorted(sources, key=lambda item: item.__name__))
             for label, sources in sorted(sources_by_label.items())
         }
-        self.extensions = extensions
         self._owners = model_owners or {}
         self.models_by_label: dict[str, type[models.Model]] = {}
         for label, sources in self.sources_by_label.items():
@@ -57,13 +57,33 @@ class ModelComposition:
                 if key in self.models_by_label:
                     raise ImproperlyConfigured(f"Duplicate source model label {key!r}")
                 self.models_by_label[key] = source
+        targets = {**(contracts or {}), **self.models_by_label}
+        expanded: dict[str, list[type[models.Model]]] = {}
+        self._abstract_donors = {
+            donor
+            for target, donors in extensions.items()
+            if target not in self.models_by_label
+            for donor in donors
+        }
         for target, donors in extensions.items():
-            if target not in self.models_by_label:
+            if target not in targets:
                 raise ImproperlyConfigured(
                     f"{', '.join(donor._meta.label for donor in donors)} extends unknown model {target!r}"
                 )
             if any(donor not in self._owners for donor in donors):
                 raise ImproperlyConfigured("Django app ownership is required for extension donors")
+            declaration = targets[target]
+            for key, source in self.models_by_label.items():
+                if source is declaration or (
+                    target not in self.models_by_label and declaration in source.__mro__
+                ):
+                    selected = expanded.setdefault(key, [])
+                    selected.extend(donor for donor in donors if donor not in selected)
+        donor_order = {donor: index for index, donor in enumerate(self._owners)}
+        self.extensions = {
+            key: tuple(sorted(donors, key=lambda donor: donor_order[donor]))
+            for key, donors in expanded.items()
+        }
         graph = {}
         for key, source in sorted(self.models_by_label.items()):
             parent_ref = vars(source).get("compose_inherits")
@@ -84,6 +104,16 @@ class ModelComposition:
             for key, edges in graph.items()
         }
         self.ordered_models = tuple(self.models_by_label[key] for key in order)
+        for source in self.ordered_models:
+            ancestor = self.parent(source)
+            inherited_donors: set[type[models.Model]] = set()
+            while ancestor is not None:
+                inherited_donors.update(self.donors(ancestor))
+                ancestor = self.parent(ancestor)
+            key = source._meta.label_lower
+            self.extensions[key] = tuple(
+                donor for donor in self.donors(source) if donor not in inherited_donors
+            )
         self.labels = tuple(self.sources_by_label)
         for model in (*self.ordered_models, *(donor for donors in extensions.values() for donor in donors)):
             module = sys.modules.get(model.__module__)
@@ -95,6 +125,7 @@ class ModelComposition:
         self._contributions: dict[
             type[models.Model], tuple[tuple[models.Field[Any, Any], type[models.Model] | None], ...]
         ] = {}
+        self._inherited_field_names: dict[type[models.Model], tuple[str, ...]] = {}
         self._validate_additions()
         self._constraints = {source: self._resolve_constraints(source) for source in self.ordered_models}
 
@@ -105,6 +136,7 @@ class ModelComposition:
         sources: dict[str, list[type[models.Model]]] = {}
         donors: dict[str, list[type[models.Model]]] = {}
         owners: dict[type[models.Model], str] = {}
+        contracts: dict[str, type[models.Model]] = {}
         for config in configs:
             if config.models_module is None:
                 continue
@@ -133,20 +165,27 @@ class ModelComposition:
                 if type(concrete) is not bool:
                     raise ImproperlyConfigured(f"{model._meta.label}.compose_concrete must be a boolean")
                 target = own.get("compose_extends")
-                if not concrete and target is None:
+                if (
+                    not concrete
+                    and target is None
+                    and "compose_concrete" not in own
+                    and Composable not in model.__bases__
+                ):
+                    # Inherited declaration markers do not opt helpers into discovery.
                     continue
                 if model._meta.app_label != config.label:
                     raise ImproperlyConfigured(f"{model._meta.label}: expected app_label {config.label!r}")
+                contracts[model._meta.label_lower] = model
                 if concrete:
                     sources.setdefault(config.label, []).append(model)
-                else:
-                    assert target is not None
+                elif target is not None:
                     donors.setdefault(target, []).append(model)
                 owners[model] = config.name
         return cls(
             {key: tuple(value) for key, value in sources.items()},
             {key: tuple(value) for key, value in donors.items()},
             owners,
+            contracts,
         )
 
     def parent(self, source: type[models.Model]) -> type[models.Model] | None:
@@ -156,6 +195,10 @@ class ModelComposition:
     def donors(self, source: type[models.Model]) -> tuple[type[models.Model], ...]:
         """Return additive donors in native enabled-app and declaration order."""
         return self.extensions.get(source._meta.label_lower, ())
+
+    def inherited_field_names(self, source: type[models.Model]) -> tuple[str, ...]:
+        """Return identical abstract fields already stored by a concrete ancestor."""
+        return self._inherited_field_names[source]
 
     def contributed_fields(self, source: type[models.Model]) -> tuple[models.Field[Any, Any], ...]:
         """Return the native fields added by donors, excluding source-owned ancestry."""
@@ -265,6 +308,7 @@ class ModelComposition:
                     for manager in contributor._meta.managers
                 )
                 ancestor = self.parent(ancestor)
+            inherited_copies: set[str] = set()
             local_names: dict[str, models.Field[Any, Any]] = {}
             local_columns: dict[str, models.Field[Any, Any]] = {}
             for contributor in (*self.donors(source), source):
@@ -282,6 +326,14 @@ class ModelComposition:
                         )
                 for native in _fields(contributor):
                     if native.name in inherited_names or native.attname in inherited_names:
+                        previous_field = inherited.get(native.name)
+                        if (
+                            previous_field is not None
+                            and previous_field.creation_counter == native.creation_counter
+                        ):
+                            if native.concrete or native.many_to_many:
+                                inherited_copies.update((native.name, native.attname))
+                            continue
                         raise ImproperlyConfigured(
                             f"{source._meta.label} redeclares parent field {native.name!r}"
                         )
@@ -306,9 +358,13 @@ class ModelComposition:
                     if manager.auto_created:
                         continue
                     previous_manager = managers.setdefault(manager.name, manager)
-                    if (
-                        contributor is not source
-                        and previous_manager.creation_counter != manager.creation_counter
+                    abstract_override = contributor is source and any(
+                        donor in self._abstract_donors
+                        and donor._meta.managers_map.get(manager.name) is previous_manager
+                        for donor in self.donors(source)
+                    )
+                    if previous_manager.creation_counter != manager.creation_counter and (
+                        contributor is not source or abstract_override
                     ):
                         raise ImproperlyConfigured(
                             f"{source._meta.label} composes manager {manager.name!r} twice"
@@ -316,6 +372,7 @@ class ModelComposition:
             self._validate_field_managers(
                 source, local_names.keys() | inherited_names, managers.keys() | inherited_managers
             )
+            self._inherited_field_names[source] = tuple(sorted(inherited_copies))
             inherited_fields[source] = {**inherited, **{name: item[0] for name, item in fields.items()}}
             self._contributions[source] = tuple(
                 (native, owner)

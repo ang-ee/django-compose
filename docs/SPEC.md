@@ -45,7 +45,7 @@ keywords are:
 | Keyword | Declaration | Inherited through abstract Python bases |
 | --- | --- | --- |
 | `concrete=True` | Generate a new concrete model identity | No |
-| `extends="label.Model"` | Contribute an extension class to that identity | No |
+| `extends="label.Model"` | Contribute to an identity or abstract contract | No |
 | `inherits="label.Model"` | Generate a concrete child of a multi-table parent | No |
 | `demands="label.Model"` | Require this concrete ancestor | Yes |
 
@@ -63,15 +63,24 @@ Only `demands` propagates as a declaration requirement through the MRO.
 Discovery reads each selected AppConfig's native `models_module` exports,
 including model packages and custom `import_models()` hooks. Foreign reexports,
 ordinary native models and abstract helpers carrying only inherited concrete or
-extension markers do not become declarations. A concrete class with its own
-composition markers is rejected.
+extension markers do not become declarations. An app-owned abstract class directly
+inheriting `Composable`, or explicitly declaring `concrete=False`, is also an
+addressable contract without generating a table. An extension targeting that
+contract contributes to selected source models whose native abstract ancestry
+includes it. A known selected contract may have no concrete
+participants; an unselected or unknown target fails. Contributions inherited through
+a generated concrete parent are emitted on that parent once. A concrete class
+with its own composition markers is rejected.
 
 Generated bases are extension classes in selected app/declaration order, the
 source model, then its concrete parent. Django clones fields and resolves the
 native method-resolution order. Shared abstract ancestry contributes once. The
 first extension manager overrides a source manager; distinct extensions
-claiming one manager name fail. Field-name, attname, same-table database-column,
-field/manager and parent-field redeclaration collisions fail. Native generated
+claiming one manager name fail. Abstract-contract donors cannot replace a
+source's same-named manager; competing declarations fail rather than discard
+source factories, queryset behavior or manager configuration. Field-name, attname,
+same-table database-column, field/manager and parent-field redeclaration collisions
+fail. Native generated
 metadata also checks inherited and automatically created managers and refuses
 integration literals that replace structural fields, including implicit MTI
 parent links and their attnames, before artifact hooks or ready callbacks.

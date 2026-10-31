@@ -53,14 +53,42 @@ class Rating(Composable, extends="catalog.Item"):
 
 With both apps selected, the generated `catalog.Item` has `title`, `rating`,
 `describe()` and `is_recommended()`. `Rating` adds no table, parent link or
-registered model. Its `extends` target must be a declared concrete model in the
-selected apps. Targets use `app_label.Model`, with Django's case-insensitive
-model-name lookup.
+registered model. Its `extends` target must be a selected concrete declaration
+or an explicit abstract contract. Targets use `app_label.Model`, with Django's
+case-insensitive model-name lookup.
 
 The extension is an extra abstract base of the generated model. This lets an
 optional app contribute to a shared model without editing the app that defines
 it. It differs from putting a ForeignKey to an independent `Rating` model: here
 the rating is a column on each item.
+
+## Extend a shared abstract contract
+
+A selected app can export an abstract contract without generating its own table:
+
+```python
+class Record(Composable):
+    class Meta:
+        abstract = True
+
+
+class Item(Record, concrete=True):
+    class Meta:
+        abstract = True
+```
+
+An optional app can declare `class Rating(Composable, extends="catalog.Record")`
+to contribute to every selected source using `Record` in its native abstract
+ancestry. A contract directly inherits `Composable` or explicitly declares
+`concrete=False`; inheriting another class's markers does not opt a helper in.
+Export it from the selected app's native models module or models package. A
+known selected contract may have no concrete participants. `Record` itself is
+never a relation target or registered concrete model.
+
+Concrete children inherit contributions stored on their parent once, including
+shared abstract fields and M2M through tables. Abstract contributions cannot
+replace a source's same-named manager: preserve the source factory and queryset
+owner; competing manager declarations fail.
 
 ## Create a child with its own table
 

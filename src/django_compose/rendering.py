@@ -60,6 +60,10 @@ def render_models(
             f'    """Concrete {name} composed from native abstract models."""',
         ]
         body.extend(
+            f"    {field_name} = {parent_name}.{field_name}"
+            for field_name in composition.inherited_field_names(source)
+        )
+        body.extend(
             f"    {key} = {render_literal(value)}" for key, value in sorted(declaration.attributes.items())
         )
         body.extend(

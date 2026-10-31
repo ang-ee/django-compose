@@ -94,7 +94,7 @@ class CompositionContext(DjangoContext):
         self.static_names: dict[type[models.Model], str] = {}
         self.parents: dict[str, str] = {}
         self.required_ancestors: dict[type[models.Model], type[models.Model]] = {}
-        self.fields: dict[str, tuple[str, tuple[str, ...]]] = {}
+        self.fields: dict[str, list[tuple[str, tuple[str, ...]]]] = {}
         self.members: dict[str, dict[str, _Member]] = {}
         self.dependencies: dict[str, set[str]] = {}
 
@@ -103,6 +103,10 @@ class CompositionContext(DjangoContext):
 
         composition = ModelComposition.discover(tuple(self.apps_registry.get_app_configs()))
         self.required_ancestors = composition.required_ancestors
+        donor_targets: dict[type[models.Model], list[type[models.Model]]] = {}
+        for source in composition.ordered_models:
+            for donor in composition.donors(source):
+                donor_targets.setdefault(donor, []).append(source)
         for source in composition.ordered_models:
             name = helpers.get_class_fullname(source)
             concrete = self.apps_registry.get_model(source._meta.app_label, source.__name__)
@@ -114,13 +118,18 @@ class CompositionContext(DjangoContext):
             donors = composition.donors(source)
             for donor in donors:
                 donor_name = helpers.get_class_fullname(donor)
-                self.composed[donor_name] = concrete
-                self.parents[donor_name] = name
-                self.fields[donor_name] = (
-                    name,
-                    tuple(
-                        field.name for field in composition.contributed_fields(source) if field.model is donor
-                    ),
+                if len(donor_targets[donor]) == 1:
+                    self.composed[donor_name] = concrete
+                    self.parents[donor_name] = name
+                self.fields.setdefault(donor_name, []).append(
+                    (
+                        name,
+                        tuple(
+                            field.name
+                            for field in composition.contributed_fields(source)
+                            if field.model is donor
+                        ),
+                    )
                 )
             selected: dict[str, _Member] = {}
             self.members[name] = selected
@@ -383,9 +392,7 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
             for _name, model in sorted(self.django_context.model_modules.get(module_name, {}).items()):
                 if model not in self.django_context.static_names:
                     self.project_model(ctx, model)
-        contribution = self.django_context.fields.get(ctx.cls.fullname)
-        if contribution:
-            target_name, fields = contribution
+        for target_name, fields in self.django_context.fields.get(ctx.cls.fullname, ()):
             target = self.lookup_fully_qualified(target_name)
             assert target is not None and isinstance(target.node, TypeInfo)
             for name in fields:
