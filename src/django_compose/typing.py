@@ -391,6 +391,16 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
         return partial(self._model_contract, native=native) if native else None
 
     def _model_contract(self, ctx: ClassDefContext, *, native: Callable[[ClassDefContext], None]) -> None:
+        # Native TypeInfo metadata is the independent-plugin channel. Publish the
+        # discovery owner's selected identity, never a guessed abstract receiver.
+        facts = ctx.cls.info.metadata.setdefault("django_compose", {})
+        facts.pop("runtime_model", None)
+        selected = self.django_context.composed.get(ctx.cls.fullname)
+        if selected is not None and not selected._meta.abstract:
+            facts["runtime_model"] = helpers.get_class_fullname(selected)
+            ctx.api.add_plugin_dependency(make_trigger(facts["runtime_model"]))
+        elif not facts:
+            ctx.cls.info.metadata.pop("django_compose", None)
         parent_name = self.django_context.parents.get(ctx.cls.fullname)
         if parent_name:
             parent = self.lookup_fully_qualified(parent_name)
@@ -422,7 +432,12 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
                     self.project_model(ctx, model)
         for target_name, fields in self.django_context.fields.get(ctx.cls.fullname, ()):
             target = self.lookup_fully_qualified(target_name)
-            assert target is not None and isinstance(target.node, TypeInfo)
+            if target is None or not isinstance(target.node, TypeInfo) or not target.node.mro:
+                if ctx.api.final_iteration:
+                    ctx.api.fail(f"Unresolved composition target {target_name}", ctx.cls)
+                else:
+                    ctx.api.defer()
+                return
             for name in fields:
                 symbol = ctx.cls.info.get(name)
                 if symbol is None:

@@ -564,3 +564,20 @@ packaging and django-yamlconf are base dependencies; typing is optional.
 into django-stubs TypeInfo in memory, including missing runtime-module symbols.
 It writes no source or stub files; custom constructor/generic specialization stays
 with the dependency's native field owner.
+
+Independent mypy plugins may read an authored model TypeInfo's
+`metadata["django_compose"]["runtime_model"]`: a string containing the actual
+selected runtime model fullname. The compiler publishes this fact for selected
+sources and donors with exactly one target. Unselected, genuinely abstract and
+multi-target donor declarations have no `runtime_model` entry; consumers must
+retain their native unresolved/abstract contract rather than choose a target.
+This metadata does not replace either TypeInfo or change concrete model identity.
+The separate top-level `compose_runtime_model` marker identifies synthetic
+runtime TypeInfos and is not this source-to-runtime channel.
+
+The existing composition snapshot/config digest and authored/generated module
+dependencies invalidate these cached facts. Model analysis removes the previous
+identity before republishing the current discovery result, including after donor
+removal, retargeting or a target becoming ambiguous. Consumers add their own
+native descriptor/member dependencies; they need neither another composition
+context nor access to the plugin chain's private implementation.
