@@ -97,6 +97,7 @@ class CompositionContext(DjangoContext):
         self.fields: dict[str, list[tuple[str, tuple[str, ...]]]] = {}
         self.members: dict[str, dict[str, _Member]] = {}
         self.dependencies: dict[str, set[str]] = {}
+        self.queryset_managers: dict[str, dict[str, str]] = {}
 
         # The same discovery owner serves builds and optional static analysis.
         from django_compose.model_composition import ModelComposition
@@ -115,6 +116,10 @@ class CompositionContext(DjangoContext):
             parent = composition.parent(source)
             if parent is not None:
                 self.parents[name] = helpers.get_class_fullname(parent)
+            self.queryset_managers[name] = {
+                manager_name: helpers.get_class_fullname(type(concrete._meta.managers_map[manager_name]))
+                for manager_name in composition.queryset_contributions(source)
+            }
             donors = composition.donors(source)
             for donor in donors:
                 donor_name = helpers.get_class_fullname(donor)
@@ -623,6 +628,18 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
         )
 
     def _project_members(self, target: TypeInfo, function_type: Instance) -> None:
+        # Source from_queryset assignments are analyzed after the native model
+        # transformer. Project only the explicit composed manager slots after
+        # that analysis; django-stubs owns their types and method forwarding.
+        for name, fullname in self.django_context.queryset_managers.get(target.fullname, {}).items():
+            manager = self.lookup_fully_qualified(fullname)
+            if manager is not None and isinstance(manager.node, TypeInfo) and target.self_type is not None:
+                helpers.add_new_sym_for_info(
+                    target,
+                    name=name,
+                    sym_type=helpers.fill_manager(manager.node, target.self_type),
+                    is_classvar=True,
+                )
         for name in target.metadata.pop("compose_members", {}):
             symbol = target.names.get(name)
             if symbol and symbol.plugin_generated and isinstance(symbol.node, Var):

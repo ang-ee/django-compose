@@ -87,6 +87,43 @@ parent links and their attnames, before artifact hooks or ready callbacks.
 Unknown targets,
 parent or module dependency cycles, and unmet ancestor demands fail explicitly.
 
+An extension donor may explicitly declare `compose_querysets = {"objects":
+CapabilityQuerySet, "unfiltered": TrackingQuerySet}`. Each key names an existing
+native manager; `objects` may also select Django's implicit default when no
+manager is declared. Contributions extend that manager's QuerySet, not another
+manager's policy. Ordinary colliding donor managers keep the rules above.
+Donor mappings follow native MRO; contributions follow enabled-app/declaration
+order, then inherited concrete-parent contributions and the source QuerySet.
+Duplicate classes and redundant ancestors collapse before Python checks C3.
+Unrelated classes claiming the same new public QuerySet method fail; native
+QuerySet hooks may compose cooperatively through `super()`.
+
+The renderer emits named generic QuerySet and stable Manager subclasses, using
+Django's `Manager.from_queryset` for forwarding and manager-method precedence.
+An authored manager method that would bypass a contributed method is refused;
+native forwarding wrappers remain valid. Original manager ancestry, factories,
+constructor arguments, keyword configuration, default/base manager names,
+database alias and hints survive. Named managers are independent: contributing
+to `objects` never implicitly filters a base manager. Custom `get_queryset`
+overrides must cooperate with `super().get_queryset()` and `_queryset_class`.
+The compiler does not execute arbitrary manager/queryset code or infer policy
+to prove cooperation. QuerySet classes must be importable. Native anonymous
+`from_queryset`/`as_manager` factories are preserved; other anonymous manager
+classes, custom manager deconstruction, post-construction state that its
+constructor cannot reconstruct, and values Django cannot serialize fail.
+
+`use_in_migrations` managers deconstruct to their stable generated Manager
+class, including those originally created with `as_manager`. Native Django
+migration semantics omit manager database binding/hints. Clean/rebuild restores
+the same imports while declarations remain selected. Generated class imports
+are dependencies of retained migrations: before removing or renaming their
+source model, manager, contribution or provider, projects must retain the
+required implementation through project-owned migration helper imports or
+complete an authorized history migration. Run `check_migrations --imports` and
+native loader/state checks; the offline import audit checks module/provider
+availability, not arbitrary referenced attributes. Generated modules are never
+hand-edited to preserve historical names.
+
 The source's `Meta` is preserved. Extension classes may author native
 `constraints`, `abstract` and `app_label` options; other authored native options
 are refused. Constraint selection preserves shared ancestry and rejects duplicate
@@ -94,7 +131,8 @@ effective names using Django's interpolation rules.
 
 `ModelComposition` exposes `ordered_models`, `models_by_label`, `donors(source)`,
 `parent(source)`, `contributed_fields(source)` and
-`contributed_field_origins(source)`. Generated models expose
+`contributed_field_origins(source)`, `queryset_contributions(source)` and
+`default_manager_name(source)`. Generated models expose
 `compose_contributed_field_origins` as sorted `(field_name, declaring_app_name)`
 pairs. See [model examples](models.md) for usage.
 
@@ -465,7 +503,7 @@ recorder rows. Native `migrate` owns application and recording.
 
 `migrations.check_native_history(apps, *, labels)` compares native graph state
 with effective composed state without database access. `migrations.history_labels()`
-reads retained labels from the build record. Compiler revision is 2; the receipt
+reads retained labels from the build record. Compiler revision is 3; the receipt
 schema is unchanged. For the prerelease cutoff and retained historical files,
 see [upgrade guidance](migrations.md#upgrade-from-the-removed-prerelease-protocol).
 

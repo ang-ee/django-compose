@@ -90,6 +90,50 @@ shared abstract fields and M2M through tables. Abstract contributions cannot
 replace a source's same-named manager: preserve the source factory and queryset
 owner; competing manager declarations fail.
 
+## Contribute QuerySet behavior without replacing managers
+
+A donor explicitly selects each manager it extends:
+
+```python
+from typing import Self
+
+
+class RatingQuerySet[T: models.Model](models.QuerySet[T]):
+    def recommended(self) -> Self:
+        return self.filter(rating__gte=4)
+
+
+class Rating(Composable, extends="catalog.Record"):
+    rating = models.PositiveSmallIntegerField(default=0)
+    compose_querysets = {"objects": RatingQuerySet}
+
+    class Meta:
+        abstract = True
+```
+
+Selected participants retain their domain manager factories and constructor
+configuration. `Item.objects.recommended()` and subsequent native queryset
+chains use the composed QuerySet. Use generic QuerySets and `Self` for fluent
+methods so django-stubs preserves the complete composed chain. A custom manager
+`get_queryset()` must use `super().get_queryset()`; directly constructing its
+old QuerySet bypasses the declared composition. Composition never invokes that
+method at build time or invents an actor/request context.
+
+Select an unfiltered/tracking base manager separately, for example
+`compose_querysets = {"objects": RatingQuerySet, "unfiltered": TrackingQuerySet}`.
+The source owns those manager names and its `Meta.default_manager_name` and
+`Meta.base_manager_name`. An absent name fails, except Django's ordinary implicit
+`objects` when the model declares no manager. Colliding ordinary donor manager
+instances are not automatically merged. Competing new methods and manager
+methods that bypass a contribution fail; native QuerySet write hooks can
+cooperate through `super()` in selected donor order.
+
+Migration-enabled composed managers use stable generated class imports. Keep
+source/provider dependencies while retained migrations require them. Before
+removing declarations, migrate historical references to project-owned helpers
+or complete an authorized history migration; audit with
+`check_migrations --imports` plus native migration loader/state checks.
+
 ## Create a child with its own table
 
 Append this declaration in `catalog/models.py`:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import keyword
+from collections.abc import Mapping
 from typing import Any, ClassVar
 
 from django.core.exceptions import ImproperlyConfigured
@@ -21,13 +22,15 @@ class Composable(models.Model):
     declaration. Every source and mixin must explicitly remain abstract using
     native Meta. Direct Composable bases and explicit ``concrete=False``
     declarations are addressable abstract contracts without their own tables.
-    Factories may pass the same keywords to ``type()``.
+    Factories may pass the same keywords to ``type()``. Extension donors may
+    explicitly map manager names to QuerySet classes with ``compose_querysets``.
     """
 
     compose_concrete: ClassVar[bool] = False
     compose_extends: ClassVar[str | None] = None
     compose_inherits: ClassVar[str | None] = None
     compose_demands: ClassVar[str | None] = None
+    compose_querysets: ClassVar[Mapping[str, type[models.QuerySet[Any, Any]]]] = {}
 
     class Meta:
         abstract = True

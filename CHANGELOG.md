@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add explicit donor `compose_querysets` mappings, preserving native domain
+  managers, constructor configuration, named base/default managers and fluent
+  source/runtime typing. Emit stable migration manager imports; compiler
+  revision 3 requires recomposition of previous receipts.
+
 ## 0.1.0.dev8
 
 - Replace reusable transition discovery, binding, baseline/adoption and sealing

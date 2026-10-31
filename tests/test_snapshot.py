@@ -528,8 +528,8 @@ def test_compiler_revision_invalidates_previous_receipts(tmp_path, monkeypatch):
     root.mkdir()
     monkeypatch.syspath_prepend(str(tmp_path))
     current = snapshot(())
-    previous = replace(current, compiler="django-compose:1")
-    assert current.compiler == "django-compose:2"
+    previous = replace(current, compiler="django-compose:2")
+    assert current.compiler == "django-compose:3"
     assert current.digest() != previous.digest()
     (root / "__init__.py").write_text(Receipt((), (), previous.digest(), {}, previous.compiler).source())
     with pytest.raises(ImproperlyConfigured, match="compose"):

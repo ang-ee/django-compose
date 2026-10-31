@@ -827,3 +827,110 @@ def consume(entity: Entity, child: Child, runtime: RuntimeEntity, history: Histo
 """)
     result = check(config, env, source)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_explicit_queryset_contributions_type_source_and_runtime_cold_warm(tmp_path):
+    config, env = host(tmp_path)
+    (tmp_path / "modelapp/models.py").write_text("""
+from __future__ import annotations
+from typing import Self
+from django.db import models
+from django_compose.models import Composable
+class Contract(Composable):
+    class Meta:
+        abstract = True
+class DomainQuerySet[T: Contract](models.QuerySet[T]):
+    def named(self, name: str) -> Self:
+        return self.filter(title=name)
+_DomainManager = models.Manager.from_queryset(DomainQuerySet)
+class DomainManager[T: Contract](_DomainManager[T]):
+    use_in_migrations = True
+    def label(self) -> str:
+        return "domain"
+class Item(Contract, concrete=True):
+    title = models.CharField(max_length=30)
+    objects = DomainManager.from_queryset(DomainQuerySet)()
+    class Meta:
+        abstract = True
+class Other(Contract, concrete=True):
+    title = models.CharField(max_length=30)
+    objects = DomainManager()
+    class Meta:
+        abstract = True
+class CapabilityQuerySet[T: models.Model](models.QuerySet[T]):
+    def scoped(self) -> Self:
+        return self.all()
+class Scope(Composable, extends='modelapp.Contract'):
+    compose_querysets = {'objects': CapabilityQuerySet}
+    class Meta:
+        abstract = True
+""")
+    consumer = tmp_path / "consumer.py"
+    consumer.write_text("""
+from typing import assert_type
+from modelapp.models import Item, Other
+from typed_runtime.modelapp.models import Item as RuntimeItem
+assert_type(Item.objects.label(), str)
+assert_type(Item.objects.scoped().named('a').get(), Item)
+assert_type(Other.objects.named('b').scoped().get(), Other)
+assert_type(RuntimeItem.objects.scoped().named('a').get(), RuntimeItem)
+""")
+    for _ in range(2):
+        result = check(config, env, consumer)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    env = {**env, "DJANGO_COMPOSE_MODE": "write"}
+    history = tmp_path / "typed_runtime/modelapp/migrations/0001_manager.py"
+    history.write_text("""
+from django.db import migrations
+from typed_runtime.modelapp.models import _Compose4Item7objectsManager
+class Migration(migrations.Migration):
+    dependencies = []
+    operations = [migrations.AlterModelManagers(
+        name='item', managers=[('objects', _Compose4Item7objectsManager())])]
+""")
+    audit = """
+import django
+django.setup()
+from django.db import connection
+from unittest.mock import patch
+from django_compose.migration_imports import MigrationImportReport
+with patch.object(connection, 'cursor', side_effect=AssertionError('audit connected')):
+    report = MigrationImportReport()
+    imports = report.collect()
+assert any(item.module == 'typed_runtime.modelapp.models' for item in imports)
+assert any(item.module == 'modelapp.models' for item in imports)
+from importlib import import_module
+history = import_module('typed_runtime.modelapp.migrations.0001_manager')
+manager = history.Migration.operations[0].managers[0][1]
+assert manager.deconstruct()[1].endswith('_Compose4Item7objectsManager')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", audit], cwd=tmp_path, env=env, text=True, capture_output=True, timeout=30
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    clean = (
+        "import django; django.setup(); from django_compose.build import clean; "
+        "from pathlib import Path; clean(Path('typed_runtime'))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", clean], cwd=tmp_path, env=env, text=True, capture_output=True, timeout=30
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert history.exists()
+    assert not (tmp_path / "typed_runtime/modelapp/models.py").exists()
+    result = check(config, env, consumer)
+    assert result.returncode == 0, result.stdout + result.stderr
+    result = subprocess.run(
+        [sys.executable, "-c", audit], cwd=tmp_path, env=env, text=True, capture_output=True, timeout=30
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    models_file = tmp_path / "modelapp/models.py"
+    models_file.write_text(models_file.read_text().replace("def scoped(", "def renamed("))
+    consumer.write_text(consumer.read_text().replace(".scoped()", ".renamed()"))
+    result = check(config, env, consumer)
+    assert result.returncode == 0, result.stdout + result.stderr
+    consumer.write_text(consumer.read_text() + "\nItem.objects.scoped()\n")
+    result = check(config, env, consumer)
+    assert result.returncode != 0
+    assert 'has no attribute "scoped"' in result.stdout
