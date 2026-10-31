@@ -195,6 +195,7 @@ class Scope(Composable, extends='coreapp.Contract'):
     ("source_change", "donor_change", "message"),
     [
         ("    def update(self, **kwargs): return 0\n", "", "bypasses QuerySet contribution"),
+        ("    update = models.Manager.get\n", "", "bypasses QuerySet contribution"),
         ("", "    def named(self, title): return self.all()\n", "competing QuerySet method"),
         ("", "", "manager state cannot be reconstructed"),
     ],
@@ -392,5 +393,309 @@ assert Item._default_manager.name == 'objects'
 assert Item._base_manager.name == '_angee_base'
 assert Item._base_manager.tracked().model is Item
 assert not hasattr(Item.objects, 'tracked')
+""",
+    )
+
+
+@pytest.mark.parametrize(
+    ("parent_manager", "child_field", "message"),
+    [
+        ("custom = models.Manager()", "", "missing manager 'objects'"),
+        ("", "objects = models.IntegerField()", "field and manager 'objects' twice"),
+    ],
+)
+def test_implicit_objects_never_ignores_parent_managers_or_shadows_fields(
+    tmp_path, parent_manager, child_field, message
+):
+    result = run_host(
+        tmp_path,
+        {
+            "coreapp": f"""
+class Parent(Composable, concrete=True):
+    {parent_manager or "pass"}
+    class Meta:
+        abstract = True
+class Child(Composable, inherits='coreapp.Parent'):
+    {child_field or "pass"}
+    class Meta:
+        abstract = True
+""",
+            "extraapp": """
+class CapabilityQuerySet(models.QuerySet):
+    def capability(self): return self.all()
+class Scope(Composable, extends='coreapp.Child'):
+    compose_querysets = {'objects': CapabilityQuerySet}
+    class Meta:
+        abstract = True
+""",
+        },
+        "ModelComposition.discover(apps.get_app_configs())",
+        success=False,
+    )
+    assert message in result.stderr
+
+
+def test_native_parent_donor_manager_survives_shared_contract_and_child_queryset(tmp_path):
+    run_host(
+        tmp_path,
+        {
+            "coreapp": """
+class DomainManager(models.Manager):
+    def factory(self): return 'domain'
+class Contract(Composable):
+    objects = DomainManager()
+    class Meta:
+        abstract = True
+class Parent(Contract, concrete=True):
+    class Meta:
+        abstract = True
+class Child(Contract, inherits='coreapp.Parent'):
+    class Meta:
+        abstract = True
+""",
+            "extraapp": """
+class DonorManager(models.Manager):
+    def factory(self): return 'parent donor'
+class ParentDonor(Composable, extends='coreapp.Parent'):
+    objects = DonorManager()
+    class Meta:
+        abstract = True
+class ChildQuerySet(models.QuerySet):
+    def capability(self): return self.all()
+class ChildDonor(Composable, extends='coreapp.Child'):
+    compose_querysets = {'objects': ChildQuerySet}
+    class Meta:
+        abstract = True
+""",
+        },
+        """
+composition = ModelComposition.discover(apps.get_app_configs())
+emit_models(composition)
+Parent = apps.get_model('coreapp', 'Parent')
+Child = apps.get_model('coreapp', 'Child')
+assert Parent.objects.factory() == Child.objects.factory() == 'parent donor'
+assert Child.objects.capability().model is Child
+""",
+    )
+
+
+def test_native_inherited_donor_default_is_preserved_before_child_manager_becomes_local(tmp_path):
+    run_host(
+        tmp_path,
+        {
+            "coreapp": """
+class Parent(Composable, concrete=True):
+    class Meta:
+        abstract = True
+class Child(Composable, inherits='coreapp.Parent'):
+    class Meta:
+        abstract = True
+""",
+            "extraapp": """
+class ParentDonor(Composable, extends='coreapp.Parent'):
+    raw = models.Manager()
+    other = models.Manager()
+    class Meta:
+        abstract = True
+class ChildQuerySet(models.QuerySet):
+    def capability(self): return self.all()
+class ChildDonor(Composable, extends='coreapp.Child'):
+    compose_querysets = {'other': ChildQuerySet}
+    class Meta:
+        abstract = True
+""",
+        },
+        """
+composition = ModelComposition.discover(apps.get_app_configs())
+emit_models(composition)
+Parent = apps.get_model('coreapp', 'Parent')
+Child = apps.get_model('coreapp', 'Child')
+assert Parent._default_manager.name == Child._default_manager.name == 'raw'
+assert Child.other.capability().model is Child
+assert set(apps.all_models['coreapp']) == {'parent', 'child'}
+""",
+    )
+
+
+@pytest.mark.parametrize("explicit_default", [False, True])
+@pytest.mark.parametrize("inherit_meta", [False, True])
+@pytest.mark.parametrize("parent_contributed", [False, True])
+def test_parent_local_slot_order_and_nonfirst_default_match_native_baseline(
+    tmp_path, explicit_default, inherit_meta, parent_contributed
+):
+    source = f"""
+class Parent(Composable, concrete=True):
+    z = models.Manager()
+    a = models.Manager()
+    class Meta:
+        abstract = True
+        {'default_manager_name = "a"' if explicit_default else ""}
+        base_manager_name = 'a'
+class Child(Composable, inherits='coreapp.Parent'):
+    class Meta{"(Parent.Meta)" if inherit_meta else ""}:
+        abstract = True
+"""
+    donor = """
+class CapabilityQuerySet(models.QuerySet):
+    def capability(self): return self.all()
+class ParentDonor(Composable, extends='coreapp.Parent'):
+    compose_querysets = PARENT_CONTRIBUTION
+    class Meta:
+        abstract = True
+class ChildDonor(Composable, extends='coreapp.Child'):
+    compose_querysets = CHILD_CONTRIBUTION
+    class Meta:
+        abstract = True
+"""
+    donor = donor.replace(
+        "PARENT_CONTRIBUTION",
+        "{'z': CapabilityQuerySet, 'a': CapabilityQuerySet}" if parent_contributed else "{}",
+    )
+    outcomes = []
+    for contribution in ("{}", "{'z': CapabilityQuerySet}"):
+        root = tmp_path / str(len(outcomes))
+        root.mkdir()
+        result = run_host(
+            root,
+            {"coreapp": source, "extraapp": donor.replace("CHILD_CONTRIBUTION", contribution)},
+            """
+composition = ModelComposition.discover(apps.get_app_configs())
+emit_models(composition)
+Parent = apps.get_model('coreapp', 'Parent')
+Child = apps.get_model('coreapp', 'Child')
+print(Parent._default_manager.name, Child._default_manager.name,
+      Parent._base_manager.name, Child._base_manager.name)
+if hasattr(Child.z, 'capability'):
+    assert Child.z.capability().model is Child
+""",
+        )
+        outcomes.append(result.stdout)
+    assert outcomes[0] == outcomes[1]
+
+
+@pytest.mark.parametrize("contributed", [False, True])
+def test_manager_planning_is_lazy_and_uses_only_abstract_native_lifecycle(tmp_path, contributed):
+    run_host(
+        tmp_path,
+        {
+            "coreapp": """
+events = []
+class HookedField(models.IntegerField):
+    def contribute_to_class(self, cls, *args, **kwargs):
+        events.append(('field', cls._meta.abstract))
+        return super().contribute_to_class(cls, *args, **kwargs)
+class Contract(Composable):
+    def __init_subclass__(cls, **kwargs):
+        events.append(('subclass', cls._meta.abstract))
+        super().__init_subclass__(**kwargs)
+    class Meta:
+        abstract = True
+class Parent(Contract, concrete=True):
+    value = HookedField(default=0)
+    class Meta:
+        abstract = True
+class Child(Contract, inherits='coreapp.Parent'):
+    class Meta:
+        abstract = True
+class Unrelated(Contract, concrete=True):
+    class Meta:
+        abstract = True
+""",
+            "extraapp": f"""
+class CapabilityQuerySet(models.QuerySet):
+    def capability(self): return self.all()
+class Scope(Composable, extends='coreapp.Child'):
+    compose_querysets = {'{"objects": CapabilityQuerySet}' if contributed else "{}"}
+    class Meta:
+        abstract = True
+""",
+        },
+        f"""
+from coreapp.models import events
+from django.db.models.signals import class_prepared
+from django.db import connection
+from unittest.mock import patch
+prepared = []
+def prepared_receiver(sender, **kwargs): prepared.append(sender.__name__)
+class_prepared.connect(prepared_receiver, weak=False)
+before_events = tuple(events)
+before_models = {{label: set(models) for label, models in apps.all_models.items()}}
+before_pending = dict(apps._pending_operations)
+with patch.object(connection, 'cursor', side_effect=AssertionError('planning connected')):
+    composition = ModelComposition.discover(apps.get_app_configs())
+assert prepared == []
+assert before_models == {{label: set(models) for label, models in apps.all_models.items()}}
+assert before_pending == dict(apps._pending_operations)
+if {contributed!r}:
+    added = events[len(before_events):]
+    assert added and all(abstract for _, abstract in added)
+else:
+    assert tuple(events) == before_events
+emit_models(composition)
+assert set(prepared) == {{'Parent', 'Child', 'Unrelated'}}
+assert set(apps.all_models['coreapp']) == {{'parent', 'child', 'unrelated'}}
+""",
+    )
+
+
+def test_constructor_query_class_override_cannot_silently_bypass_contributions(tmp_path):
+    source = SOURCE.replace(
+        "        self.marker = marker",
+        "        self._queryset_class = DomainQuerySet\n        self.marker = marker",
+    )
+    result = run_host(
+        tmp_path,
+        {"coreapp": source, "extraapp": DONOR},
+        """
+composition = ModelComposition.discover(apps.get_app_configs())
+emit_models(composition)
+composition.validate_generated(apps)
+""",
+        success=False,
+    )
+    assert "manager construction bypasses QuerySet contributions" in result.stderr
+
+
+@pytest.mark.parametrize("on_parent", [False, True])
+@pytest.mark.parametrize("base_name", [False, True])
+def test_explicit_objects_names_preserve_native_implicit_manager(tmp_path, on_parent, base_name):
+    parent_meta = "default_manager_name = 'objects'" if on_parent else ""
+    child_meta = "default_manager_name = 'objects'" if not on_parent else ""
+    if base_name:
+        parent_meta += "\n        base_manager_name = 'objects'"
+        child_meta += "\n        base_manager_name = 'objects'"
+    run_host(
+        tmp_path,
+        {
+            "coreapp": f"""
+class Parent(Composable, concrete=True):
+    class Meta:
+        abstract = True
+        {parent_meta}
+class Child(Composable, inherits='coreapp.Parent'):
+    class Meta:
+        abstract = True
+        {child_meta}
+""",
+            "extraapp": f"""
+class CapabilityQuerySet(models.QuerySet):
+    def capability(self): return self.all()
+class Scope(Composable, extends='coreapp.{"Parent" if on_parent else "Child"}'):
+    compose_querysets = {{'objects': CapabilityQuerySet}}
+    class Meta:
+        abstract = True
+""",
+        },
+        f"""
+composition = ModelComposition.discover(apps.get_app_configs())
+emit_models(composition)
+composition.validate_generated(apps)
+Parent = apps.get_model('coreapp', 'Parent')
+Child = apps.get_model('coreapp', 'Child')
+assert Parent._default_manager.name == Child._default_manager.name == 'objects'
+assert Child.objects.capability().model is Child
+assert Child.objects.auto_created is True
+if {base_name!r}:
+    assert Parent._base_manager.name == Child._base_manager.name == 'objects'
 """,
     )

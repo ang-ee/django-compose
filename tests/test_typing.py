@@ -934,3 +934,45 @@ assert manager.deconstruct()[1].endswith('_Compose4Item7objectsManager')
     result = check(config, env, consumer)
     assert result.returncode != 0
     assert 'has no attribute "scoped"' in result.stdout
+
+
+def test_explicit_implicit_manager_capabilities_keep_default_and_base_typing(tmp_path):
+    config, env = host(tmp_path)
+    (tmp_path / "modelapp/models.py").write_text("""
+from typing import Self
+from django.db import models
+from django_compose.models import Composable
+class Parent(Composable, concrete=True):
+    class Meta:
+        abstract = True
+        default_manager_name = 'objects'
+        base_manager_name = 'objects'
+class Child(Composable, inherits='modelapp.Parent', demands='modelapp.Parent'):
+    class Meta(Parent.Meta):
+        abstract = True
+class ParentQuerySet[T: models.Model](models.QuerySet[T]):
+    def parent_capability(self) -> Self: return self.all()
+class ChildQuerySet[T: models.Model](models.QuerySet[T]):
+    def child_capability(self) -> Self: return self.all()
+class ParentScope(Composable, extends='modelapp.Parent'):
+    compose_querysets = {'objects': ParentQuerySet}
+    class Meta:
+        abstract = True
+class ChildScope(Composable, extends='modelapp.Child'):
+    compose_querysets = {'objects': ChildQuerySet}
+    class Meta:
+        abstract = True
+""")
+    consumer = tmp_path / "consumer.py"
+    consumer.write_text("""
+from typing import assert_type
+from modelapp.models import Child
+from typed_runtime.modelapp.models import Child as RuntimeChild
+assert_type(Child.objects.child_capability().parent_capability().get(), Child)
+assert_type(Child._default_manager.child_capability().parent_capability().get(), Child)
+assert_type(Child._base_manager.child_capability().parent_capability().get(), Child)
+assert_type(RuntimeChild._default_manager.child_capability().get(), RuntimeChild)
+""")
+    for _ in range(2):
+        result = check(config, env, consumer)
+        assert result.returncode == 0, result.stdout + result.stderr

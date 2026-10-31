@@ -98,6 +98,15 @@ Duplicate classes and redundant ancestors collapse before Python checks C3.
 Unrelated classes claiming the same new public QuerySet method fail; native
 QuerySet hooks may compose cooperatively through `super()`.
 
+For explicit QuerySet selection and its concrete-ancestor closure only, the
+compiler asks native abstract model construction for baseline manager MRO and
+default selection. Native copies reproduce emitted parent local-manager slots
+and creation order, retaining their authored provenance. These build-only
+planning classes are never emitted or registered as concrete Django models and
+do not run `_prepare`/`class_prepared`; subclass, field and manager-copy hooks do
+run and must honor Django's abstract-model/copy contracts. Builds without
+explicit QuerySet contributions do not construct these planning classes.
+
 The renderer emits named generic QuerySet and stable Manager subclasses, using
 Django's `Manager.from_queryset` for forwarding and manager-method precedence.
 An authored manager method that would bypass a contributed method is refused;
@@ -131,8 +140,7 @@ effective names using Django's interpolation rules.
 
 `ModelComposition` exposes `ordered_models`, `models_by_label`, `donors(source)`,
 `parent(source)`, `contributed_fields(source)` and
-`contributed_field_origins(source)`, `queryset_contributions(source)` and
-`default_manager_name(source)`. Generated models expose
+`contributed_field_origins(source)` and `queryset_contributions(source)`. Generated models expose
 `compose_contributed_field_origins` as sorted `(field_name, declaring_app_name)`
 pairs. See [model examples](models.md) for usage.
 

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 import inspect
 import keyword
 import sys
 from collections.abc import Iterable, Mapping
 from graphlib import CycleError, TopologicalSorter
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from django.apps import AppConfig
 from django.apps.registry import Apps
@@ -31,6 +32,15 @@ def _importable(cls: type) -> bool:
         return resolved is cls
     except ImportError, AttributeError:
         return False
+
+
+def _native_forwarder(value: object, name: str) -> bool:
+    """Recognize Django's forwarding function and its actual target attribute."""
+    return (
+        inspect.isfunction(value)
+        and value.__code__ is models.Manager.update.__code__
+        and inspect.getclosurevars(value).nonlocals.get("name") == name
+    )
 
 
 def _ordered(graph: Mapping[str, Iterable[str]], description: str) -> tuple[str, ...]:
@@ -147,8 +157,71 @@ class ModelComposition:
             type[models.Model],
             dict[str, tuple[models.Manager[Any], tuple[type[models.QuerySet[Any, Any]], ...]]],
         ] = {}
+        self._manager_models: dict[type[models.Model], type[models.Model]] = {}
+        self._manager_origins: dict[int, models.Manager[Any]] = {}
+        self._default_manager_names: dict[type[models.Model], str] = {}
+        needed = set()
         for source in self.ordered_models:
+            if any(self._declared_querysets(donor) for donor in self.donors(source)):
+                current: type[models.Model] | None = source
+                while current is not None:
+                    needed.add(current)
+                    current = self.parent(current)
+        for source in self.ordered_models:
+            if source not in needed:
+                self._querysets[source] = {}
+                continue
+            # Native abstract construction owns manager MRO. It still runs
+            # subclass/field hooks, but skips concrete registration/_prepare.
+            parent = self.parent(source)
+            bases = (*self.donors(source), source)
+            if parent is not None:
+                bases += (self._manager_models[parent],)
+            meta = type(
+                "Meta", (cast(type, source.Meta),), {"abstract": True, "app_label": source._meta.app_label}
+            )
+            plan = cast(
+                type[models.Model],
+                type(
+                    source.__name__,
+                    bases,
+                    {
+                        "__module__": source.__module__,
+                        "Meta": meta,
+                    },
+                ),
+            )
+            self._manager_models[source] = plan
+            if plan._meta.managers:
+                default = plan._meta.default_manager
+                self._default_manager_names[source] = default.name if default is not None else "objects"
             self._querysets[source] = self._resolve_querysets(source)
+            if self._querysets[source]:
+                # Child plans see the same local slots and native creation order
+                # as emitted parents. Retain native/authored provenance; never
+                # import or emit a planning model.
+                if source in self._default_manager_names:
+                    plan._meta.default_manager_name = self._default_manager_names[source]
+                for name, (manager, _) in self._querysets[source].items():
+                    local = copy.copy(manager)
+                    local._set_creation_counter()  # type: ignore[attr-defined]
+                    self._manager_origins[local.creation_counter] = manager
+                    plan.add_to_class(name, local)
+            elif not plan._meta.managers:
+                # Concrete Django _prepare supplies implicit objects. Ancestor
+                # probes need that slot too; a contributed implicit slot above
+                # already supplies its replacement and must not be duplicated.
+                self._validate_field_managers(source, (field.name for field in _fields(plan)), ("objects",))
+                implicit: models.Manager[models.Model] = models.Manager()
+                implicit.auto_created = True
+                plan.add_to_class("objects", implicit)
+                self._manager_origins[implicit.creation_counter] = implicit
+            if source not in self._default_manager_names:
+                default = plan._meta.default_manager
+                self._default_manager_names[source] = default.name if default is not None else "objects"
+                if self._querysets[source]:
+                    plan._meta.default_manager_name = self._default_manager_names[source]
+                    plan._meta._expire_cache()  # type: ignore[attr-defined]
         self._constraints = {source: self._resolve_constraints(source) for source in self.ordered_models}
 
     @classmethod
@@ -281,6 +354,13 @@ class ModelComposition:
                 field_names,
                 (manager.name for manager in model._meta.managers),
             )
+            for name, (_, querysets) in self.queryset_contributions(source).items():
+                manager: models.Manager[Any] = model._meta.managers_map[name]
+                actual = manager._queryset_class  # type: ignore[attr-defined]
+                if not isinstance(actual, type) or not all(issubclass(actual, base) for base in querysets):
+                    raise ImproperlyConfigured(
+                        f"{model._meta.label}.{name}: manager construction bypasses QuerySet contributions"
+                    )
 
     @staticmethod
     def _validate_field_managers(
@@ -296,18 +376,8 @@ class ModelComposition:
         return self._querysets[source]
 
     def default_manager_name(self, source: type[models.Model]) -> str:
-        """Preserve the source's native default when generated manager slots become local."""
-        current: type[models.Model] | None = source
-        while current is not None:
-            if current._meta.default_manager_name:
-                return current._meta.default_manager_name
-            if manager := current._meta.default_manager:
-                return manager.name
-            current = self.parent(current)
-        return next(
-            (manager.name for donor in self.donors(source) if (manager := donor._meta.default_manager)),
-            "objects",
-        )
+        """Return the native baseline default for a source requiring manager composition."""
+        return self._default_manager_names[source]
 
     @staticmethod
     def _declared_querysets(
@@ -349,32 +419,45 @@ class ModelComposition:
                 if inherited is not None:
                     selected[name].extend(inherited[1])
             parent = self.parent(parent)
+        contributors: list[type[models.Model]] = []
+        current: type[models.Model] | None = source
+        while current is not None:
+            contributors.extend((*self.donors(current), current))
+            current = self.parent(current)
+        originals = {
+            manager.creation_counter: manager
+            for contributor in contributors
+            for manager in contributor._meta.managers
+        }
+        originals.update(self._manager_origins)
         result = {}
         for name, querysets in sorted(selected.items()):
-            # The manager selected by native donor/source MRO remains the owner.
-            manager = next(
-                (
-                    contributor._meta.managers_map[name]
-                    for contributor in (*self.donors(source), source)
-                    if name in contributor._meta.managers_map
-                ),
-                None,
+            native_managers = self._manager_models[source]._meta.managers_map
+            selected_manager = native_managers.get(name)
+            manager = (
+                originals.get(selected_manager.creation_counter) if selected_manager is not None else None
             )
-            if manager is None:
-                parent = self.parent(source)
-                while parent is not None and manager is None:
-                    manager = parent._meta.managers_map.get(name)
-                    parent = self.parent(parent)
-            if (
-                manager is None
-                and name == "objects"
-                and not any(contributor._meta.managers for contributor in (*self.donors(source), source))
-            ):
+            if selected_manager is not None and manager is None:
+                raise ImproperlyConfigured(
+                    f"{source._meta.label}.{name}: manager is not owned by a native declaration"
+                )
+            if manager is None and name == "objects" and not native_managers:
                 manager = models.Manager()
+                manager.auto_created = True
             if manager is None:
                 raise ImproperlyConfigured(
                     f"{source._meta.label}: compose_querysets names missing manager {name!r}"
                 )
+            self._validate_field_managers(
+                source,
+                (
+                    attribute
+                    for contributor in contributors
+                    for native in _fields(contributor)
+                    for attribute in (native.name, native.attname)
+                ),
+                (name,),
+            )
             original = manager._queryset_class  # type: ignore[attr-defined]
             candidates = list(dict.fromkeys([*querysets, original]))
             for queryset in candidates:
@@ -414,7 +497,7 @@ class ModelComposition:
                             callable(value)
                             and current is not None
                             and not method.startswith("_")
-                            and getattr(current, "__code__", None) is not models.Manager.update.__code__
+                            and not _native_forwarder(current, method)
                         ):
                             raise ImproperlyConfigured(
                                 f"{source._meta.label}.{name}: manager method {method!r} "
@@ -440,7 +523,7 @@ class ModelComposition:
                             "__slotnames__",
                             "__type_params__",
                         }
-                        and getattr(value, "__code__", None) is not models.Manager.update.__code__
+                        and not _native_forwarder(value, key)
                         for key, value in vars(manager_type).items()
                     )
                 ):
