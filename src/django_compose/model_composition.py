@@ -452,13 +452,19 @@ class ModelComposition:
             if name != expected:
                 source_manager = source._meta.managers_map.get(name)
                 donor_manager = donor._meta.managers_map.get(name)
-                if (
-                    source_manager is None
-                    or donor_manager is None
-                    or source_manager.creation_counter != donor_manager.creation_counter
-                ):
+                if source_manager is None or donor_manager is None:
                     continue
+                if source_manager.creation_counter != donor_manager.creation_counter:
+                    if (
+                        any(manager.name == name for manager in source._meta.local_managers)
+                        or type(source_manager) is type(donor_manager)
+                        or not isinstance(source_manager, type(donor_manager))
+                        or not issubclass(source_manager._queryset_class, donor_manager._queryset_class)
+                    ):
+                        continue
                 # A native source may override its shared ancestor's selector.
+                # Inherited factory specializations retain native manager and
+                # QuerySet ancestry. Direct source replacements remain conflicts.
                 # The donor still extends that same inherited manager slot;
                 # it does not replace the source's effective selector.
                 shared_selector = False

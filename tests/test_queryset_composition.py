@@ -774,7 +774,20 @@ assert not hasattr(Item._angee_base, 'guarded')
     )
 
 
-@pytest.mark.parametrize("variant", ["shared", "source_replaces", "donor_selector", "donor_manager"])
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "shared",
+        "source_replaces",
+        "donor_selector",
+        "donor_manager",
+        "specialized",
+        "two_specialized_donors",
+        "unrelated_manager",
+        "unrelated_queryset",
+        "specialized_source_replaces",
+    ],
+)
 def test_shared_native_selector_preserves_source_selected_manager(tmp_path, variant):
     donor = NATIVE_DONOR.replace(
         "'base_manager_name': '_angee_base'",
@@ -792,6 +805,48 @@ def test_shared_native_selector_preserves_source_selected_manager(tmp_path, vari
         "    class Meta(Contract.Meta):\n        abstract = True\n"
         "        base_manager_name = 'unscoped_objects'",
     )
+    specialized = variant in {
+        "specialized",
+        "two_specialized_donors",
+        "unrelated_manager",
+        "unrelated_queryset",
+        "specialized_source_replaces",
+    }
+    if specialized:
+        donor = donor.replace(
+            "class NativeBehavior(models.Model, metaclass=NativeModelBase):",
+            "class NativeQuerySet(models.QuerySet):\n"
+            "    def native_tracking(self): return self.all()\n"
+            "class NativeManager(models.Manager.from_queryset(NativeQuerySet)):\n"
+            "    def __init__(self, marker='native'):\n"
+            "        super().__init__()\n        self.marker = marker\n"
+            "    def factory(self): return self.marker\n"
+            "class NativeBehavior(models.Model, metaclass=NativeModelBase):",
+        ).replace("_angee_base = models.Manager()", "_angee_base = NativeManager()")
+        queryset = "models.QuerySet" if variant == "unrelated_queryset" else "NativeQuerySet"
+        manager = "DomainManager" if variant == "unrelated_manager" else "NativeManager"
+        source = "from extraapp.models import NativeManager, NativeQuerySet\n" + source.replace(
+            "class Contract(NativeBehavior, Composable):",
+            f"class HistoryQuerySet({queryset}):\n"
+            "    def captured(self): return self.all()\n"
+            f"class HistoryManager({manager}.from_queryset(HistoryQuerySet)): pass\n"
+            "class Contract(NativeBehavior, Composable):\n"
+            "    _angee_base = HistoryManager('captured').db_manager('default', hints={'owner': 'captured'})",
+        ).replace(
+            "unscoped_objects = DomainManager('unscoped')", "unscoped_objects = HistoryManager('unscoped')"
+        )
+        if variant == "specialized_source_replaces":
+            source = source.replace(
+                "class Item(Contract, concrete=True):",
+                "class Item(Contract, concrete=True):\n    _angee_base = HistoryManager('replacement')",
+            )
+        if variant == "two_specialized_donors":
+            donor += """
+class SecondGuard(NativeBehavior, Composable, extends='coreapp.Contract'):
+    compose_querysets = {'objects': GuardedQuerySet, '_angee_base': TrackedQuerySet}
+    class Meta:
+        abstract = True
+"""
     if variant == "source_replaces":
         source = source.replace(
             "class Item(Contract, concrete=True):",
@@ -822,13 +877,14 @@ def test_shared_native_selector_preserves_source_selected_manager(tmp_path, vari
     result = run_host(
         tmp_path,
         {"coreapp": source, "extraapp": donor},
-        """
+        f"specialized = {specialized!r}\n"
+        + """
 composition = ModelComposition.discover(apps.get_app_configs())
 from coreapp.models import Item as Source
 from extraapp.models import NativeBehavior
 assert Source._base_manager.name == 'unscoped_objects'
 assert composition.queryset_contributions(Source)['_angee_base'][0].creation_counter == (
-    NativeBehavior._meta.managers_map['_angee_base'].creation_counter
+    Source._meta.managers_map['_angee_base'].creation_counter
 )
 assert 'unscoped_objects' not in composition.queryset_contributions(Source)
 emit_models(composition)
@@ -844,10 +900,22 @@ assert Item.objects.guarded().named('safe').model is Item
 assert hasattr(Item._angee_base, 'tracked')
 assert not hasattr(Item.unscoped_objects, 'guarded')
 assert not hasattr(Item.unscoped_objects, 'tracked')
-""",
-        success=variant == "shared",
+if specialized:
+    from coreapp.models import HistoryQuerySet, HistoryManager
+    from extraapp.models import NativeQuerySet, NativeManager
+    assert isinstance(Item._angee_base, HistoryManager)
+    assert Item._angee_base.factory() == 'captured'
+    assert Item._angee_base._db == 'default'
+    assert Item._angee_base._hints == {'owner': 'captured'}
+    assert Item._angee_base.tracked().captured().native_tracking().model is Item
+    assert Item.unscoped_objects.captured().native_tracking().model is Item
+    assert Item._angee_base._queryset_class.__mro__.index(HistoryQuerySet) < (
+        Item._angee_base._queryset_class.__mro__.index(NativeQuerySet)
     )
-    if variant != "shared":
+""",
+        success=variant in {"shared", "specialized", "two_specialized_donors"},
+    )
+    if variant not in {"shared", "specialized", "two_specialized_donors"}:
         assert "extraapp.Guard on coreapp.Item: donor Meta authors unsupported options base_manager_name" in (
             result.stderr
         )

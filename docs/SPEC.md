@@ -99,8 +99,11 @@ still follows the collision rules above. Native metaclass defaults for
 the source's same effective native manager and its slot is explicitly mapped.
 A source may override a selector inherited from a shared native model ancestor:
 an inherited donor selector remains valid only when both declarations retain
-that ancestor's same manager provenance at the explicitly mapped slot. The
-source's effective selector and its independently selected manager are preserved.
+that ancestor's same manager provenance at the explicitly mapped slot. An
+inherited source factory may specialize that manager through native manager and
+QuerySet subclassing; both ancestries must remain intact. A directly replaced
+source slot is not an inherited specialization. The source's effective selector
+and its independently selected manager are preserved.
 Unrelated or replaced manager selectors and unrelated donor Meta options remain errors.
 Donor mappings follow native MRO; contributions follow enabled-app/declaration
 order, then inherited concrete-parent contributions and the source QuerySet.
