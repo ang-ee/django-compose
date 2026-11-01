@@ -108,8 +108,10 @@ Unrelated or replaced manager selectors and unrelated donor Meta options remain 
 Donor mappings follow native MRO; contributions follow enabled-app/declaration
 order, then inherited concrete-parent contributions and the source QuerySet.
 Duplicate classes and redundant ancestors collapse before Python checks C3.
-Unrelated classes claiming the same new public QuerySet method fail; native
-QuerySet hooks may compose cooperatively through `super()`.
+Effective method providers are compared across independent selected bases;
+already-authored multiple inheritance retains its native cooperative method
+order, and a non-callable first attribute hides an ancestor method as in Python. Unrelated independent bases claiming the same new public QuerySet method
+fail; native QuerySet hooks may compose cooperatively through `super()`.
 
 For explicit QuerySet selection and its concrete-ancestor closure only, the
 compiler asks native abstract model construction for baseline manager MRO and

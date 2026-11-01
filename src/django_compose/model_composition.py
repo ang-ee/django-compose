@@ -379,7 +379,7 @@ class ModelComposition:
             )
             for name, (_, querysets) in self.queryset_contributions(source).items():
                 manager: models.Manager[Any] = model._meta.managers_map[name]
-                actual = manager._queryset_class  # type: ignore[attr-defined]
+                actual = manager._queryset_class
                 if not isinstance(actual, type) or not all(issubclass(actual, base) for base in querysets):
                     raise ImproperlyConfigured(
                         f"{model._meta.label}.{name}: manager construction bypasses QuerySet contributions"
@@ -543,7 +543,7 @@ class ModelComposition:
                 ),
                 (name,),
             )
-            original = manager._queryset_class  # type: ignore[attr-defined]
+            original = manager._queryset_class
             candidates = list(dict.fromkeys([*querysets, original]))
             for queryset in candidates:
                 if not _importable(queryset):
@@ -561,10 +561,14 @@ class ModelComposition:
                 ) from error
             methods: dict[str, type] = {}
             for base in bases:
+                effective: set[str] = set()
                 for owner in base.__mro__:
                     if owner in models.QuerySet.__mro__:
                         continue
                     for method, value in vars(owner).items():
+                        if method in effective:
+                            continue
+                        effective.add(method)
                         if method.startswith("_") or hasattr(models.QuerySet, method) or not callable(value):
                             continue
                         previous = methods.setdefault(method, owner)
@@ -572,6 +576,8 @@ class ModelComposition:
                             raise ImproperlyConfigured(
                                 f"{source._meta.label}.{name}: competing QuerySet method {method!r}"
                             )
+                        if issubclass(owner, previous):
+                            methods[method] = owner
             for queryset in querysets:
                 for owner in queryset.__mro__:
                     if owner in models.QuerySet.__mro__:

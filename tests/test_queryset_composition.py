@@ -216,6 +216,110 @@ def test_competing_methods_and_unreconstructable_state_fail(tmp_path, source_cha
     assert message in result.stderr
 
 
+@pytest.mark.parametrize("variant", ["authored", "independent", "terminal_first"])
+def test_authored_cooperative_method_chain_is_distinct_from_independent_donors(tmp_path, variant):
+    authored = variant == "authored"
+    source = SOURCE.replace(
+        "class Item(Contract, concrete=True):",
+        """
+class CanonicalQuerySet(models.QuerySet):
+    def canonical(self): return self
+class MergeQuerySet(CanonicalQuerySet):
+    def canonical(self): return super().canonical().filter(title__endswith='z')
+class TrashQuerySet(CanonicalQuerySet):
+    def canonical(self): return super().canonical().filter(title__contains='middle')
+class AuthoredQuerySet(MergeQuerySet, TrashQuerySet, DomainQuerySet): pass
+class AuthoredManager(DomainManager.from_queryset(AuthoredQuerySet)): pass
+class Item(Contract, concrete=True):
+""",
+    )
+    donor = DONOR
+    if authored:
+        source = source.replace(
+            "objects = DomainManager('a', suffix='z')",
+            "objects = AuthoredManager('a', suffix='z')",
+        )
+    else:
+        donor += """
+from coreapp.models import MergeQuerySet, TrashQuerySet
+class MergeScope(Composable, extends='coreapp.Contract'):
+    compose_querysets = {'objects': MergeQuerySet}
+    class Meta:
+        abstract = True
+class TrashScope(Composable, extends='coreapp.Contract'):
+    compose_querysets = {'objects': TrashQuerySet}
+    class Meta:
+        abstract = True
+"""
+    if variant == "terminal_first":
+        donor = donor.replace(
+            "class MergeScope(Composable, extends='coreapp.Contract'):",
+            """
+from coreapp.models import CanonicalQuerySet
+class InheritedTerminal(CanonicalQuerySet): pass
+class TerminalScope(Composable, extends='coreapp.Contract'):
+    compose_querysets = {'objects': InheritedTerminal}
+    class Meta:
+        abstract = True
+class MergeScope(Composable, extends='coreapp.Contract'):
+""",
+        )
+    result = run_host(
+        tmp_path,
+        {"coreapp": source, "extraapp": donor},
+        """
+composition = ModelComposition.discover(apps.get_app_configs())
+emit_models(composition)
+from coreapp.models import MergeQuerySet, TrashQuerySet, CanonicalQuerySet
+Item = apps.get_model('coreapp', 'Item')
+rows = Item.objects.canonical()
+assert rows.model is Item
+assert Item.objects.marker == 'a' and Item.objects.suffix == 'z'
+_, parameters = rows.query.sql_with_params()
+assert set(parameters) == {'a%', '%z', '%middle%'}
+order = type(rows).__mro__
+assert order.index(MergeQuerySet) < order.index(TrashQuerySet) < order.index(CanonicalQuerySet)
+assert Item.objects.scoped().named('a-middle-z').model is Item
+""",
+        success=authored,
+    )
+    if not authored:
+        assert "competing QuerySet method 'canonical'" in result.stderr
+
+
+@pytest.mark.parametrize("shadow", ["None", "property(lambda self: 'disabled')"])
+def test_noncallable_source_attribute_hides_ancestor_method_provider(tmp_path, shadow):
+    source = SOURCE.replace(
+        "class Item(Contract, concrete=True):",
+        f"""
+class HiddenQuerySet(DomainQuerySet):
+    def canonical(self): return self.filter(title__startswith='hidden')
+class SourceQuerySet(HiddenQuerySet):
+    canonical = {shadow}
+class SourceManager(DomainManager.from_queryset(SourceQuerySet)): pass
+class Item(Contract, concrete=True):
+""",
+    ).replace("objects = DomainManager('a', suffix='z')", "objects = SourceManager('a', suffix='z')")
+    donor = DONOR.replace(
+        "class ScopedQuerySet(SharedQuerySet):",
+        "class ScopedQuerySet(SharedQuerySet):\n"
+        "    def canonical(self): return self.filter(title__endswith='z')",
+    )
+    run_host(
+        tmp_path,
+        {"coreapp": source, "extraapp": donor},
+        """
+composition = ModelComposition.discover(apps.get_app_configs())
+emit_models(composition)
+Item = apps.get_model('coreapp', 'Item')
+rows = Item.objects.canonical()
+assert rows.model is Item
+_, parameters = rows.query.sql_with_params()
+assert set(parameters) == {'a%', '%z'}
+""",
+    )
+
+
 def test_multiple_contracts_third_party_and_cooperative_native_hooks(tmp_path):
     run_host(
         tmp_path,
