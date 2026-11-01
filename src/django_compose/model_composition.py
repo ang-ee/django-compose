@@ -188,8 +188,8 @@ class ModelComposition:
                 if self._inherited_queryset_manager(donor, name) and name in donor._meta.managers_map
             }
             if inherited_slots:
-                # Ask Django for source/parent manager ownership without letting
-                # a donor's inherited convenience manager replace its factory.
+                # Ask Django for fallback source/parent manager ownership without
+                # letting an inherited convenience manager erase the selected factory.
                 baseline = cast(
                     type[models.Model],
                     type(
@@ -206,7 +206,17 @@ class ModelComposition:
                     ),
                 )
                 for name in sorted(inherited_slots):
-                    manager = baseline._meta.managers_map.get(name)
+                    # Ordinary extensions retain their validated manager override;
+                    # only inherited QuerySet convenience managers defer to baseline.
+                    manager = next(
+                        (
+                            donor._meta.managers_map[name]
+                            for donor in self.donors(source)
+                            if name in donor._meta.managers_map
+                            and not self._inherited_queryset_manager(donor, name)
+                        ),
+                        baseline._meta.managers_map.get(name),
+                    )
                     if manager is None and name == "objects" and not baseline._meta.managers:
                         manager = models.Manager()
                         manager.auto_created = True

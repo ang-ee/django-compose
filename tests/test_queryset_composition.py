@@ -1139,3 +1139,103 @@ Item = apps.get_model('coreapp', 'Item')
 assert Item.objects.domain().extension().model is Item
 """,
     )
+
+
+@pytest.mark.parametrize("owner_first", [False, True])
+@pytest.mark.parametrize("inherited_owner", [False, True])
+@pytest.mark.parametrize("migrated_manager", [False, True])
+def test_inherited_queryset_donor_preserves_ordinary_extension_manager(
+    tmp_path, owner_first, inherited_owner, migrated_manager
+):
+    owner = (
+        """
+from coreapp.models import DomainManager, DomainQuerySet
+class ExtensionQuerySet(DomainQuerySet):
+    def selected(self, title): return self.filter(title=title)
+    def maintain(self): return self.all()
+class ExtensionManager(DomainManager.from_queryset(ExtensionQuerySet)):
+    use_in_migrations = MIGRATED
+    def __init__(self, marker, *, suffix):
+        super().__init__(marker)
+        self.suffix = suffix
+    def get_queryset(self):
+        return super().get_queryset().filter(title__startswith=self.marker)
+    def capture(self): return self.marker + self.suffix
+class OwnedManager(models.Model):
+    objects = ExtensionManager('extension', suffix='!').db_manager(
+        'default', hints={'owner': 'extension'},
+    )
+    class Meta:
+        abstract = True
+class Extension(BASES, extends='coreapp.Item'):
+DECLARATION
+    class Meta:
+        abstract = True
+""".replace("BASES", "OwnedManager, Composable" if inherited_owner else "Composable")
+        .replace("MIGRATED", str(migrated_manager))
+        .replace(
+            "DECLARATION",
+            ""
+            if inherited_owner
+            else (
+                "    objects = ExtensionManager('extension', suffix='!').db_manager(\n"
+                "        'default', hints={'owner': 'extension'},\n"
+                "    )"
+            ),
+        )
+    )
+    donors = {"ownerapp": owner, "scopeapp": NATIVE_DONOR}
+    if not owner_first:
+        donors = dict(reversed(donors.items()))
+    run_host(
+        tmp_path,
+        {"coreapp": NATIVE_SOURCE, **donors},
+        """
+from django.db import models
+from coreapp.models import Item as Source
+from ownerapp.models import ExtensionManager, ExtensionQuerySet
+from scopeapp.models import GuardedQuerySet, TrackedQuerySet
+composition = ModelComposition.discover(apps.get_app_configs())
+manager, querysets = composition.queryset_contributions(Source)['objects']
+assert type(manager) is ExtensionManager
+assert manager.marker == 'extension' and manager.suffix == '!'
+assert manager._db == 'default' and manager._hints == {'owner': 'extension'}
+assert ExtensionQuerySet in querysets
+assert GuardedQuerySet in querysets
+first = render_models(composition, 'coreapp')
+assert first == render_models(composition, 'coreapp')
+emit_models(composition)
+composition.validate_generated(apps)
+Item = apps.get_model('coreapp', 'Item')
+assert isinstance(Item.objects, ExtensionManager)
+assert Item.objects.factory() == 'extension'
+assert Item.objects.capture() == 'extension!'
+assert Item.objects._db == 'default' and Item.objects._hints == {'owner': 'extension'}
+assert Item._default_manager.name == 'objects'
+assert Item._base_manager.name == '_angee_base'
+assert isinstance(Item._base_manager.get_queryset(), TrackedQuerySet)
+rows = Item.objects.db_manager('default', hints={'request': 'bound'}).all()
+assert isinstance(rows, ExtensionQuerySet) and isinstance(rows, GuardedQuerySet)
+assert rows._db == 'default' and rows._hints == {'request': 'bound'}
+assert rows.guarded().named('extension').selected('extension').maintain().model is Item
+assert rows.filter(title='extension').maintain()._hints == {'request': 'bound'}
+assert Item.objects.get_queryset().query.where.children[0].rhs == 'extension'
+from django.db.migrations.writer import MigrationWriter
+expression, imports = MigrationWriter.serialize(Item.objects)
+namespace = {}
+exec(chr(10).join(sorted(imports)), namespace)
+restored = eval(expression, namespace)
+assert isinstance(restored, ExtensionManager)
+assert restored.capture() == 'extension!'
+assert restored.deconstruct()[1] == 'runtime.coreapp.models._Compose4Item7objectsManager'
+from django.db.migrations.state import ModelState
+state_managers = dict(ModelState.from_model(Item).managers)
+assert Item.objects.use_in_migrations is MIGRATED
+if MIGRATED:
+    assert isinstance(state_managers['objects'], ExtensionManager)
+    assert state_managers['objects'].capture() == 'extension!'
+else:
+    assert type(state_managers['objects']) is models.Manager
+assert type(state_managers['_angee_base']) is models.Manager
+""".replace("MIGRATED", str(migrated_manager)),
+    )

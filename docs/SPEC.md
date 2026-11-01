@@ -93,8 +93,11 @@ native manager; `objects` may also select Django's implicit default when no
 manager is declared. Contributions extend that manager's QuerySet, not another
 manager's policy. Ordinary colliding donor managers keep the rules above.
 At an explicitly mapped slot, an inherited donor manager does not replace the
-source's manager factory or configuration. A directly declared donor manager
-still follows the collision rules above. Native metaclass defaults for
+ordinary extension's effective manager factory or configuration, or the source's
+when no ordinary extension overrides that slot. The ordinary extension's
+manager may itself be inherited through native Django ancestry. Competing
+extension managers still follow the collision rules above. Native metaclass
+defaults for
 `base_manager_name` and `default_manager_name` are accepted only when they select
 the source's same effective native manager and its slot is explicitly mapped.
 A source may override a selector inherited from a shared native model ancestor:
