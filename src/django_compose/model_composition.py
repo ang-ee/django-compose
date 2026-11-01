@@ -437,7 +437,7 @@ class ModelComposition:
 
     @classmethod
     def _matching_manager_options(cls, source: type[models.Model], donor: type[models.Model]) -> set[str]:
-        """Permit native selector defaults only when they select the source's same slot."""
+        """Preserve source selectors while extending the same native manager provenance."""
         allowed: set[str] = set()
         for option in ("base_manager_name", "default_manager_name"):
             if option not in vars(donor.Meta):
@@ -449,8 +449,39 @@ class ModelComposition:
             if expected is None:
                 manager = source._base_manager if option == "base_manager_name" else source._default_manager
                 expected = manager.name if manager is not None else "objects"
-            if name == expected:
-                allowed.add(option)
+            if name != expected:
+                source_manager = source._meta.managers_map.get(name)
+                donor_manager = donor._meta.managers_map.get(name)
+                if (
+                    source_manager is None
+                    or donor_manager is None
+                    or source_manager.creation_counter != donor_manager.creation_counter
+                ):
+                    continue
+                # A native source may override its shared ancestor's selector.
+                # The donor still extends that same inherited manager slot;
+                # it does not replace the source's effective selector.
+                shared_selector = False
+                for ancestor in source.__mro__[1:]:
+                    if (
+                        ancestor is models.Model
+                        or ancestor not in donor.__mro__
+                        or not issubclass(ancestor, models.Model)
+                    ):
+                        continue
+                    inherited = (
+                        ancestor._base_manager if option == "base_manager_name" else ancestor._default_manager
+                    )
+                    if (
+                        inherited is not None
+                        and inherited.name == name
+                        and inherited.creation_counter == donor_manager.creation_counter
+                    ):
+                        shared_selector = True
+                        break
+                if not shared_selector:
+                    continue
+            allowed.add(option)
         return allowed
 
     def _resolve_querysets(
@@ -691,7 +722,8 @@ class ModelComposition:
                     }
                     if forbidden:
                         raise ImproperlyConfigured(
-                            f"{contributor._meta.label}: donor Meta authors unsupported options "
+                            f"{contributor._meta.label} on {source._meta.label}: "
+                            "donor Meta authors unsupported options "
                             f"{', '.join(sorted(forbidden))}"
                         )
                 for native in _fields(contributor):

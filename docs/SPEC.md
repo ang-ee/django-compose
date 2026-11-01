@@ -97,7 +97,11 @@ source's manager factory or configuration. A directly declared donor manager
 still follows the collision rules above. Native metaclass defaults for
 `base_manager_name` and `default_manager_name` are accepted only when they select
 the source's same effective native manager and its slot is explicitly mapped.
-Mismatched selectors and unrelated donor Meta options remain errors.
+A source may override a selector inherited from a shared native model ancestor:
+an inherited donor selector remains valid only when both declarations retain
+that ancestor's same manager provenance at the explicitly mapped slot. The
+source's effective selector and its independently selected manager are preserved.
+Unrelated or replaced manager selectors and unrelated donor Meta options remain errors.
 Donor mappings follow native MRO; contributions follow enabled-app/declaration
 order, then inherited concrete-parent contributions and the source QuerySet.
 Duplicate classes and redundant ancestors collapse before Python checks C3.

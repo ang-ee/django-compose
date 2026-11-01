@@ -774,6 +774,85 @@ assert not hasattr(Item._angee_base, 'guarded')
     )
 
 
+@pytest.mark.parametrize("variant", ["shared", "source_replaces", "donor_selector", "donor_manager"])
+def test_shared_native_selector_preserves_source_selected_manager(tmp_path, variant):
+    donor = NATIVE_DONOR.replace(
+        "'base_manager_name': '_angee_base'",
+        "'base_manager_name': getattr(meta, 'base_manager_name', '_angee_base')",
+    ).replace(
+        "    _angee_base = models.Manager()",
+        "    _angee_base = models.Manager()\n    other = models.Manager()",
+    )
+    source = "from extraapp.models import NativeBehavior\n" + NATIVE_SOURCE.replace(
+        "class Contract(Composable):",
+        "class Contract(NativeBehavior, Composable):",
+    ).replace("    _angee_base = models.Manager()\n", "").replace(
+        "    class Meta(Contract.Meta):\n        abstract = True",
+        "    unscoped_objects = DomainManager('unscoped').db_manager('default', hints={'owner': 'base'})\n"
+        "    class Meta(Contract.Meta):\n        abstract = True\n"
+        "        base_manager_name = 'unscoped_objects'",
+    )
+    if variant == "source_replaces":
+        source = source.replace(
+            "class Item(Contract, concrete=True):",
+            "class Item(Contract, concrete=True):\n    _angee_base = models.Manager()",
+        )
+    elif variant == "donor_selector":
+        donor = donor.replace(
+            "'_angee_base': TrackedQuerySet}",
+            "'_angee_base': TrackedQuerySet, 'other': TrackedQuerySet}",
+        )
+        # This selector changes the shared ancestor's default, even though its
+        # named manager is inherited and explicitly mapped on both declarations.
+        inherited, guard = donor.split("class Guard(", 1)
+        donor = (
+            inherited
+            + "class Guard("
+            + guard.replace(
+                "        abstract = True",
+                "        abstract = True\n        base_manager_name = 'other'",
+            )
+        )
+    elif variant == "donor_manager":
+        donor = donor.replace(
+            "class Guard(NativeBehavior, Composable, extends='coreapp.Contract'):",
+            "class Guard(NativeBehavior, Composable, extends='coreapp.Contract'):\n"
+            "    _angee_base = models.Manager()",
+        )
+    result = run_host(
+        tmp_path,
+        {"coreapp": source, "extraapp": donor},
+        """
+composition = ModelComposition.discover(apps.get_app_configs())
+from coreapp.models import Item as Source
+from extraapp.models import NativeBehavior
+assert Source._base_manager.name == 'unscoped_objects'
+assert composition.queryset_contributions(Source)['_angee_base'][0].creation_counter == (
+    NativeBehavior._meta.managers_map['_angee_base'].creation_counter
+)
+assert 'unscoped_objects' not in composition.queryset_contributions(Source)
+emit_models(composition)
+Item = apps.get_model('coreapp', 'Item')
+assert Item._base_manager.name == 'unscoped_objects'
+assert Item._default_manager.name == 'objects'
+assert Item._base_manager is Item.unscoped_objects
+assert Item.unscoped_objects.factory() == 'unscoped'
+assert Item.unscoped_objects._db == 'default'
+assert Item.unscoped_objects._hints == {'owner': 'base'}
+assert Item.objects.factory() == 'source'
+assert Item.objects.guarded().named('safe').model is Item
+assert hasattr(Item._angee_base, 'tracked')
+assert not hasattr(Item.unscoped_objects, 'guarded')
+assert not hasattr(Item.unscoped_objects, 'tracked')
+""",
+        success=variant == "shared",
+    )
+    if variant != "shared":
+        assert "extraapp.Guard on coreapp.Item: donor Meta authors unsupported options base_manager_name" in (
+            result.stderr
+        )
+
+
 @pytest.mark.parametrize(
     ("declaration", "message"),
     [
