@@ -180,17 +180,40 @@ class ModelComposition:
             meta = type(
                 "Meta", (cast(type, source.Meta),), {"abstract": True, "app_label": source._meta.app_label}
             )
-            plan = cast(
-                type[models.Model],
-                type(
-                    source.__name__,
-                    bases,
-                    {
-                        "__module__": source.__module__,
-                        "Meta": meta,
-                    },
-                ),
-            )
+            attributes: dict[str, Any] = {"__module__": source.__module__, "Meta": meta}
+            inherited_slots = {
+                name
+                for donor in self.donors(source)
+                for name in self._declared_querysets(donor)
+                if self._inherited_queryset_manager(donor, name) and name in donor._meta.managers_map
+            }
+            if inherited_slots:
+                # Ask Django for source/parent manager ownership without letting
+                # a donor's inherited convenience manager replace its factory.
+                baseline = cast(
+                    type[models.Model],
+                    type(
+                        source.__name__,
+                        (source, self._manager_models[parent]) if parent is not None else (source,),
+                        {
+                            "__module__": source.__module__,
+                            "Meta": type(
+                                "Meta",
+                                (cast(type, source.Meta),),
+                                {"abstract": True, "app_label": source._meta.app_label},
+                            ),
+                        },
+                    ),
+                )
+                for name in sorted(inherited_slots):
+                    manager = baseline._meta.managers_map.get(name)
+                    if manager is None and name == "objects" and not baseline._meta.managers:
+                        manager = models.Manager()
+                        manager.auto_created = True
+                        self._manager_origins[manager.creation_counter] = manager
+                    if manager is not None:
+                        attributes[name] = copy.copy(manager)
+            plan = cast(type[models.Model], type(source.__name__, bases, attributes))
             self._manager_models[source] = plan
             if plan._meta.managers:
                 default = plan._meta.default_manager
@@ -405,6 +428,31 @@ class ModelComposition:
                 selected.setdefault(name, []).append(queryset)
         return selected
 
+    @classmethod
+    def _inherited_queryset_manager(cls, donor: type[models.Model], name: str) -> bool:
+        """A QuerySet contribution does not redeclare an inherited manager instance."""
+        return name in cls._declared_querysets(donor) and not any(
+            manager.name == name for manager in donor._meta.local_managers
+        )
+
+    @classmethod
+    def _matching_manager_options(cls, source: type[models.Model], donor: type[models.Model]) -> set[str]:
+        """Permit native selector defaults only when they select the source's same slot."""
+        allowed: set[str] = set()
+        for option in ("base_manager_name", "default_manager_name"):
+            if option not in vars(donor.Meta):
+                continue
+            name = getattr(donor._meta, option, None)
+            if not isinstance(name, str) or not cls._inherited_queryset_manager(donor, name):
+                continue
+            expected = getattr(source._meta, option, None)
+            if expected is None:
+                manager = source._base_manager if option == "base_manager_name" else source._default_manager
+                expected = manager.name if manager is not None else "objects"
+            if name == expected:
+                allowed.add(option)
+        return allowed
+
     def _resolve_querysets(
         self, source: type[models.Model]
     ) -> dict[str, tuple[models.Manager[Any], tuple[type[models.QuerySet[Any, Any]], ...]]]:
@@ -497,6 +545,7 @@ class ModelComposition:
                             callable(value)
                             and current is not None
                             and not method.startswith("_")
+                            and getattr(original, method, None) is not value
                             and not _native_forwarder(current, method)
                         ):
                             raise ImproperlyConfigured(
@@ -522,6 +571,10 @@ class ModelComposition:
                             "__parameters__",
                             "__slotnames__",
                             "__type_params__",
+                            # Python 3.14 materializes these during lazy
+                            # annotation introspection; they add no behavior.
+                            "__annotate_func__",
+                            "__annotations_cache__",
                         }
                         and not _native_forwarder(value, key)
                         for key, value in vars(manager_type).items()
@@ -554,7 +607,7 @@ class ModelComposition:
                 rebuilt = {key: value for key, value in vars(reconstructed).items() if key not in ignored}
                 if state != rebuilt:
                     raise ValueError("state changed after construction")
-                for value in (args, kwargs, manager._db, manager._hints):  # type: ignore[attr-defined]
+                for value in (args, kwargs, manager._db, manager._hints):
                     MigrationWriter.serialize(value)
             except (TypeError, ValueError) as error:
                 raise ImproperlyConfigured(
@@ -634,6 +687,7 @@ class ModelComposition:
                         "abstract",
                         "app_label",
                         "constraints",
+                        *self._matching_manager_options(source, contributor),
                     }
                     if forbidden:
                         raise ImproperlyConfigured(
@@ -672,6 +726,10 @@ class ModelComposition:
                         fields[native.name] = (previous[0], source if contributor is source else None)
                 for manager in contributor._meta.managers:
                     if manager.auto_created:
+                        continue
+                    if contributor is not source and self._inherited_queryset_manager(
+                        contributor, manager.name
+                    ):
                         continue
                     previous_manager = managers.setdefault(manager.name, manager)
                     abstract_override = contributor is source and any(

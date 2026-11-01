@@ -699,3 +699,192 @@ if {base_name!r}:
     assert Parent._base_manager.name == Child._base_manager.name == 'objects'
 """,
     )
+
+
+NATIVE_DONOR = """
+from django.db.models.base import ModelBase
+class NativeModelBase(ModelBase):
+    def __new__(mcs, name, bases, attrs, **kwargs):
+        meta = attrs.get('Meta')
+        attrs['Meta'] = type('Meta', (meta,) if meta else (), {
+            'default_manager_name': 'objects', 'base_manager_name': '_angee_base',
+        })
+        return super().__new__(mcs, name, bases, attrs, **kwargs)
+class NativeBehavior(models.Model, metaclass=NativeModelBase):
+    objects = models.Manager()
+    _angee_base = models.Manager()
+    class Meta:
+        abstract = True
+class GuardedQuerySet(models.QuerySet):
+    def guarded(self): return self.all()
+class TrackedQuerySet(models.QuerySet):
+    def tracked(self): return self.all()
+class Guard(NativeBehavior, Composable, extends='coreapp.Contract'):
+    compose_querysets = {'objects': GuardedQuerySet, '_angee_base': TrackedQuerySet}
+    class Meta:
+        abstract = True
+"""
+NATIVE_SOURCE = """
+class DomainQuerySet(models.QuerySet):
+    def named(self, title): return self.filter(title=title)
+class DomainManager(models.Manager.from_queryset(DomainQuerySet)):
+    def __init__(self, marker):
+        super().__init__()
+        self.marker = marker
+    def factory(self): return self.marker
+class Contract(Composable):
+    objects = DomainManager('source').db_manager('default', hints={'owner': 'source'})
+    _angee_base = models.Manager()
+    class Meta:
+        abstract = True
+        base_manager_name = '_angee_base'
+        default_manager_name = 'objects'
+class Item(Contract, concrete=True):
+    title = models.CharField(max_length=30)
+    class Meta(Contract.Meta):
+        abstract = True
+"""
+
+
+def test_native_metaclass_donor_extends_source_managers_without_replacing_factories(tmp_path):
+    run_host(
+        tmp_path,
+        {"coreapp": NATIVE_SOURCE, "extraapp": NATIVE_DONOR},
+        """
+composition = ModelComposition.discover(apps.get_app_configs())
+from coreapp.models import Item as Source
+from extraapp.models import Guard, NativeBehavior
+assert set(vars(Guard.Meta)) >= {'default_manager_name', 'base_manager_name'}
+assert not Guard._meta.local_managers
+assert composition.queryset_contributions(Source)['objects'][0].marker == 'source'
+assert composition.queryset_contributions(Source)['objects'][0].model is Source
+assert render_models(composition, 'coreapp') == render_models(composition, 'coreapp')
+emit_models(composition)
+Item = apps.get_model('coreapp', 'Item')
+assert isinstance(Item(), NativeBehavior)
+assert Item._default_manager.name == 'objects'
+assert Item._base_manager.name == '_angee_base'
+assert Item.objects.factory() == 'source'
+assert Item.objects._db == 'default'
+assert Item.objects._hints == {'owner': 'source'}
+assert Item.objects.guarded().named('safe').model is Item
+assert hasattr(Item._angee_base, 'tracked')
+assert not hasattr(Item._angee_base, 'guarded')
+""",
+    )
+
+
+@pytest.mark.parametrize(
+    ("declaration", "message"),
+    [
+        (
+            "    objects = models.Manager()\n    class Meta:\n        abstract = True\n",
+            "composes manager 'objects' twice",
+        ),
+        (
+            "    class Meta:\n        abstract = True\n        default_manager_name = 'other'\n",
+            "unsupported options default_manager_name",
+        ),
+        (
+            "    class Meta:\n        abstract = True\n        base_manager_name = 'other'\n",
+            "unsupported options base_manager_name",
+        ),
+        (
+            "    class Meta:\n        abstract = True\n        ordering = ['pk']\n",
+            "unsupported options ordering",
+        ),
+    ],
+)
+def test_queryset_donors_refuse_authored_manager_and_selector_collisions(tmp_path, declaration, message):
+    donor = """
+class GuardedQuerySet(models.QuerySet):
+    def guarded(self): return self.all()
+class InheritedManagers(models.Model):
+    objects = models.Manager()
+    _angee_base = models.Manager()
+    class Meta:
+        abstract = True
+class Guard(InheritedManagers, Composable, extends='coreapp.Contract'):
+    compose_querysets = {'objects': GuardedQuerySet, '_angee_base': GuardedQuerySet}
+DECLARATION
+""".replace("DECLARATION", declaration)
+    result = run_host(
+        tmp_path,
+        {"coreapp": NATIVE_SOURCE, "extraapp": donor},
+        "ModelComposition.discover(apps.get_app_configs())",
+        success=False,
+    )
+    assert message in result.stderr
+
+
+def test_existing_manager_method_keeps_its_original_queryset_contract(tmp_path):
+    run_host(
+        tmp_path,
+        {
+            "coreapp": """
+class ExistingQuerySet(models.QuerySet):
+    def guarded(self): return self.all()
+class ExistingManager(models.Manager.from_queryset(ExistingQuerySet)):
+    def guarded(self): return 'existing manager policy'
+class Contract(Composable):
+    objects = ExistingManager()
+    class Meta:
+        abstract = True
+class Item(Contract, concrete=True):
+    class Meta:
+        abstract = True
+""",
+            "extraapp": """
+from coreapp.models import ExistingQuerySet
+class Contribution(ExistingQuerySet):
+    def extra(self): return self.all()
+class Guard(Composable, extends='coreapp.Contract'):
+    compose_querysets = {'objects': Contribution}
+    class Meta:
+        abstract = True
+""",
+        },
+        """
+composition = ModelComposition.discover(apps.get_app_configs())
+emit_models(composition)
+Item = apps.get_model('coreapp', 'Item')
+assert Item.objects.guarded() == 'existing manager policy'
+assert Item.objects.extra().model is Item
+""",
+    )
+
+
+def test_anonymous_factory_survives_native_lazy_annotation_introspection(tmp_path):
+    run_host(
+        tmp_path,
+        {
+            "coreapp": """
+class DomainQuerySet(models.QuerySet):
+    def domain(self): return self.all()
+class Contract(Composable):
+    objects = DomainQuerySet.as_manager()
+    class Meta:
+        abstract = True
+class Item(Contract, concrete=True):
+    class Meta:
+        abstract = True
+""",
+            "extraapp": """
+class ExtensionQuerySet(models.QuerySet):
+    def extension(self): return self.all()
+class Extension(Composable, extends='coreapp.Contract'):
+    compose_querysets = {'objects': ExtensionQuerySet}
+    class Meta:
+        abstract = True
+""",
+        },
+        """
+import inspect
+from coreapp.models import Item as Source
+inspect.get_annotations(type(Source._meta.managers_map['objects']))
+composition = ModelComposition.discover(apps.get_app_configs())
+emit_models(composition)
+Item = apps.get_model('coreapp', 'Item')
+assert Item.objects.domain().extension().model is Item
+""",
+    )

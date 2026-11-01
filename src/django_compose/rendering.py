@@ -132,8 +132,8 @@ def render_models(
                 f"    auto_created = {manager.auto_created!r}"
             )
             expression = f"{manager_class}(*{native(args)}, **{native(kwargs)})"
-            if manager._db is not None or manager._hints:  # type: ignore[attr-defined]
-                expression += f".db_manager(using={native(manager._db)}, hints={native(manager._hints)})"  # type: ignore[attr-defined]
+            if manager._db is not None or manager._hints:
+                expression += f".db_manager(using={native(manager._db)}, hints={native(manager._hints)})"
             manager_attributes.append(f"    {manager_name} = {expression}")
         declaration = (declarations or {}).get(source, ModelDeclaration())
         body = [

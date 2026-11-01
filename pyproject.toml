@@ -55,3 +55,23 @@ strict = true
 files = ["src/django_compose"]
 ignore_missing_imports = true
 
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "README.md" },
+    { file = "LICENSE" },
+    { file = "COPYING" },
+    { file = "NOTICE" },
+    { file = "src/**/*" },
+    { file = "tests/**/*" },
+    { file = "examples/**/*" },
+    { file = "scripts/**/*" },
+    { file = "docs/**/*" },
+    { file = "AGENTS.md" },
+    { file = "CONTRIBUTING.md" },
+    { file = "CHANGELOG.md" },
+    { file = "Makefile" },
+    { file = "uv.lock" },
+    { git = { commit = true } },
+]

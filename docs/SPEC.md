@@ -92,6 +92,12 @@ CapabilityQuerySet, "unfiltered": TrackingQuerySet}`. Each key names an existing
 native manager; `objects` may also select Django's implicit default when no
 manager is declared. Contributions extend that manager's QuerySet, not another
 manager's policy. Ordinary colliding donor managers keep the rules above.
+At an explicitly mapped slot, an inherited donor manager does not replace the
+source's manager factory or configuration. A directly declared donor manager
+still follows the collision rules above. Native metaclass defaults for
+`base_manager_name` and `default_manager_name` are accepted only when they select
+the source's same effective native manager and its slot is explicitly mapped.
+Mismatched selectors and unrelated donor Meta options remain errors.
 Donor mappings follow native MRO; contributions follow enabled-app/declaration
 order, then inherited concrete-parent contributions and the source QuerySet.
 Duplicate classes and redundant ancestors collapse before Python checks C3.
@@ -134,7 +140,8 @@ availability, not arbitrary referenced attributes. Generated modules are never
 hand-edited to preserve historical names.
 
 The source's `Meta` is preserved. Extension classes may author native
-`constraints`, `abstract` and `app_label` options; other authored native options
+`constraints`, `abstract` and `app_label` options; matching manager selectors
+follow the explicit QuerySet contract above. Other authored native options
 are refused. Constraint selection preserves shared ancestry and rejects duplicate
 effective names using Django's interpolation rules.
 
