@@ -701,7 +701,9 @@ class Extra(Composable, extends="coreapp.Parent"):
         "ModelComposition.discover(apps.get_app_configs())",
         success=False,
     )
-    assert "extraapp.Extra: donor Meta authors unsupported options ordering" in result.stderr
+    assert (
+        "extraapp.Extra on coreapp.Parent: donor Meta authors unsupported options ordering" in result.stderr
+    )
 
 
 def test_literal_reservations_follow_native_owners_and_retired_names_are_free(tmp_path):

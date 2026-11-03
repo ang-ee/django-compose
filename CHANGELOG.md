@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0.dev9
 
 - Add explicit donor `compose_querysets` mappings, preserving native domain
   managers, constructor configuration, named base/default managers and fluent
