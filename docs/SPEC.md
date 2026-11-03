@@ -88,10 +88,14 @@ Unknown targets,
 parent or module dependency cycles, and unmet ancestor demands fail explicitly.
 
 An extension donor may explicitly declare `compose_querysets = {"objects":
-CapabilityQuerySet, "unfiltered": TrackingQuerySet}`. Each key names an existing
-native manager; `objects` may also select Django's implicit default when no
-manager is declared. Contributions extend that manager's QuerySet, not another
-manager's policy. Ordinary colliding donor managers keep the rules above.
+CapabilityQuerySet, "unfiltered": TrackingQuerySet}` and `compose_managers =
+{"objects": CapabilityManager}`. Each key names an existing native manager;
+`objects` may also select Django's implicit default when no manager is declared.
+Contributions extend that manager's QuerySet or manager class without replacing
+the selected native manager instance. Ordinary colliding donor managers keep the
+rules above. Mapping keys must be identifiers other than `_base_manager` and
+`_default_manager`; values must be importable native QuerySet or Manager classes,
+respectively, and mappings belong on extension donors.
 At an explicitly mapped slot, an inherited donor manager does not replace the
 ordinary extension's effective manager factory or configuration, or the source's
 when no ordinary extension overrides that slot. The ordinary extension's
@@ -99,7 +103,8 @@ manager may itself be inherited through native Django ancestry. Competing
 extension managers still follow the collision rules above. Native metaclass
 defaults for
 `base_manager_name` and `default_manager_name` are accepted only when they select
-the source's same effective native manager and its slot is explicitly mapped.
+the source's same effective native manager and its slot is explicitly mapped by
+either contribution.
 A source may override a selector inherited from a shared native model ancestor:
 an inherited donor selector remains valid only when both declarations retain
 that ancestor's same manager provenance at the explicitly mapped slot. An
@@ -115,19 +120,29 @@ Effective method providers are compared across independent selected bases;
 already-authored multiple inheritance retains its native cooperative method
 order, and a non-callable first attribute hides an ancestor method as in Python. Unrelated independent bases claiming the same new public QuerySet method
 fail; native QuerySet hooks may compose cooperatively through `super()`.
+Manager classes follow the same minimal-base, C3 and competing-public-method
+rules, in donor order followed by the selected source manager class. A specialized
+source manager already subclassing a donor class is kept as the sole necessary
+base. Concrete children with their own mapped slot retain their parent's
+manager-class contributions. Donor manager classes must not define constructors,
+deconstruction or instance state; their `get_queryset()` hooks must cooperate
+through `super()`.
 
-For explicit QuerySet selection and its concrete-ancestor closure only, the
+For explicit QuerySet or Manager selection and its concrete-ancestor closure only, the
 compiler asks native abstract model construction for baseline manager MRO and
 default selection. Native copies reproduce emitted parent local-manager slots
 and creation order, retaining their authored provenance. These build-only
 planning classes are never emitted or registered as concrete Django models and
 do not run `_prepare`/`class_prepared`; subclass, field and manager-copy hooks do
 run and must honor Django's abstract-model/copy contracts. Builds without
-explicit QuerySet contributions do not construct these planning classes.
+explicit manager or QuerySet contributions do not construct these planning classes.
 
-The renderer emits named generic QuerySet and stable Manager subclasses, using
-Django's `Manager.from_queryset` for forwarding and manager-method precedence.
-An authored manager method that would bypass a contributed method is refused;
+The renderer emits named generic QuerySet and stable ManagerBase and Manager
+subclasses, using Django's `Manager.from_queryset` for forwarding and
+manager-method precedence. Static `get_queryset()` and `all()` return types name
+the composed QuerySet; native forwarded QuerySet methods retain their signatures.
+An authored source or donor manager method that would bypass a contributed
+QuerySet method is refused;
 native forwarding wrappers remain valid. Original manager ancestry, factories,
 constructor arguments, keyword configuration, default/base manager names,
 database alias and hints survive. Named managers are independent: contributing
@@ -153,13 +168,14 @@ hand-edited to preserve historical names.
 
 The source's `Meta` is preserved. Extension classes may author native
 `constraints`, `abstract` and `app_label` options; matching manager selectors
-follow the explicit QuerySet contract above. Other authored native options
+follow the explicit mapping contract above. Other authored native options
 are refused. Constraint selection preserves shared ancestry and rejects duplicate
 effective names using Django's interpolation rules.
 
 `ModelComposition` exposes `ordered_models`, `models_by_label`, `donors(source)`,
 `parent(source)`, `contributed_fields(source)` and
-`contributed_field_origins(source)` and `queryset_contributions(source)`. Generated models expose
+`contributed_field_origins(source)`, `queryset_contributions(source)` and
+`manager_bases(source, name)`. Generated models expose
 `compose_contributed_field_origins` as sorted `(field_name, declaring_app_name)`
 pairs. See [model examples](models.md) for usage.
 

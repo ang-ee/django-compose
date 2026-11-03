@@ -30,7 +30,13 @@ def render_models(
         return selected
 
     classvar = alias("_ComposeClassVar")
-    imports = {f"from typing import ClassVar as {classvar}"}
+    type_checking = alias("_ComposeTypeChecking")
+    typed_cast = alias("_ComposeCast")
+    imports = {
+        f"from typing import ClassVar as {classvar}",
+        f"from typing import TYPE_CHECKING as {type_checking}",
+        f"from typing import cast as {typed_cast}",
+    }
     classes = []
 
     def native(value: object) -> str:
@@ -100,6 +106,7 @@ def render_models(
                     f"{source._meta.label}: generated manager name collision {manager_class!r}"
                 )
             used_names.add(manager_class)
+            manager_base_name = alias(prefix + "ManagerBase")
             factory = alias(prefix + "Factory")
             model_parameter = alias(prefix + "Model")
             model_bound = abstract
@@ -120,20 +127,32 @@ def render_models(
                     owner = alias(prefix + "ManagerOwner")
                     imports.add(f"from {manager.model.__module__} import {manager.model.__name__} as {owner}")
                 owner_expression = f"{owner}._meta.managers_map[{manager.name!r}].__class__"
-            base_manager = manager_base(type(manager), owner_expression, prefix)
+            manager_bases = [
+                manager_base(base, owner_expression if base is type(manager) else "", prefix + str(index))
+                for index, base in enumerate(composition.manager_bases(source, manager_name))
+            ]
             args, kwargs = manager._constructor_args  # type: ignore[attr-defined]
             classes.append(
                 f"class {queryset_name}[{model_parameter}: {model_bound}]({', '.join(queryset_bases)}):\n"
                 f'    """Cooperative QuerySet contributions for {name}.{manager_name}."""\n\n'
-                f"{factory} = {base_manager}.from_queryset({queryset_name})\n\n"
-                f"class {manager_class}({factory}):\n"
+                f"class {manager_base_name}({', '.join(manager_bases)}):\n"
+                f'    """Cooperative Manager contributions for {name}.{manager_name}."""\n\n'
+                f"{factory} = {manager_base_name}.from_queryset({queryset_name})\n\n"
+                f"class {manager_class}[{model_parameter}: {model_bound}]({factory}[{model_parameter}]):\n"
                 f'    """Stable native migration import for {name}.{manager_name}."""\n'
                 f"    use_in_migrations = {manager.use_in_migrations!r}\n"
-                f"    auto_created = {manager.auto_created!r}"
+                f"    auto_created = {manager.auto_created!r}\n"
+                f"    if {type_checking}:\n"
+                f"        def get_queryset(self) -> {queryset_name}[{model_parameter}]:\n"
+                f"            return {typed_cast}({queryset_name}[{model_parameter}], "
+                "super().get_queryset())\n"
+                f"        def all(self) -> {queryset_name}[{model_parameter}]:\n"
+                f"            return {typed_cast}({queryset_name}[{model_parameter}], super().all())"
             )
             expression = f"{manager_class}(*{native(args)}, **{native(kwargs)})"
-            if manager._db is not None or manager._hints:
-                expression += f".db_manager(using={native(manager._db)}, hints={native(manager._hints)})"
+            hints = manager._hints  # type: ignore[attr-defined]
+            if manager._db is not None or hints:
+                expression += f".db_manager(using={native(manager._db)}, hints={native(hints)})"
             manager_attributes.append(f"    {manager_name} = {expression}")
         declaration = (declarations or {}).get(source, ModelDeclaration())
         body = [

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add donor `compose_managers` mappings that combine cooperative manager classes
+  with the source-owned manager instance, including across concrete inheritance.
+  Refuse donor manager methods that bypass contributed QuerySet methods.
+- Type generated managers' `get_queryset()` and `all()` as the composed QuerySet
+  while retaining Django's forwarded method signatures.
+
 ## 0.1.0.dev9
 
 - Add explicit donor `compose_querysets` mappings, preserving native domain

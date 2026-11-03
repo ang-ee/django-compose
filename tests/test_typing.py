@@ -847,6 +847,8 @@ class DomainManager[T: Contract](_DomainManager[T]):
     use_in_migrations = True
     def label(self) -> str:
         return "domain"
+    def get_queryset(self) -> DomainQuerySet[T]:
+        return super().get_queryset()
 class Item(Contract, concrete=True):
     title = models.CharField(max_length=30)
     objects = DomainManager.from_queryset(DomainQuerySet)()
@@ -860,8 +862,12 @@ class Other(Contract, concrete=True):
 class CapabilityQuerySet[T: models.Model](models.QuerySet[T]):
     def scoped(self) -> Self:
         return self.all()
+class CapabilityManager[T: models.Model](models.Manager[T]):
+    def capability(self) -> str:
+        return 'protected'
 class Scope(Composable, extends='modelapp.Contract'):
     compose_querysets = {'objects': CapabilityQuerySet}
+    compose_managers = {'objects': CapabilityManager}
     class Meta:
         abstract = True
 """)
@@ -870,10 +876,17 @@ class Scope(Composable, extends='modelapp.Contract'):
 from typing import assert_type
 from modelapp.models import Item, Other
 from typed_runtime.modelapp.models import Item as RuntimeItem
+from typed_runtime.modelapp.models import _Compose4Item7objectsQuerySet
 assert_type(Item.objects.label(), str)
+assert_type(Item.objects.capability(), str)
 assert_type(Item.objects.scoped().named('a').get(), Item)
 assert_type(Other.objects.named('b').scoped().get(), Other)
 assert_type(RuntimeItem.objects.scoped().named('a').get(), RuntimeItem)
+assert_type(RuntimeItem.objects.get_queryset(), _Compose4Item7objectsQuerySet[RuntimeItem])
+assert_type(RuntimeItem.objects.all(), _Compose4Item7objectsQuerySet[RuntimeItem])
+assert_type(RuntimeItem.objects.filter(title='a'), _Compose4Item7objectsQuerySet[RuntimeItem])
+assert_type(Item.objects.get_queryset(), _Compose4Item7objectsQuerySet[Item])
+assert_type(Item.objects.all(), _Compose4Item7objectsQuerySet[Item])
 """)
     for _ in range(2):
         result = check(config, env, consumer)

@@ -147,6 +147,7 @@ class ModelComposition:
         for donors in extensions.values():
             for donor in donors:
                 self._declared_querysets(donor)
+                self._declared_managers(donor)
         self.required_ancestors = self._requirements()
         self._contributions: dict[
             type[models.Model], tuple[tuple[models.Field[Any, Any], type[models.Model] | None], ...]
@@ -157,12 +158,16 @@ class ModelComposition:
             type[models.Model],
             dict[str, tuple[models.Manager[Any], tuple[type[models.QuerySet[Any, Any]], ...]]],
         ] = {}
+        self._manager_bases: dict[type[models.Model], dict[str, tuple[type[models.Manager[Any]], ...]]] = {}
         self._manager_models: dict[type[models.Model], type[models.Model]] = {}
         self._manager_origins: dict[int, models.Manager[Any]] = {}
         self._default_manager_names: dict[type[models.Model], str] = {}
         needed = set()
         for source in self.ordered_models:
-            if any(self._declared_querysets(donor) for donor in self.donors(source)):
+            if any(
+                self._declared_querysets(donor) or self._declared_managers(donor)
+                for donor in self.donors(source)
+            ):
                 current: type[models.Model] | None = source
                 while current is not None:
                     needed.add(current)
@@ -170,6 +175,7 @@ class ModelComposition:
         for source in self.ordered_models:
             if source not in needed:
                 self._querysets[source] = {}
+                self._manager_bases[source] = {}
                 continue
             # Native abstract construction owns manager MRO. It still runs
             # subclass/field hooks, but skips concrete registration/_prepare.
@@ -184,8 +190,8 @@ class ModelComposition:
             inherited_slots = {
                 name
                 for donor in self.donors(source)
-                for name in self._declared_querysets(donor)
-                if self._inherited_queryset_manager(donor, name) and name in donor._meta.managers_map
+                for name in self._mapped_slots(donor)
+                if self._inherited_composed_manager(donor, name) and name in donor._meta.managers_map
             }
             if inherited_slots:
                 # Ask Django for fallback source/parent manager ownership without
@@ -213,7 +219,7 @@ class ModelComposition:
                             donor._meta.managers_map[name]
                             for donor in self.donors(source)
                             if name in donor._meta.managers_map
-                            and not self._inherited_queryset_manager(donor, name)
+                            and not self._inherited_composed_manager(donor, name)
                         ),
                         baseline._meta.managers_map.get(name),
                     )
@@ -284,6 +290,8 @@ class ModelComposition:
                 own = vars(model)
                 if "compose_querysets" in own:
                     cls._declared_querysets(model)
+                if "compose_managers" in own:
+                    cls._declared_managers(model)
                 marked = any(name.startswith("compose_") for name in own)
                 if not model._meta.abstract:
                     if marked:
@@ -295,9 +303,13 @@ class ModelComposition:
                 if type(concrete) is not bool:
                     raise ImproperlyConfigured(f"{model._meta.label}.compose_concrete must be a boolean")
                 target = own.get("compose_extends")
-                if "compose_querysets" in own and own["compose_querysets"] and target is None:
+                if (
+                    any(own.get(marker) for marker in ("compose_querysets", "compose_managers"))
+                    and target is None
+                ):
                     raise ImproperlyConfigured(
-                        f"{model._meta.label}: compose_querysets belongs on an extension donor"
+                        f"{model._meta.label}: manager and QuerySet contributions "
+                        "belong on an extension donor"
                     )
                 if (
                     not concrete
@@ -389,7 +401,13 @@ class ModelComposition:
             )
             for name, (_, querysets) in self.queryset_contributions(source).items():
                 manager: models.Manager[Any] = model._meta.managers_map[name]
-                actual = manager._queryset_class
+                if not all(isinstance(manager, base) for base in self.manager_bases(source, name)):
+                    raise ImproperlyConfigured(
+                        f"{model._meta.label}.{name}: manager construction bypasses Manager contributions"
+                    )
+                # The six private-manager attribute ignores here and in rendering.py
+                # can go when the pinned django-stubs fork moves to 6.1.2.post4.
+                actual = manager._queryset_class  # type: ignore[attr-defined]
                 if not isinstance(actual, type) or not all(issubclass(actual, base) for base in querysets):
                     raise ImproperlyConfigured(
                         f"{model._meta.label}.{name}: manager construction bypasses QuerySet contributions"
@@ -407,6 +425,10 @@ class ModelComposition:
     ) -> Mapping[str, tuple[models.Manager[Any], tuple[type[models.QuerySet[Any, Any]], ...]]]:
         """Explicit manager extensions, in deterministic cooperative C3 order."""
         return self._querysets[source]
+
+    def manager_bases(self, source: type[models.Model], name: str) -> tuple[type[models.Manager[Any]], ...]:
+        """Minimal cooperative manager ancestry for an explicitly mapped slot."""
+        return self._manager_bases[source][name]
 
     def default_manager_name(self, source: type[models.Model]) -> str:
         """Return the native baseline default for a source requiring manager composition."""
@@ -438,10 +460,51 @@ class ModelComposition:
                 selected.setdefault(name, []).append(queryset)
         return selected
 
+    @staticmethod
+    def _declared_managers(
+        contributor: type[models.Model],
+    ) -> dict[str, list[type[models.Manager[Any]]]]:
+        selected: dict[str, list[type[models.Manager[Any]]]] = {}
+        for owner in contributor.__mro__:
+            declarations = vars(owner).get("compose_managers", {})
+            if not isinstance(declarations, Mapping):
+                raise ImproperlyConfigured(f"{contributor._meta.label}: compose_managers requires a mapping")
+            for name, manager in declarations.items():
+                if (
+                    not isinstance(name, str)
+                    or not name.isidentifier()
+                    or keyword.iskeyword(name)
+                    or name in {"_base_manager", "_default_manager"}
+                    or not isinstance(manager, type)
+                    or not issubclass(manager, models.Manager)
+                ):
+                    raise ImproperlyConfigured(
+                        f"{contributor._meta.label}: invalid compose_managers declaration {name!r}"
+                    )
+                if not _importable(manager):
+                    raise ImproperlyConfigured(f"Manager {manager!r} must be importable")
+                for base in manager.__mro__:
+                    if base in models.Manager.__mro__:
+                        break
+                    stateful = {"__init__", "__new__", "__setattr__", "__delattr__", "deconstruct"} & vars(
+                        base
+                    ).keys()
+                    if stateful or vars(base).get("__slots__"):
+                        raise ImproperlyConfigured(
+                            f"{contributor._meta.label}.{name}: donor manager class {base!r} "
+                            "defines constructor, deconstruction or instance state"
+                        )
+                selected.setdefault(name, []).append(manager)
+        return selected
+
     @classmethod
-    def _inherited_queryset_manager(cls, donor: type[models.Model], name: str) -> bool:
-        """A QuerySet contribution does not redeclare an inherited manager instance."""
-        return name in cls._declared_querysets(donor) and not any(
+    def _mapped_slots(cls, donor: type[models.Model]) -> set[str]:
+        return cls._declared_querysets(donor).keys() | cls._declared_managers(donor).keys()
+
+    @classmethod
+    def _inherited_composed_manager(cls, donor: type[models.Model], name: str) -> bool:
+        """A mapped contribution does not redeclare an inherited manager instance."""
+        return name in cls._mapped_slots(donor) and not any(
             manager.name == name for manager in donor._meta.local_managers
         )
 
@@ -453,7 +516,7 @@ class ModelComposition:
             if option not in vars(donor.Meta):
                 continue
             name = getattr(donor._meta, option, None)
-            if not isinstance(name, str) or not cls._inherited_queryset_manager(donor, name):
+            if not isinstance(name, str) or not cls._inherited_composed_manager(donor, name):
                 continue
             expected = getattr(source._meta, option, None)
             if expected is None:
@@ -469,7 +532,10 @@ class ModelComposition:
                         any(manager.name == name for manager in source._meta.local_managers)
                         or type(source_manager) is type(donor_manager)
                         or not isinstance(source_manager, type(donor_manager))
-                        or not issubclass(source_manager._queryset_class, donor_manager._queryset_class)
+                        or not issubclass(
+                            source_manager._queryset_class,  # type: ignore[attr-defined]
+                            donor_manager._queryset_class,  # type: ignore[attr-defined]
+                        )
                     ):
                         continue
                 # A native source may override its shared ancestor's selector.
@@ -504,15 +570,20 @@ class ModelComposition:
         self, source: type[models.Model]
     ) -> dict[str, tuple[models.Manager[Any], tuple[type[models.QuerySet[Any, Any]], ...]]]:
         selected: dict[str, list[type[models.QuerySet[Any, Any]]]] = {}
+        manager_classes: dict[str, list[type[models.Manager[Any]]]] = {}
         for contributor in self.donors(source):
             for name, querysets in self._declared_querysets(contributor).items():
                 selected.setdefault(name, []).extend(querysets)
+            for name, managers in self._declared_managers(contributor).items():
+                selected.setdefault(name, [])
+                manager_classes.setdefault(name, []).extend(managers)
         parent = self.parent(source)
         while parent is not None:
             for name in selected:
                 inherited = self._querysets[parent].get(name)
                 if inherited is not None:
                     selected[name].extend(inherited[1])
+                    manager_classes.setdefault(name, []).extend(self._manager_bases[parent].get(name, ()))
             parent = self.parent(parent)
         contributors: list[type[models.Model]] = []
         current: type[models.Model] | None = source
@@ -541,7 +612,7 @@ class ModelComposition:
                 manager.auto_created = True
             if manager is None:
                 raise ImproperlyConfigured(
-                    f"{source._meta.label}: compose_querysets names missing manager {name!r}"
+                    f"{source._meta.label}: composition names missing manager {name!r}"
                 )
             self._validate_field_managers(
                 source,
@@ -553,7 +624,7 @@ class ModelComposition:
                 ),
                 (name,),
             )
-            original = manager._queryset_class
+            original = manager._queryset_class  # type: ignore[attr-defined]
             candidates = list(dict.fromkeys([*querysets, original]))
             for queryset in candidates:
                 if not _importable(queryset):
@@ -593,18 +664,19 @@ class ModelComposition:
                     if owner in models.QuerySet.__mro__:
                         continue
                     for method, value in vars(owner).items():
-                        current = getattr(type(manager), method, None)
-                        if (
-                            callable(value)
-                            and current is not None
-                            and not method.startswith("_")
-                            and getattr(original, method, None) is not value
-                            and not _native_forwarder(current, method)
-                        ):
-                            raise ImproperlyConfigured(
-                                f"{source._meta.label}.{name}: manager method {method!r} "
-                                "bypasses QuerySet contribution"
-                            )
+                        for manager_type in (type(manager), *manager_classes.get(name, ())):
+                            current = getattr(manager_type, method, None)
+                            if (
+                                callable(value)
+                                and current is not None
+                                and not method.startswith("_")
+                                and getattr(original, method, None) is not value
+                                and not _native_forwarder(current, method)
+                            ):
+                                raise ImproperlyConfigured(
+                                    f"{source._meta.label}.{name}: manager method {method!r} "
+                                    "bypasses QuerySet contribution"
+                                )
             manager_type = type(manager)
             while True:
                 if _importable(manager_type):
@@ -660,12 +732,49 @@ class ModelComposition:
                 rebuilt = {key: value for key, value in vars(reconstructed).items() if key not in ignored}
                 if state != rebuilt:
                     raise ValueError("state changed after construction")
-                for value in (args, kwargs, manager._db, manager._hints):
+                for value in (args, kwargs, manager._db, manager._hints):  # type: ignore[attr-defined]
                     MigrationWriter.serialize(value)
             except (TypeError, ValueError) as error:
                 raise ImproperlyConfigured(
                     f"{source._meta.label}.{name}: manager state cannot be reconstructed: {error}"
                 ) from error
+            manager_candidates = list(dict.fromkeys([*manager_classes.get(name, ()), type(manager)]))
+            manager_bases = tuple(
+                base
+                for base in manager_candidates
+                if not any(base is not other and issubclass(other, base) for other in manager_candidates)
+            )
+            try:
+                type("_ComposeManagerBase", manager_bases, {})
+            except TypeError as error:
+                raise ImproperlyConfigured(
+                    f"{source._meta.label}.{name}: incompatible Manager MRO: {error}"
+                ) from error
+            manager_methods: dict[str, type] = {}
+            for base in manager_bases:
+                manager_effective: set[str] = set()
+                for owner in base.__mro__:
+                    if owner in models.Manager.__mro__:
+                        continue
+                    for method, value in vars(owner).items():
+                        if method in manager_effective:
+                            continue
+                        manager_effective.add(method)
+                        if (
+                            method.startswith("_")
+                            or hasattr(models.Manager, method)
+                            or not callable(value)
+                            or _native_forwarder(value, method)
+                        ):
+                            continue
+                        previous = manager_methods.setdefault(method, owner)
+                        if not (issubclass(previous, owner) or issubclass(owner, previous)):
+                            raise ImproperlyConfigured(
+                                f"{source._meta.label}.{name}: competing Manager method {method!r}"
+                            )
+                        if issubclass(owner, previous):
+                            manager_methods[method] = owner
+            self._manager_bases.setdefault(source, {})[name] = manager_bases
             result[name] = (manager, bases)
         return result
 
@@ -781,7 +890,7 @@ class ModelComposition:
                 for manager in contributor._meta.managers:
                     if manager.auto_created:
                         continue
-                    if contributor is not source and self._inherited_queryset_manager(
+                    if contributor is not source and self._inherited_composed_manager(
                         contributor, manager.name
                     ):
                         continue

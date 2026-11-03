@@ -111,6 +111,16 @@ class Rating(Composable, extends="catalog.Record"):
         abstract = True
 ```
 
+An extension donor can also declare `compose_managers = {"objects":
+RatingManager}` beside `compose_querysets`. `RatingManager` must be an importable
+`models.Manager` subclass with cooperative methods, such as `get_queryset()`
+calling `super().get_queryset()`. It must not define `__init__`, `deconstruct`
+or instance state. The generated manager uses the minimal cooperative bases:
+donor manager classes in donor order, then the selected source manager class.
+A source manager that already subclasses the donor class remains the base.
+Independent classes claiming the same new public manager method or an
+incompatible MRO fail during composition.
+
 Selected participants retain their domain manager factories and constructor
 configuration. `Item.objects.recommended()` and subsequent native queryset
 chains use the composed QuerySet. Use generic QuerySets and `Self` for fluent
@@ -118,13 +128,18 @@ methods so django-stubs preserves the complete composed chain. A custom manager
 `get_queryset()` must use `super().get_queryset()`; directly constructing its
 old QuerySet bypasses the declared composition. Composition never invokes that
 method at build time or invents an actor/request context.
+Declare the QuerySet model parameter with PEP 695 syntax, as in the example.
+Django's `QuerySet.__class_getitem__` hides the type parameter of older
+`TypeVar`-style generic classes from the renderer, so their generated bases
+cannot be parameterized and `.get()` may be inferred as `Any`.
 
 Select an unfiltered/tracking base manager separately, for example
 `compose_querysets = {"objects": RatingQuerySet, "unfiltered": TrackingQuerySet}`.
 The source owns those manager names and its `Meta.default_manager_name` and
 `Meta.base_manager_name`. An absent name fails, except Django's ordinary implicit
 `objects` when the model declares no manager. Colliding ordinary donor manager
-instances are not automatically merged. Competing new methods and manager
+instances are not automatically merged. A mapped manager class adds behavior to
+the selected instance; it does not redeclare the manager slot. Competing new methods and manager
 methods that bypass a contribution fail; native QuerySet write hooks can
 cooperate through `super()` in selected donor order.
 
