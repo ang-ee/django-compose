@@ -6,6 +6,9 @@ For runnable examples, use the [quick start](quickstart.md) and
 [project configuration](configuration.md). [Compatibility](dependencies.md)
 defines supported versions and platforms.
 
+- [Purpose](#purpose)
+- [Ownership](#ownership)
+- [Non-goals](#non-goals)
 - [Terms](#terms)
 - [Model declarations](#model-declarations)
 - [Application selection](#application-selection)
@@ -18,6 +21,45 @@ defines supported versions and platforms.
 - [Native history](#native-history)
 - [Database preparation and readiness](#database-preparation-and-readiness)
 - [Typing and import boundaries](#typing-and-import-boundaries)
+
+## Purpose
+
+django-compose is a build step for Django projects that share reusable apps.
+Apps declare abstract models that request a concrete identity (`concrete=True`),
+contribute to another app's model (`extends=`) or specialise one (`inherits=`).
+`compose` generates the ordinary concrete model classes, app configs and
+migration packages into a project-owned Python package, records a digest of
+every input and a hash of every file it wrote, and makes serving refuse to start
+on stale output. Django keeps owning models, app population, migrations, URLs
+and settings.
+
+## Ownership
+
+| Concern | Owner |
+| --- | --- |
+| App identity, population, `ready()`, system checks | Django `AppConfig` and `Apps` |
+| Fields, inheritance, managers, constraints, registration | Django models |
+| Migration detection, graph, state, execution, recording, routing | Django migrations |
+| Distribution metadata, entry points, requirement markers | `importlib.metadata` and `packaging` |
+| Settings merge grammar and provenance | django-yamlconf |
+| Declaration vocabulary and validation | `models.Composable`, `model_composition.ModelComposition` |
+| Deterministic emission | `rendering` |
+| Build inputs and digest | `snapshot` |
+| Build record, owned files, lock, verification | `serving`, `artifacts` |
+| Process lifecycle: mode, startup verification, active build | `lifecycle` |
+| App closure from roots and package metadata | `components` |
+| App settings contributions | `conf` |
+| Native history retention, guards, retirement | `migrations` |
+| Verified database preparation | `provision` |
+
+## Non-goals
+
+No runtime model registry or per-database class construction. No schema
+synchronisation or field injection into live classes. No dependency installer.
+No URL, ASGI or protocol vocabulary and no command middleware. No migration
+execution outside `provision`, which applies Django's own migrations for a
+verified build. No repair of generated output while serving: serving imports no
+compiler.
 
 ## Terms
 
@@ -188,8 +230,9 @@ labels. It does not expand dependencies.
 
 The base `django_compose.components.enabled_apps(roots, *, group=None) -> Closure`
 uses a nonempty group for distribution activation. Without a group it skips
-distribution metadata while retaining native `requires_apps` edges. An explicitly
-empty or invalid group fails. Its frozen result has
+distribution metadata while retaining declared `requires_apps` edges (a
+django-compose `AppConfig` contract). An explicitly empty or invalid group fails.
+Its frozen result has
 `entries: tuple[str, ...]` in dependency order, `roots: tuple[str, ...]` of authored
 root app names, and `required: frozenset[str]` of dependency-only app names.
 `components: Mapping[str, str]` maps selected canonical distribution names to
@@ -429,7 +472,8 @@ Native source import hooks still execute as part of Django population.
 Serving imports no compiler. Generated configurations subclass selected native
 configs, run their source import hook once, then select the generated
 `models_module`. Source packages remain runtime dependencies. `ComposeConfig` compares the retained startup receipt bytes before releasing
-startup ownership. Generated modules carry no generation headers.
+startup ownership. Generated modules carry no non-deterministic content: no clock,
+random identifier or absolute source path.
 
 `makemigrations`, `migrate`, `check_migrations`, `retire_history` and
 `reset_migration_history` require serving mode. The package launcher rejects a

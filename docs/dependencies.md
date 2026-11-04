@@ -40,9 +40,10 @@ proposed provider removal.
 
 `django_compose.components.enabled_apps(roots, group=None)` is included in the base
 installation. A group enables installed-distribution activation; without it,
-only native `requires_apps` edges apply. Installing a distribution or extra never
-by itself enables an app. See [component selection](components.md) for package metadata
-and native `AppConfig` examples.
+only declared `requires_apps` edges (a django-compose `AppConfig` contract) apply.
+Installing a distribution or extra does not by itself enable an app. See
+[component selection](components.md) for package metadata and native `AppConfig`
+examples.
 
 ## Advanced typing
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Document the package's purpose, ownership table and non-goals in the
+  specification; describe `requires_apps` as a django-compose `AppConfig`
+  contract; state the deterministic-content rule for generated modules.
 - Make `retire_history --purge` author the guarded native deletion migration and
   report the routed aliases; Django's `migrate` applies it before retirement.
 - Centralize startup and build ownership in one process lifecycle, verify check
