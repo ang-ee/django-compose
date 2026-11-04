@@ -461,10 +461,12 @@ hooks, and finalizes in the final `ready()` callback:
    `configure`, before resolving integrations or discovering model declarations.
    The process lifecycle retains that verified receipt through native population.
    Write mode permits an absent output package.
-2. Discover and validate declarations; render or compare generated models.
-3. Import generated models so native concrete classes are registered.
-4. Render or compare `models` artifacts through the restricted model view.
-5. Earlier native ready callbacks run, then the final build config renders `ready`
+2. Mark the receipt in progress in write mode, then compile the composition,
+   literal declarations and generated source bytes as a pure step with no
+   output-directory access. Publication uses receipt-owned guarded writes,
+   imports generated modules into Django's registry and validates those classes.
+3. Render or compare `models` artifacts through the restricted model view.
+4. Earlier native ready callbacks run, then the final build config renders `ready`
    artifacts with the native app registry and finalizes the record. A check performs
    no mutation.
 

@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 import importlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 
 from django.apps import AppConfig, apps
 from django.apps.registry import Apps
 from django.core.exceptions import ImproperlyConfigured
+from django.db import models
 
 from django_compose.artifacts import GeneratedTree, atomic_write, receipt_lock
-from django_compose.declarations import ArtifactHook, ModelDeclarationHook, ModelsView, model_declaration
+from django_compose.declarations import (
+    ArtifactHook,
+    ModelDeclaration,
+    ModelDeclarationHook,
+    ModelsView,
+    model_declaration,
+)
 from django_compose.lifecycle import process
 from django_compose.model_composition import ModelComposition
 from django_compose.rendering import render_models
@@ -27,6 +35,81 @@ class ConcreteModels:
 
     def get_model(self, label: str, name: str) -> Any:
         return apps.get_model(label, name, require_ready=False)
+
+
+@dataclass(frozen=True)
+class Build:
+    """The pure result of compiling a snapshot against selected native configs."""
+
+    composition: ModelComposition
+    declarations: Mapping[type[models.Model], ModelDeclaration]
+    sources: Mapping[Path, bytes]
+    labels: tuple[str, ...]
+
+
+def _generated_config_source(config: AppConfig, label: str, output_module: str) -> bytes:
+    config_path = f"{type(config).__module__}.{type(config).__qualname__}"
+    module, _, name = config_path.rpartition(".")
+    model_module = f"{output_module}.{label}.models"
+    return (
+        f"from {module} import {name} as SourceConfig\n\n"
+        "class GeneratedConfig(SourceConfig):\n"
+        f"    name = {config.name!r}\n    label = {label!r}\n\n"
+        "    def import_models(self):\n"
+        "        super().import_models()\n"
+        "        from importlib import import_module\n"
+        f"        self.models_module = import_module({model_module!r})\n"
+    ).encode()
+
+
+def compile(
+    snapshot: Snapshot,
+    configs: Iterable[AppConfig],
+    integrations: tuple[object, ...],
+    *,
+    output_module: str,
+    history_labels: Iterable[str],
+    initialized_migrations: Iterable[str],
+) -> Build:
+    """Discover declarations and render bytes without accessing generated output."""
+    selected = {entry.name for entry in snapshot.entries}
+    configs = tuple(config for config in configs if config.name in selected)
+    composition = ModelComposition.discover(configs)
+    candidate_models = {model for config in configs for model in (config.models or {}).values()}
+    candidate_models.update(composition.ordered_models)
+    for source in composition.ordered_models:
+        candidate_models.update(composition.donors(source))
+    for model in sorted(candidate_models, key=lambda model: model._meta.label):
+        swappable = model._meta.swappable
+        if swappable and swappable not in snapshot.settings:
+            raise ImproperlyConfigured(
+                f"Swappable setting {swappable!r} for {model._meta.label} must be declared "
+                "in COMPOSE_FINGERPRINT_SETTINGS"
+            )
+    hooks = tuple(hook for hook in integrations if isinstance(hook, ModelDeclarationHook))
+    declarations = {
+        source: model_declaration(composition, source, hooks) for source in composition.ordered_models
+    }
+    initialized = set(initialized_migrations)
+    sources: dict[Path, bytes] = {}
+    for label in sorted(set(history_labels) | set(composition.labels)):
+        sources[Path(label) / "__init__.py"] = b""
+        config = next((config for config in configs if config.label == label), None)
+        if config and label in composition.labels:
+            sources[Path(label) / "apps.py"] = _generated_config_source(config, label, output_module)
+        if label in composition.labels:
+            sources[Path(label) / "models.py"] = render_models(
+                composition, label, runtime_module=output_module, declarations=declarations
+            ).encode()
+        default = f"{output_module}.{label}.migrations"
+        if snapshot.authored_migration_modules.get(label, default) == default and label not in initialized:
+            sources[Path(label) / "migrations" / "__init__.py"] = b""
+    return Build(
+        composition,
+        MappingProxyType(declarations),
+        MappingProxyType(dict(sorted(sources.items()))),
+        composition.labels,
+    )
 
 
 class BuildPlan:
@@ -50,14 +133,14 @@ class BuildPlan:
         ):
             raise ImproperlyConfigured("Output package must have Python identifiers")
         self.snapshot = snap
-        selected = {entry.name for entry in snap.entries}
-        self.configs = tuple(c for c in configs if c.name in selected)
+        self.configs = tuple(configs)
         self.mode = mode
         self.integrations = integrations
         self.output_dir = output_dir
         self.output_module = output_module
         self.previous = read_receipt(output_dir)
-        self.sources: dict[Path, str | bytes] = {}
+        self.sources: dict[Path, bytes] = {}
+        self.build: Build
         self._lock = receipt_lock(
             output_dir,
             write=mode == "write",
@@ -67,7 +150,11 @@ class BuildPlan:
 
     @property
     def labels(self) -> tuple[str, ...]:
-        return self.composition.labels
+        return self.build.labels
+
+    @property
+    def composition(self) -> ModelComposition:
+        return self.build.composition
 
     def _receipt(self, *, progress: bool, hashes: dict[str, str] | None = None) -> Receipt:
         previous = self.previous
@@ -99,67 +186,35 @@ class BuildPlan:
             if self.mode == "write":
                 receipt = self._receipt(progress=True)
                 if self.previous is None:
-                    self.sources.update({Path(label) / "__init__.py": "" for label in receipt.HISTORY_LABELS})
+                    self.sources.update(
+                        {Path(label) / "__init__.py": b"" for label in receipt.HISTORY_LABELS}
+                    )
                     receipt = self._receipt(
                         progress=True, hashes=GeneratedTree(self.output_dir, self.sources).hashes()
                     )
                 atomic_write(self.output_dir / "__init__.py", receipt.source().encode())
-            self.composition = ModelComposition.discover(self.configs)
-            models = {model for config in self.configs for model in (config.models or {}).values()}
-            models.update(self.composition.ordered_models)
-            for source in self.composition.ordered_models:
-                models.update(self.composition.donors(source))
-            for model in sorted(models, key=lambda model: model._meta.label):
-                swappable = model._meta.swappable
-                if swappable and swappable not in self.snapshot.settings:
-                    raise ImproperlyConfigured(
-                        f"Swappable setting {swappable!r} for {model._meta.label} must be declared "
-                        "in COMPOSE_FINGERPRINT_SETTINGS"
-                    )
-            declarations = {
-                source: model_declaration(
-                    self.composition,
-                    source,
-                    tuple(h for h in self.integrations if isinstance(h, ModelDeclarationHook)),
-                )
-                for source in self.composition.ordered_models
-            }
             history_labels = self._receipt(progress=True).HISTORY_LABELS
-            for label in history_labels:
-                self.sources[Path(label) / "__init__.py"] = ""
-                config = next((c for c in self.configs if c.label == label), None)
-                if config and label in self.labels:
-                    config_path = f"{type(config).__module__}.{type(config).__qualname__}"
-                    module, _, name = config_path.rpartition(".")
-                    model_module = f"{self.output_module}.{label}.models"
-                    body = (
-                        f"from {module} import {name} as SourceConfig\n\n"
-                        "class GeneratedConfig(SourceConfig):\n"
-                        f"    name = {config.name!r}\n    label = {label!r}\n\n"
-                        "    def import_models(self):\n"
-                        "        super().import_models()\n"
-                        "        from importlib import import_module\n"
-                        f"        self.models_module = import_module({model_module!r})\n"
-                    )
-                    self.sources[Path(label) / "apps.py"] = body
-                if label in self.labels:
-                    self.sources[Path(label) / "models.py"] = render_models(
-                        self.composition,
-                        label,
-                        runtime_module=self.output_module,
-                        declarations=declarations,
-                    )
-                migration_init = self.output_dir / label / "migrations" / "__init__.py"
-                effective = self.snapshot.authored_migration_modules.get(
-                    label, f"{self.output_module}.{label}.migrations"
-                )
-                if effective == f"{self.output_module}.{label}.migrations" and not migration_init.exists():
-                    self.sources[Path(label) / "migrations" / "__init__.py"] = ""
+            initialized_migrations = (
+                label
+                for label in history_labels
+                if (self.output_dir / label / "migrations" / "__init__.py").exists()
+            )
+            self.build = compile(
+                self.snapshot,
+                self.configs,
+                self.integrations,
+                output_module=self.output_module,
+                history_labels=history_labels,
+                initialized_migrations=initialized_migrations,
+            )
+            scaffold = self.sources
+            self.sources = dict(self.build.sources)
+            self.sources.update(scaffold)
             self._publish_sources()
             importlib.invalidate_caches()
             for label in self.labels:
                 importlib.import_module(f"{self.output_module}.{label}.models")
-            self.composition.validate_generated(apps, declarations)
+            self.build.composition.validate_generated(apps, self.build.declarations)
             return self
         except BaseException:
             self.close()

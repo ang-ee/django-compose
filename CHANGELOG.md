@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Separate pure, deterministic model compilation from receipt-owned publication
+  while preserving build and check behavior.
 - Reject the removed command-context setting with migration guidance, allow an
   unrelated importable output module before the first compose, and refresh
   integrations when the active settings snapshot changes.
