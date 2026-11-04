@@ -8,14 +8,15 @@ import hashlib
 import math
 import os
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
 from django.core.exceptions import ImproperlyConfigured
 
+from django_compose.exceptions import StaleOutput
 from django_compose.snapshot import Entry, Snapshot, app_entries
 from django_compose.snapshot import mode as mode
 from django_compose.sources import SourceResolver
@@ -23,7 +24,35 @@ from django_compose.sources import SourceResolver
 GENERATED_SENTINEL = "# django-compose generated output v1"
 
 
-def _validate_output_root(root: Path) -> None:
+@dataclass(frozen=True)
+class Output:
+    """The one physical directory and import identity for generated output."""
+
+    dir: Path
+    module: str
+
+    @classmethod
+    def from_values(cls, directory: Path | str, module: str) -> Output:
+        root = Path(directory)
+        if root.exists() and len(SourceResolver().locate(module).search_locations) == 1:
+            imported = output_directory(module)
+            if imported != root.resolve():
+                raise ImproperlyConfigured(
+                    "COMPOSE_OUTPUT_DIR and COMPOSE_OUTPUT_MODULE must name the same package: "
+                    f"{root.resolve()} != {imported}"
+                )
+        return cls(root, module)
+
+    @classmethod
+    def from_settings(cls) -> Output:
+        from django.conf import settings
+
+        return cls.from_values(
+            settings.COMPOSE_OUTPUT_DIR, getattr(settings, "COMPOSE_OUTPUT_MODULE", "runtime")
+        )
+
+
+def validate_output_root(root: Path) -> None:
     if any(parent.is_symlink() for parent in (root, *root.parents)):
         raise ValueError(f"Generated root traverses a symlink: {root}")
     if root.exists() and not root.is_dir():
@@ -38,7 +67,7 @@ def receipt_lock(
     if wait is not None and (not math.isfinite(wait) or wait < 0):
         raise ValueError("Composition wait must be finite and non-negative")
     root = Path(output_dir)
-    _validate_output_root(root)
+    validate_output_root(root)
     path = root / ".compose.lock"
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise ValueError("Generated lock must be a regular file, not a symlink")
@@ -53,7 +82,7 @@ def receipt_lock(
                     fcntl.flock(stream, fcntl.LOCK_UN)
         else:
             if required:
-                raise ImproperlyConfigured("Missing generated composition lock; run compose")
+                raise StaleOutput("Missing generated composition lock; run compose")
             yield
         return
     root.mkdir(parents=True, exist_ok=True)
@@ -115,7 +144,7 @@ def read_receipt(output_module: Path | str) -> Receipt | None:
     Native path-based publication uses the same literal parser via Path inputs.
     """
     root = output_directory(output_module) if isinstance(output_module, str) else output_module
-    _validate_output_root(root)
+    validate_output_root(root)
     path = root / "__init__.py"
     if not path.exists():
         return None
@@ -182,19 +211,19 @@ def read_receipt(output_module: Path | str) -> Receipt | None:
             receipt.IN_PROGRESS,
         )
     except (OSError, SyntaxError, ValueError, TypeError) as error:
-        raise ImproperlyConfigured(f"Invalid generated receipt: {error}; run compose") from error
+        raise StaleOutput(f"Invalid generated receipt: {error}; run compose") from error
 
 
 def output_directory(output_module: str) -> Path:
     source = SourceResolver().locate(output_module)
     if len(source.search_locations) != 1:
-        raise ImproperlyConfigured(f"Missing generated package {output_module!r}; run compose")
+        raise StaleOutput(f"Missing generated package {output_module!r}; run compose")
     root = source.search_locations[0]
-    _validate_output_root(root)
+    validate_output_root(root)
     return root
 
 
-def _verify(snap: Snapshot, root: Path) -> Receipt:
+def verify_output(snap: Snapshot, root: Path) -> Receipt:
     snap.check_mode()
     receipt = read_receipt(root)
     if (
@@ -203,77 +232,10 @@ def _verify(snap: Snapshot, root: Path) -> Receipt:
         or receipt.DIGEST != snap.digest()
         or receipt.COMPILER != snap.compiler
     ):
-        raise ImproperlyConfigured("Generated composition is absent, interrupted or stale; run compose")
+        raise StaleOutput("Generated composition is absent, interrupted or stale; run compose")
     for relative, digest in receipt.OWNED_FILES.items():
         _owned_path(root, Path(relative), digest)
     return receipt
-
-
-@dataclass
-class _StartupVerification:
-    root: Path
-    source: bytes
-    lock: AbstractContextManager[None]
-    receipt: Receipt
-
-
-_startup_verification: _StartupVerification | None = None
-_verified: _StartupVerification | None = None
-_pending_artifacts: tuple[Path, Receipt] | None = None
-_lifetime_lock: AbstractContextManager[None] | None = None
-_build_cleanup: Callable[[], None] | None = None
-
-
-def _register_build(cleanup: Callable[[], None]) -> None:
-    """Register the one active build's cleanup at the process lifecycle owner."""
-    global _build_cleanup
-    if _build_cleanup is not None and _build_cleanup != cleanup:
-        raise ImproperlyConfigured("A composition build is already active")
-    _build_cleanup = cleanup
-
-
-def _publish_build_artifacts(cleanup: Callable[[], None], root: Path, receipt: Receipt) -> None:
-    """Expose the active build's published models artifacts to ready callbacks."""
-    global _pending_artifacts
-    if _build_cleanup != cleanup:
-        raise ImproperlyConfigured("Cannot publish artifacts for an inactive build")
-    _pending_artifacts = (root, receipt)
-
-
-def _clear_build(cleanup: Callable[[], None]) -> None:
-    """Clear process build state only when the closing build still owns it."""
-    global _build_cleanup, _pending_artifacts
-    if _build_cleanup == cleanup:
-        _pending_artifacts = None
-        _build_cleanup = None
-
-
-def _close_build() -> None:
-    """Release the current failed native build at the launcher boundary."""
-    if _build_cleanup is not None:
-        _build_cleanup()
-
-
-def _close_startup_verification() -> None:
-    global _startup_verification
-    session, _startup_verification = _startup_verification, None
-    if session is not None:
-        session.lock.__exit__(None, None, None)
-
-
-def _finish_startup_verification(*, required: bool = False) -> None:
-    global _lifetime_lock, _startup_verification
-    session = _startup_verification
-    if required and session is None:
-        raise ImproperlyConfigured("Startup must verify composition before population; use configure()")
-    try:
-        if session is not None and (session.root / "__init__.py").read_bytes() != session.source:
-            raise ImproperlyConfigured("Generated composition changed during population; run compose")
-        if session is not None and os.environ.get("RUN_MAIN") == "true":
-            _lifetime_lock = session.lock
-            _startup_verification = None
-    finally:
-        _close_startup_verification()
 
 
 def verify(snap: Snapshot, output_module: str, *, retain_startup: bool = False) -> Receipt:
@@ -282,27 +244,9 @@ def verify(snap: Snapshot, output_module: str, *, retain_startup: bool = False) 
     Retained verification belongs to the single native Django startup. A failed
     bare setup is unrecoverable; its process must exit to release resources.
     """
-    global _startup_verification, _verified
-    if retain_startup and mode() == "write":
-        raise ImproperlyConfigured("Write composition cannot retain a startup reader lock")
-    if retain_startup and _startup_verification is not None:
-        raise ImproperlyConfigured("Composition startup verification is already active")
-    root = output_directory(output_module)
-    lock = receipt_lock(root, write=False, required=True)
-    lock.__enter__()
-    try:
-        receipt = _verify(snap, root)
-        if retain_startup:
-            _startup_verification = _StartupVerification(
-                root, (root / "__init__.py").read_bytes(), lock, receipt
-            )
-            _verified = _startup_verification
-            return receipt
-    except BaseException:
-        lock.__exit__(None, None, None)
-        raise
-    lock.__exit__(None, None, None)
-    return receipt
+    from django_compose.lifecycle import process
+
+    return process.verify_startup(snap, output_module, retain_startup=retain_startup)
 
 
 def installed_apps(entries: Iterable[str | Entry], receipt: Receipt, output_module: str) -> tuple[str, ...]:
@@ -346,21 +290,18 @@ def migration_modules(
 
 def verified_receipt() -> Receipt:
     """Return the receipt verified for this process's native startup."""
-    if _verified is None:
-        raise ImproperlyConfigured("No startup-verified composition")
-    return _verified.receipt
+    from django_compose.lifecycle import process
+
+    return process.receipt()
 
 
 @contextmanager
 def receipt_lease() -> Iterator[Receipt]:
     """Exclude publication while acting on the exact startup composition."""
-    session = _verified
-    if session is None:
-        raise ImproperlyConfigured("No startup-verified composition")
-    with receipt_lock(session.root, write=False, required=True):
-        if (session.root / "__init__.py").read_bytes() != session.source:
-            raise ImproperlyConfigured("Generated composition changed since startup; restart this process")
-        yield session.receipt
+    from django_compose.lifecycle import process
+
+    with process.lease() as receipt:
+        yield receipt
 
 
 def artifact_path(relative: Path | str) -> Path:
@@ -372,7 +313,7 @@ def artifact_path(relative: Path | str) -> Path:
     from django.conf import settings
 
     path = Path(relative)
-    roots = set(getattr(settings, "COMPOSE_EXTERNAL_ARTIFACT_ROOTS", ()))
+    roots = set(settings.COMPOSE_SNAPSHOT.settings["COMPOSE_EXTERNAL_ARTIFACT_ROOTS"])
     if (
         path.is_absolute()
         or len(path.parts) < 2
@@ -381,19 +322,16 @@ def artifact_path(relative: Path | str) -> Path:
         or path.parts[0] not in roots
     ):
         raise ImproperlyConfigured(f"Undeclared artifact: {relative}")
-    if _pending_artifacts is not None:
-        root, receipt = _pending_artifacts
-    elif _verified is not None:
-        root, receipt = _verified.root, _verified.receipt
-    else:
-        raise ImproperlyConfigured("No startup-verified composition")
+    from django_compose.lifecycle import process
+
+    root, receipt = process.artifact_source()
     digest = receipt.OWNED_FILES.get(path.as_posix())
     return _owned_path(root, path, digest)
 
 
 def _owned_path(root: Path, relative: Path, digest: str | None) -> Path:
     """The single current-byte and safe-path check for receipt-owned files."""
-    _validate_output_root(root)
+    validate_output_root(root)
     target = root / relative
     if (
         digest is None
@@ -401,5 +339,5 @@ def _owned_path(root: Path, relative: Path, digest: str | None) -> Path:
         or not target.is_file()
         or hashlib.sha256(target.read_bytes()).hexdigest() != digest
     ):
-        raise ImproperlyConfigured(f"Generated file is missing or altered: {relative}; run compose")
+        raise StaleOutput(f"Generated file is missing or altered: {relative}; run compose")
     return target

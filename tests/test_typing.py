@@ -711,3 +711,281 @@ def test_runtime_model_preserves_inherited_native_field_types(tmp_path):
     invalid = check(config, env, source)
     assert invalid.returncode == 1, invalid.stdout + invalid.stderr
     assert invalid.stdout.count("[assignment]") == 2, invalid.stdout + invalid.stderr
+
+
+def test_abstract_contract_shared_donor_has_no_arbitrary_receiver(tmp_path):
+    config, env = host(tmp_path)
+    (tmp_path / "modelapp/models.py").write_text("""
+from django.db import models
+from django_compose.models import Composable
+class Record(Composable):
+    class Meta:
+        abstract = True
+class First(Record, concrete=True):
+    first = models.IntegerField()
+    class Meta:
+        abstract = True
+class Second(Record, concrete=True):
+    second = models.CharField(max_length=20)
+    class Meta:
+        abstract = True
+class Policy(Composable, extends="modelapp.Record"):
+    code = models.IntegerField(default=0)
+    def label(self) -> str:
+        return "policy"
+    class Meta:
+        abstract = True
+""")
+    source = tmp_path / "consumer.py"
+    source.write_text("""
+from typing import assert_type
+from modelapp.models import First, Second, Policy
+
+def consume(first: First, second: Second, donor: Policy) -> None:
+    assert_type(first.code, int)
+    assert_type(second.code, int)
+    assert_type(first.label(), str)
+    assert_type(second.label(), str)
+    assert_type(donor.code, int)
+""")
+    for _ in range(2):
+        result = check(config, env, source)
+        assert result.returncode == 0, result.stdout + result.stderr
+    models_path = tmp_path / "modelapp/models.py"
+    models_path.write_text(
+        models_path.read_text().replace(
+            "code = models.IntegerField(default=0)",
+            "code = models.IntegerField(default=0)\n    extra = models.IntegerField(default=1)",
+        )
+    )
+    source.write_text(
+        source.read_text() + "    assert_type(first.extra, int)\n    assert_type(second.extra, int)\n"
+    )
+    result = check(config, env, source)
+    assert result.returncode == 0, result.stdout + result.stderr
+    source.write_text(source.read_text() + "    donor.second\n")
+    result = check(config, env, source)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert '"Policy" has no attribute "second"' in result.stdout
+
+
+def test_native_models_package_reexports_keep_composition_targets(tmp_path):
+    config, env = host(tmp_path)
+    model_file = tmp_path / "modelapp/models.py"
+    model_file.unlink()
+    package = tmp_path / "modelapp/models"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        "from .connections import Entity as Entity, Child as Child\nfrom .donations import Extra as Extra\n"
+    )
+    (package / "connections.py").write_text("""
+from django.db import models
+from django_compose.models import Composable
+class Entity(Composable, concrete=True):
+    title = models.CharField(max_length=20)
+    class Meta:
+        abstract = True
+class Child(Composable, inherits="modelapp.Entity"):
+    class Meta:
+        abstract = True
+""")
+    (package / "donations.py").write_text("""
+from django.db import models
+from django_compose.models import Composable
+class Extra(Composable, extends="modelapp.Entity"):
+    code = models.IntegerField(default=0)
+    class Meta:
+        abstract = True
+""")
+    (tmp_path / "modelapp/apps.py").write_text(
+        "from django.apps import AppConfig\n"
+        "class Config(AppConfig):\n"
+        "    name = 'modelapp'\n"
+        "    def ready(self):\n"
+        "        import sys\n"
+        "        from django.db import models\n"
+        "        entity = self.apps.get_model('modelapp', 'Entity')\n"
+        "        history = type('HistoricalLink', (models.Model,), {\n"
+        "            '__module__': entity.__module__,\n"
+        "            'Meta': type('Meta', (), {'app_label': 'modelapp'}),\n"
+        "            'entity': models.ForeignKey(entity, on_delete=models.CASCADE),\n"
+        "        })\n"
+        "        setattr(sys.modules[entity.__module__], 'HistoricalLink', history)\n"
+    )
+    source = tmp_path / "consumer.py"
+    source.write_text("""
+from typing import assert_type
+from modelapp.models import Entity, Child
+from typed_runtime.modelapp.models import Entity as RuntimeEntity, HistoricalLink
+
+def consume(entity: Entity, child: Child, runtime: RuntimeEntity, history: HistoricalLink) -> None:
+    assert_type(entity.code, int)
+    assert_type(child.title, str)
+    assert_type(child.code, int)
+    assert_type(runtime.title, str)
+    assert_type(history.entity, RuntimeEntity)
+""")
+    result = check(config, env, source)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_explicit_queryset_contributions_type_source_and_runtime_cold_warm(tmp_path):
+    config, env = host(tmp_path)
+    (tmp_path / "modelapp/models.py").write_text("""
+from __future__ import annotations
+from typing import Self
+from django.db import models
+from django_compose.models import Composable
+class Contract(Composable):
+    class Meta:
+        abstract = True
+class DomainQuerySet[T: Contract](models.QuerySet[T]):
+    def named(self, name: str) -> Self:
+        return self.filter(title=name)
+_DomainManager = models.Manager.from_queryset(DomainQuerySet)
+class DomainManager[T: Contract](_DomainManager[T]):
+    use_in_migrations = True
+    def label(self) -> str:
+        return "domain"
+    def get_queryset(self) -> DomainQuerySet[T]:
+        return super().get_queryset()
+class Item(Contract, concrete=True):
+    title = models.CharField(max_length=30)
+    objects = DomainManager.from_queryset(DomainQuerySet)()
+    class Meta:
+        abstract = True
+class Other(Contract, concrete=True):
+    title = models.CharField(max_length=30)
+    objects = DomainManager()
+    class Meta:
+        abstract = True
+class CapabilityQuerySet[T: models.Model](models.QuerySet[T]):
+    def scoped(self) -> Self:
+        return self.all()
+class CapabilityManager[T: models.Model](models.Manager[T]):
+    def capability(self) -> str:
+        return 'protected'
+class Scope(Composable, extends='modelapp.Contract'):
+    compose_querysets = {'objects': CapabilityQuerySet}
+    compose_managers = {'objects': CapabilityManager}
+    class Meta:
+        abstract = True
+""")
+    consumer = tmp_path / "consumer.py"
+    consumer.write_text("""
+from typing import assert_type
+from modelapp.models import Item, Other
+from typed_runtime.modelapp.models import Item as RuntimeItem
+from typed_runtime.modelapp.models import _Compose4Item7objectsQuerySet
+assert_type(Item.objects.label(), str)
+assert_type(Item.objects.capability(), str)
+assert_type(Item.objects.scoped().named('a').get(), Item)
+assert_type(Other.objects.named('b').scoped().get(), Other)
+assert_type(RuntimeItem.objects.scoped().named('a').get(), RuntimeItem)
+assert_type(RuntimeItem.objects.get_queryset(), _Compose4Item7objectsQuerySet[RuntimeItem])
+assert_type(RuntimeItem.objects.all(), _Compose4Item7objectsQuerySet[RuntimeItem])
+assert_type(RuntimeItem.objects.filter(title='a'), _Compose4Item7objectsQuerySet[RuntimeItem])
+assert_type(Item.objects.get_queryset(), _Compose4Item7objectsQuerySet[Item])
+assert_type(Item.objects.all(), _Compose4Item7objectsQuerySet[Item])
+""")
+    for _ in range(2):
+        result = check(config, env, consumer)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    env = {**env, "DJANGO_COMPOSE_MODE": "write"}
+    history = tmp_path / "typed_runtime/modelapp/migrations/0001_manager.py"
+    history.write_text("""
+from django.db import migrations
+from typed_runtime.modelapp.models import _Compose4Item7objectsManager
+class Migration(migrations.Migration):
+    dependencies = []
+    operations = [migrations.AlterModelManagers(
+        name='item', managers=[('objects', _Compose4Item7objectsManager())])]
+""")
+    audit = """
+import django
+django.setup()
+from django.db import connection
+from unittest.mock import patch
+from django_compose.migration_imports import MigrationImportReport
+with patch.object(connection, 'cursor', side_effect=AssertionError('audit connected')):
+    report = MigrationImportReport()
+    imports = report.collect()
+assert any(item.module == 'typed_runtime.modelapp.models' for item in imports)
+assert any(item.module == 'modelapp.models' for item in imports)
+from importlib import import_module
+history = import_module('typed_runtime.modelapp.migrations.0001_manager')
+manager = history.Migration.operations[0].managers[0][1]
+assert manager.deconstruct()[1].endswith('_Compose4Item7objectsManager')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", audit], cwd=tmp_path, env=env, text=True, capture_output=True, timeout=30
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    clean = (
+        "import django; django.setup(); from django_compose.build import clean; "
+        "from pathlib import Path; clean(Path('typed_runtime'))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", clean], cwd=tmp_path, env=env, text=True, capture_output=True, timeout=30
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert history.exists()
+    assert not (tmp_path / "typed_runtime/modelapp/models.py").exists()
+    result = check(config, env, consumer)
+    assert result.returncode == 0, result.stdout + result.stderr
+    result = subprocess.run(
+        [sys.executable, "-c", audit], cwd=tmp_path, env=env, text=True, capture_output=True, timeout=30
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    models_file = tmp_path / "modelapp/models.py"
+    models_file.write_text(models_file.read_text().replace("def scoped(", "def renamed("))
+    consumer.write_text(consumer.read_text().replace(".scoped()", ".renamed()"))
+    result = check(config, env, consumer)
+    assert result.returncode == 0, result.stdout + result.stderr
+    consumer.write_text(consumer.read_text() + "\nItem.objects.scoped()\n")
+    result = check(config, env, consumer)
+    assert result.returncode != 0
+    assert 'has no attribute "scoped"' in result.stdout
+
+
+def test_explicit_implicit_manager_capabilities_keep_default_and_base_typing(tmp_path):
+    config, env = host(tmp_path)
+    (tmp_path / "modelapp/models.py").write_text("""
+from typing import Self
+from django.db import models
+from django_compose.models import Composable
+class Parent(Composable, concrete=True):
+    class Meta:
+        abstract = True
+        default_manager_name = 'objects'
+        base_manager_name = 'objects'
+class Child(Composable, inherits='modelapp.Parent', demands='modelapp.Parent'):
+    class Meta(Parent.Meta):
+        abstract = True
+class ParentQuerySet[T: models.Model](models.QuerySet[T]):
+    def parent_capability(self) -> Self: return self.all()
+class ChildQuerySet[T: models.Model](models.QuerySet[T]):
+    def child_capability(self) -> Self: return self.all()
+class ParentScope(Composable, extends='modelapp.Parent'):
+    compose_querysets = {'objects': ParentQuerySet}
+    class Meta:
+        abstract = True
+class ChildScope(Composable, extends='modelapp.Child'):
+    compose_querysets = {'objects': ChildQuerySet}
+    class Meta:
+        abstract = True
+""")
+    consumer = tmp_path / "consumer.py"
+    consumer.write_text("""
+from typing import assert_type
+from modelapp.models import Child
+from typed_runtime.modelapp.models import Child as RuntimeChild
+assert_type(Child.objects.child_capability().parent_capability().get(), Child)
+assert_type(Child._default_manager.child_capability().parent_capability().get(), Child)
+assert_type(Child._base_manager.child_capability().parent_capability().get(), Child)
+assert_type(RuntimeChild._default_manager.child_capability().get(), RuntimeChild)
+""")
+    for _ in range(2):
+        result = check(config, env, consumer)
+        assert result.returncode == 0, result.stdout + result.stderr

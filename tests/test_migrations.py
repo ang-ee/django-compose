@@ -98,6 +98,7 @@ from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.state import ProjectState, ModelState
 from django_compose.declarations import MigrationPolicy
+from django_compose.exceptions import HistoryError
 from django_compose.migrations import check_native_history, DropGuardAutodetector, reset_migration_history
 
 def author_successor():
@@ -157,7 +158,7 @@ before = files()
 with patch.object(connection, "cursor", side_effect=AssertionError("offline check queried")):
     action = lambda: check_native_history(apps, labels=("alpha", "beta"))
     if {state!r} in ("missing", "dirty"):
-        expect(RuntimeError, "CreateModel" if {state!r} == "missing" else "AddField", action)
+        expect(HistoryError, "CreateModel" if {state!r} == "missing" else "AddField", action)
     else:
         action()
 assert files() == before

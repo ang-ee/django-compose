@@ -1,6 +1,8 @@
 # 0001: preserve native URL converter semantics
 
-Status: accepted.
+Status: accepted; superseded by [0004](0004-serving-boundary.md), which removed
+URL composition from django-compose. This record documents the check's semantics
+for whichever package owns it.
 
 Django owns URL matching through native patterns, converters and ordered
 resolution. A converter's `to_python()` may raise `ValueError` to reject a regex

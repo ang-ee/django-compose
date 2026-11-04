@@ -5,6 +5,7 @@ from typing import Any
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import DEFAULT_DB_ALIAS, connections
 
+from django_compose.exceptions import CompositionError
 from django_compose.management import require_serving_mode
 from django_compose.migrations import history_labels, reset_migration_history
 
@@ -26,7 +27,7 @@ class Command(BaseCommand):
             raise CommandError(f"Unknown composed apps: {', '.join(sorted(unknown))}")
         try:
             labels, removed, recorded = reset_migration_history(selected, database=options["database"])
-        except RuntimeError as error:
+        except CompositionError as error:
             raise CommandError(str(error)) from error
         self.stdout.write(
             f"labels: {', '.join(labels)}; files removed: {removed}; migrations recorded: {recorded}"

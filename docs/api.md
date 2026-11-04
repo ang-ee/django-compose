@@ -15,7 +15,7 @@ lifecycle rules. Python module names below are relative to `django_compose`.
 | API | Purpose |
 | --- | --- |
 | `conf.configure(namespace)` | Call once with `globals()` at the end of project settings; select apps, apply contributions and configure generated output |
-| `management.execute(argv=None)` | Use as the [manage.py launcher](configuration.md#managepy); select composition mode before importing settings |
+| `management.execute(argv=None, *, utility_class=ManagementUtility)` | Use as the [manage.py launcher](configuration.md#managepy); select composition mode before importing settings; dispatch through a native `ManagementUtility` subclass to wrap commands |
 | `autoreload.report_inputs(*, files=(), globs=())` | Settings loaders report file/glob candidates **before** reading them, including absent files; see [development](configuration.md#serve-the-project) |
 
 The launcher exposes these Django management commands:
@@ -90,14 +90,13 @@ loading project settings. It is a **standalone command**, unavailable through
 | --- | --- | --- |
 | `AppConfig.requires_apps` | App dependencies declared for composition | [Selection rules](components.md#dependency-and-configuration-rules) |
 | `autoconfig.py`: `SETTINGS`, `settings(namespace)` | Defaults and additive settings | [App settings](configuration.md#app-settings-contributions) |
-| `AppConfig.compose_urls`, `compose_url_prefix`, `compose_url_namespace` | URLconf contributions exposed through `django_compose.urls.urlpatterns` | [URLs](configuration.md#compose-app-urls) |
-| `AppConfig.compose_asgi()` | Return `asgi.AsgiContribution(http_mounts=..., lifespans=..., protocols=...)` for `django_compose.asgi.application` | [ASGI contract](SPEC.md#serving-composition) |
 | `AppConfig.compose_provision(context)` | Prepare the database after migrations using `provision.ProvisionContext` and its `call()` helper | [Provisioning](provisioning.md) |
 | `COMPOSE_INTEGRATIONS` | Dotted classes implementing build protocols below | [Build integrations](extensions.md#supported-protocols) |
 
-URL and ASGI modules require completed `django.setup()`. Settings contributions
-run before app population; integrations run during build. Ordinary model behavior
-belongs in abstract model bases. The [integration protocols](SPEC.md#integration-protocols)
+Settings contributions run before app population; integrations run during
+build. Ordinary model behavior belongs in abstract model bases. URL routing and
+ASGI serving stay with Django's native `include()` and handlers
+([route app URLs](configuration.md#route-app-urls)). The [integration protocols](SPEC.md#integration-protocols)
 in [`django_compose.declarations`](../src/django_compose/declarations.py) are:
 
 - `ModelDeclarationHook.model_declaration(composition, source)` returns a literal
@@ -118,6 +117,10 @@ ordered models, donors, parents and contributed fields; see [model contracts](SP
 | `serving.verified_receipt()` | Read the process startup-verified `Receipt` |
 | `serving.receipt_lease()` | Context manager holding shared output ownership while acting on that receipt |
 | `provision.require_provisioned(using="default", timeout=0)` | Require database readiness for the verified build without repairing it |
+
+`django_compose.exceptions` exposes `CompositionError` (a Django
+`ImproperlyConfigured` subclass), `StaleOutput` for generated-output failures,
+and `HistoryError` for native-history proof failures.
 
 See [artifact access](SPEC.md#artifact-access), [build records](SPEC.md#generated-output-and-freshness)
 and [readiness](provisioning.md). Lower-level integrations can use

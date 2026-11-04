@@ -48,7 +48,7 @@ from django.db import connections
 connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
 executor = MigrationExecutor(connection)
 executor.migrate(executor.loader.graph.leaf_nodes())
-expect(RuntimeError, "database 'other'", lambda: retire_history("alpha"))
+expect(HistoryError, "database 'other'", lambda: retire_history("alpha"))
 assert not updated.called
 """
     )
@@ -72,7 +72,7 @@ class Migration(migrations.Migration):
 executor = MigrationExecutor(connection)
 executor.migrate(executor.loader.graph.leaf_nodes())
 before = files()
-expect(RuntimeError, "depends on retiring", lambda: retire_history("alpha", purge=True))
+expect(HistoryError, "depends on retiring", lambda: retire_history("alpha", purge=True))
 assert files() == before
 assert not updated.called
 """
@@ -89,7 +89,26 @@ executor = MigrationExecutor(connection)
 executor.migrate(executor.loader.graph.leaf_nodes())
 old = executor.loader.project_state().apps.get_model("alpha", "Record")
 old._base_manager.create(old="kept unless purged")
-retire_history("alpha", purge={purge!r})
+if {purge!r}:
+    try:
+        call_command("retire_history", "alpha", purge=True, verbosity=0)
+    except CommandError as error:
+        assert "compose_purge.py" in str(error)
+        assert "routed aliases: default" in str(error)
+        assert "migrate alpha --database default" in str(error)
+        assert "retire_history alpha" in str(error)
+    else:
+        raise AssertionError("purge must stop after authoring")
+    assert not updated.called
+    purges = list(Path("history/alpha").glob("*compose_purge.py"))
+    assert len(purges) == 1
+    assert "alpha_record" in connection.introspection.table_names()
+    expect(HistoryError, "fully applied", lambda: retire_history("alpha", purge=True))
+    assert list(Path("history/alpha").glob("*compose_purge.py")) == purges
+    call_command("migrate", "alpha", database="default", interactive=False, verbosity=0)
+    retire_history("alpha")
+else:
+    retire_history("alpha")
 assert updated.call_args.kwargs["retired_labels"] == ("alpha",)
 assert ("alpha_record" in connection.introspection.table_names()) is {not purge!r}
 loader = MigrationLoader(connection)
@@ -142,7 +161,7 @@ for alias in connections:
     executor = MigrationExecutor(connections[alias])
     executor.migrate(executor.loader.graph.leaf_nodes())
 before = files()
-expect(RuntimeError, "also routed", lambda: reset_migration_history(("alpha",)))
+expect(HistoryError, "also routed", lambda: reset_migration_history(("alpha",)))
 assert files() == before
 """
     )
@@ -158,18 +177,38 @@ connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other
 for alias in connections:
     executor = MigrationExecutor(connections[alias])
     executor.migrate(executor.loader.graph.leaf_nodes())
+try:
+    retire_history("alpha", purge=True)
+except HistoryError as error:
+    assert "compose_purge.py" in str(error)
+    assert "routed aliases: default, other" in str(error)
+    assert "migrate alpha --database default" in str(error)
+    assert "migrate alpha --database other" in str(error)
+else:
+    raise AssertionError("purge must stop after authoring")
+purges = list(Path("history/alpha").glob("*compose_purge.py"))
+assert len(purges) == 1
+assert not updated.called
 native_migrate = MigrationExecutor.migrate
 def fail_secondary(executor, *args, **kwargs):
     if executor.connection.alias == "other":
         raise RuntimeError("secondary unavailable")
     return native_migrate(executor, *args, **kwargs)
 with patch.object(MigrationExecutor, "migrate", fail_secondary):
-    expect(RuntimeError, "secondary unavailable", lambda: retire_history("alpha", purge=True))
+    call_command("migrate", "alpha", database="default", interactive=False, verbosity=0)
+    expect(RuntimeError, "secondary unavailable", lambda: call_command(
+        "migrate", "alpha", database="other", interactive=False, verbosity=0
+    ))
 assert not updated.called
-assert len(list(Path("history/alpha").glob("*compose_purge.py"))) == 1
+expect(HistoryError, "fully applied", lambda: retire_history("alpha", purge=True))
+assert list(Path("history/alpha").glob("*compose_purge.py")) == purges
+call_command("migrate", "alpha", database="other", interactive=False, verbosity=0)
 retire_history("alpha", purge=True)
-assert updated.called
-assert len(list(Path("history/alpha").glob("*compose_purge.py"))) == 1
+assert updated.call_count == 1
+assert list(Path("history/alpha").glob("*compose_purge.py")) == purges
+receipt.RETIRED_LABELS = ("alpha",)
+retire_history("alpha", purge=True)
+assert updated.call_count == 1
 for alias in connections:
     assert "alpha_record" not in connections[alias].introspection.table_names()
 """
@@ -260,9 +299,9 @@ with patch.object(router, "routers", [ModelRouter()]):
     records = {{alias: set(MigrationRecorder(connections[alias]).applied_migrations())
                for alias in connections}}
     if {operation!r} == "retire":
-        expect(RuntimeError, "database 'other'", lambda: retire_history("alpha"))
+        expect(HistoryError, "database 'other'", lambda: retire_history("alpha"))
     else:
-        expect(RuntimeError, "also routed", lambda: reset_migration_history(("alpha",)))
+        expect(HistoryError, "also routed", lambda: reset_migration_history(("alpha",)))
     assert not updated.called
     assert files() == before
     assert "alpha_legacy" in connections["other"].introspection.table_names()
@@ -301,7 +340,7 @@ with patch.object(router, "routers", [ModelRouter()]):
     executor = MigrationExecutor(connection)
     executor.migrate(executor.loader.graph.leaf_nodes())
     assert _history_aliases(MigrationLoader(None), {"alpha"}) == ("default", "other")
-    expect(RuntimeError, "database 'other'", lambda: retire_history("alpha"))
+    expect(HistoryError, "database 'other'", lambda: retire_history("alpha"))
 assert not updated.called
 """
     )
@@ -323,18 +362,16 @@ with patch("django_compose.migrations.read_receipt", return_value=receipt):
     before, after = effective_states(loader, apps)
     assert ("alpha", "record") not in after.models
     assert DropGuardAutodetector(before, after).changes(loader.graph)["alpha"]
-    expect(RuntimeError, "history-only", lambda: retire_history("alpha"))
+    expect(HistoryError, "history-only", lambda: retire_history("alpha"))
 """)
 
 
 def test_dynamic_history_factory_preserves_native_labels_without_models(tmp_path, monkeypatch):
     import sys
-    from types import SimpleNamespace
 
     from django.apps import AppConfig
     from django.apps.registry import Apps
 
-    from django_compose import history
     from django_compose.serving import Receipt, tombstones
 
     labels = ("settings", "_archive", "__name__")
@@ -348,7 +385,10 @@ def test_dynamic_history_factory_preserves_native_labels_without_models(tmp_path
         (package / "__init__.py").write_text("")
         (package / "models.py").write_text("raise AssertionError('stale history models imported')")
     monkeypatch.syspath_prepend(str(tmp_path))
-    monkeypatch.setattr(history, "_settings", SimpleNamespace(COMPOSE_OUTPUT_MODULE=root.name))
+    from django_compose.lifecycle import process
+    from django_compose.serving import Output
+
+    monkeypatch.setattr(process, "output", Output(root, root.name))
     registry = Apps(installed_apps=[])
     entries = tombstones(receipt, (), root.name)
     assert entries == tuple(f"django_compose.history.History_{label}" for label in labels)
@@ -415,6 +455,7 @@ before = files()
 records = set(MigrationRecorder(connection).applied_migrations())
 expect(CommandError, "still owned by beta.adopted", lambda: retire_history("alpha", purge=True))
 assert files() == before
+assert not list(Path("history/alpha").glob("*compose_purge.py"))
 assert records == set(MigrationRecorder(connection).applied_migrations())
 assert list(active._base_manager.values_list("old", flat=True)) == ["active data"]
 assert not updated.called
@@ -494,9 +535,9 @@ with patch.object(router, "routers", [HintRouter()]):
     records = {{alias: set(MigrationRecorder(connections[alias]).applied_migrations())
                for alias in ("default", "other")}}
     if {cutoff!r} == "retire":
-        expect(RuntimeError, "database 'other'", lambda: retire_history("alpha"))
+        expect(HistoryError, "database 'other'", lambda: retire_history("alpha"))
     else:
-        expect(RuntimeError, "also routed", lambda: reset_migration_history(("alpha",)))
+        expect(HistoryError, "also routed", lambda: reset_migration_history(("alpha",)))
     assert files() == before
     assert not updated.called
     for alias in records:
@@ -538,7 +579,7 @@ with patch.object(router, "routers", [ModelRouter()]):
     executor = MigrationExecutor(connection)
     executor.migrate(executor.loader.graph.leaf_nodes())
     assert _history_aliases(MigrationLoader(None), {"alpha"}) == ("default", "other")
-    expect(RuntimeError, "database 'other'", lambda: retire_history("alpha"))
+    expect(HistoryError, "database 'other'", lambda: retire_history("alpha"))
 assert not updated.called
 """
     )

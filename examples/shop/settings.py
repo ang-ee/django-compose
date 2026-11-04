@@ -16,7 +16,6 @@ COMPOSE_OUTPUT_MODULE = "runtime"
 INSTALLED_APPS = ["reviews"]
 COMPOSE_COMPONENT_GROUP = "compose.example"
 COMPOSE_ENV_PREFIXES = ("CATALOG_",)
-COMPOSE_COMMAND_CONTEXT = ("contexts.command_context",)
 COMPOSE_INTEGRATIONS = ("catalog.integrations.ModelSchema", "catalog.integrations.ReadySchema")
 COMPOSE_EXTERNAL_ARTIFACT_ROOTS = ("exports",)
 ROOT_URLCONF = "urls"

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "django-compose"
-version = "0.1.0.dev8"
+version = "0.1.0.dev9"
 description = "Compose reusable Django apps into a runnable project."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -20,7 +20,7 @@ Issues = "https://github.com/ang-ee/django-compose/issues"
 
 [project.optional-dependencies]
 typing = [
-    "angee-django-stubs[compatible-mypy]==6.1.2.post3",
+    "angee-django-stubs[compatible-mypy]>=6.1.2.post4",
     "angee-django-stubs-ext==6.1.2",
     "angee-mypy==2.1.0",
 ]
@@ -55,3 +55,27 @@ strict = true
 files = ["src/django_compose"]
 ignore_missing_imports = true
 
+[tool.uv.sources]
+angee-django-stubs = { git = "https://github.com/ang-ee/django-stubs.git", rev = "10bf2bdd683fc11a9def78a8e985edb3a8717dc6" }
+angee-django-stubs-ext = { git = "https://github.com/ang-ee/django-stubs.git", rev = "10bf2bdd683fc11a9def78a8e985edb3a8717dc6", subdirectory = "ext" }
+
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "README.md" },
+    { file = "LICENSE" },
+    { file = "COPYING" },
+    { file = "NOTICE" },
+    { file = "src/**/*" },
+    { file = "tests/**/*" },
+    { file = "examples/**/*" },
+    { file = "scripts/**/*" },
+    { file = "docs/**/*" },
+    { file = "AGENTS.md" },
+    { file = "CONTRIBUTING.md" },
+    { file = "CHANGELOG.md" },
+    { file = "Makefile" },
+    { file = "uv.lock" },
+    { git = { commit = true } },
+]

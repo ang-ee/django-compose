@@ -36,7 +36,9 @@ from django.db.models.expressions import DatabaseDefault
 from django.utils.module_loading import module_dir
 
 from django_compose.artifacts import atomic_write
-from django_compose.declarations import MigrationPolicy, resolve_integrations
+from django_compose.declarations import MigrationPolicy
+from django_compose.exceptions import HistoryError
+from django_compose.lifecycle import process
 from django_compose.management import require_serving_mode as require_serving_mode
 from django_compose.migration_imports import HistoricalImport as HistoricalImport
 from django_compose.migration_imports import historical_imports as historical_imports
@@ -52,7 +54,7 @@ def history_only_labels() -> frozenset[str]:
     snap = getattr(settings, "COMPOSE_SNAPSHOT", None)
     if snap is None:
         return frozenset()
-    receipt = read_receipt(Path(settings.COMPOSE_OUTPUT_DIR))
+    receipt = read_receipt(process.output_identity().dir)
     if receipt is None:
         return frozenset()
     active = {entry.label for entry in snap.entries}
@@ -117,7 +119,7 @@ def _directory(label: str, *, missing: bool = False) -> Path:
 
 def history_labels() -> tuple[str, ...]:
     """Read the compiler receipt without invoking composition."""
-    receipt = read_receipt(Path(settings.COMPOSE_OUTPUT_DIR))
+    receipt = read_receipt(process.output_identity().dir)
     if receipt is None:
         raise CommandError("Migration authoring requires a receipt; run compose first")
     return tuple(receipt.HISTORY_LABELS)
@@ -146,7 +148,7 @@ def check_native_history(apps: Apps, *, labels: Iterable[str]) -> None:
             for migration in migrations
             for operation in migration.operations
         )
-        raise RuntimeError(f"native migration history does not match composed models: {operations}")
+        raise HistoryError(f"native migration history does not match composed models: {operations}")
 
 
 def _storage_identifier(connection: BaseDatabaseWrapper, identifier: str) -> tuple[str, str]:
@@ -367,9 +369,7 @@ class DropGuardAutodetector(MigrationAutodetector):
                         model = self.from_state.apps.get_model(label, operation.name)
                         integrations = tuple(
                             integration
-                            for integration in resolve_integrations(
-                                getattr(settings, "COMPOSE_INTEGRATIONS", ())
-                            )
+                            for integration in process.integrations()
                             if isinstance(integration, MigrationPolicy)
                         )
 
@@ -490,27 +490,27 @@ def reset_migration_history(
         global_apps.get_app_config(label)
     connection = connections[database]
     if not connection.features.supports_transactions:
-        raise RuntimeError("history reset requires transactional recorder support")
+        raise HistoryError("history reset requires transactional recorder support")
     offline = MigrationLoader(None, ignore_no_migrations=True)
     for alias in _history_aliases(offline, set(labels)):
         if alias != database:
-            raise RuntimeError(
+            raise HistoryError(
                 f"selected history is also routed to database {alias!r}; coordinate its cutoff first"
             )
     executor = MigrationExecutor(connection)
     loader = executor.loader
     loader.check_consistent_history(connection)
     if executor.migration_plan(loader.graph.leaf_nodes()):
-        raise RuntimeError("history reset requires a fully applied migration graph")
+        raise HistoryError("history reset requires a fully applied migration graph")
     _check_dependents(loader, set(labels))
     before, after = effective_states(loader, global_apps)
     if MigrationAutodetector(before, after).changes(
         graph=loader.graph, trim_to_apps=set(labels), convert_apps=set(labels)
     ):
-        raise RuntimeError("history reset requires a model-clean native graph")
+        raise HistoryError("history reset requires a model-clean native graph")
     directories = {label: _directory(label) for label in labels}
     if len({path.resolve() for path in directories.values()}) != len(directories):
-        raise RuntimeError("history reset requires distinct native migration packages")
+        raise HistoryError("history reset requires distinct native migration packages")
     baseline = {path for directory in directories.values() for path in directory.glob("*.py")}
     original = {
         path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
@@ -623,7 +623,7 @@ def _history_aliases(loader: MigrationLoader, labels: set[str]) -> tuple[str, ..
 def _check_dependents(loader: MigrationLoader, labels: set[str]) -> None:
     for key in sorted(loader.graph.nodes):
         if key[0] not in labels and any(node[0] in labels for node in loader.graph.forwards_plan(key)):
-            raise RuntimeError(
+            raise HistoryError(
                 f"cross-app dependent retained migration {key!r} depends on retiring history; "
                 "include its app in the cutoff scope, or squash or rebase dependents first"
             )
@@ -637,55 +637,61 @@ def _fully_applied(labels: set[str], aliases: Iterable[str]) -> None:
         loader.check_consistent_history(connection)
         targets = [node for node in loader.graph.leaf_nodes() if node[0] in labels]
         if executor.migration_plan(targets):
-            raise RuntimeError(f"history retirement requires fully applied history on database {alias!r}")
+            raise HistoryError(f"history retirement requires fully applied history on database {alias!r}")
 
 
 def retire_history(label: str, *, purge: bool = False) -> None:
     """Retire a disabled label only after all routed configured databases agree.
 
-    Purge authors a native final migration, applies it on every routed alias, and
-    then runs the same retirement proof. A failed application leaves durable
-    history for retry; it never records retirement prematurely.
+    Purge authors a native final migration and stops. Django applies it on every
+    routed alias before a later call runs the ordinary retirement proof.
     """
     from django_compose.artifacts import receipt_lock, update_receipt
 
     require_serving_mode()
-    output = Path(settings.COMPOSE_OUTPUT_DIR)
+    output = process.output_identity().dir
     with receipt_lock(output):
         receipt = read_receipt(output)
         if receipt is None:
-            raise RuntimeError("History retirement requires a composed receipt")
+            raise HistoryError("History retirement requires a composed receipt")
         if label in receipt.RETIRED_LABELS:
             return
         if label not in receipt.HISTORY_LABELS:
-            raise RuntimeError(f"Unknown history label {label!r}")
+            raise HistoryError(f"Unknown history label {label!r}")
         global_apps.get_app_config(label)
         if label not in history_only_labels():
-            raise RuntimeError(f"{label!r} must be history-only before retirement")
+            raise HistoryError(f"{label!r} must be history-only before retirement")
         loader = MigrationLoader(None, ignore_no_migrations=True)
         _check_dependents(loader, {label})
         aliases = _history_aliases(loader, {label})
-        if purge:
+        if purge and not tuple(_directory(label).glob("*compose_purge.py")):
             before, after = effective_states(loader, global_apps, purge=frozenset({label}))
             changes = MigrationAutodetector(before, after).changes(
                 graph=loader.graph, trim_to_apps={label}, migration_name="compose_purge"
             )
             _shared_table_drops(before, after, changes, database=True)
+            authored: list[Path] = []
             for migration in changes.get(label, ()):
                 writer = MigrationWriter(migration, include_header=False)
                 path = Path(writer.path)
                 if path.exists():
-                    raise RuntimeError(f"Refusing to overwrite native purge migration {path}")
+                    raise HistoryError(f"Refusing to overwrite native purge migration {path}")
                 atomic_write(path, writer.as_string().encode(), exclusive=True)
+                authored.append(path)
             _forget_history({label})
-            for alias in aliases:
-                executor = MigrationExecutor(connections[alias])
-                executor.loader.check_consistent_history(connections[alias])
-                executor.migrate(executor.loader.graph.leaf_nodes(label))
+            if authored:
+                paths = ", ".join(str(path) for path in authored)
+                routed = ", ".join(aliases) if aliases else "none"
+                commands = "; ".join(f"migrate {label} --database {alias}" for alias in aliases)
+                next_step = commands or f"migrate {label}"
+                raise HistoryError(
+                    f"Authored purge migration(s) for {label}: {paths}; routed aliases: {routed}. "
+                    f"Run {next_step} and then retire_history {label} again"
+                )
         _fully_applied({label}, aliases)
         loader = MigrationLoader(None, ignore_no_migrations=True)
         _check_dependents(loader, {label})
         before, after = effective_states(loader, global_apps)
         if MigrationAutodetector(before, after).changes(graph=loader.graph, trim_to_apps={label}):
-            raise RuntimeError("History retirement requires model-clean history")
+            raise HistoryError("History retirement requires model-clean history")
         update_receipt(output, retired_labels=tuple(sorted({*receipt.RETIRED_LABELS, label})), locked=True)

@@ -53,14 +53,101 @@ class Rating(Composable, extends="catalog.Item"):
 
 With both apps selected, the generated `catalog.Item` has `title`, `rating`,
 `describe()` and `is_recommended()`. `Rating` adds no table, parent link or
-registered model. Its `extends` target must be a declared concrete model in the
-selected apps. Targets use `app_label.Model`, with Django's case-insensitive
-model-name lookup.
+registered model. Its `extends` target must be a selected concrete declaration
+or an explicit abstract contract. Targets use `app_label.Model`, with Django's
+case-insensitive model-name lookup.
 
 The extension is an extra abstract base of the generated model. This lets an
 optional app contribute to a shared model without editing the app that defines
 it. It differs from putting a ForeignKey to an independent `Rating` model: here
 the rating is a column on each item.
+
+## Extend a shared abstract contract
+
+A selected app can export an abstract contract without generating its own table:
+
+```python
+class Record(Composable):
+    class Meta:
+        abstract = True
+
+
+class Item(Record, concrete=True):
+    class Meta:
+        abstract = True
+```
+
+An optional app can declare `class Rating(Composable, extends="catalog.Record")`
+to contribute to every selected source using `Record` in its native abstract
+ancestry. A contract directly inherits `Composable` or explicitly declares
+`concrete=False`; inheriting another class's markers does not opt a helper in.
+Export it from the selected app's native models module or models package. A
+known selected contract may have no concrete participants. `Record` itself is
+never a relation target or registered concrete model.
+
+Concrete children inherit contributions stored on their parent once, including
+shared abstract fields and M2M through tables. Abstract contributions cannot
+replace a source's same-named manager: preserve the source factory and queryset
+owner; competing manager declarations fail.
+
+## Contribute QuerySet behavior without replacing managers
+
+A donor explicitly selects each manager it extends:
+
+```python
+from typing import Self
+
+
+class RatingQuerySet[T: models.Model](models.QuerySet[T]):
+    def recommended(self) -> Self:
+        return self.filter(rating__gte=4)
+
+
+class Rating(Composable, extends="catalog.Record"):
+    rating = models.PositiveSmallIntegerField(default=0)
+    compose_querysets = {"objects": RatingQuerySet}
+
+    class Meta:
+        abstract = True
+```
+
+An extension donor can also declare `compose_managers = {"objects":
+RatingManager}` beside `compose_querysets`. `RatingManager` must be an importable
+`models.Manager` subclass with cooperative methods, such as `get_queryset()`
+calling `super().get_queryset()`. It must not define `__init__`, `deconstruct`
+or instance state. The generated manager uses the minimal cooperative bases:
+donor manager classes in donor order, then the selected source manager class.
+A source manager that already subclasses the donor class remains the base.
+Independent classes claiming the same new public manager method or an
+incompatible MRO fail during composition.
+
+Selected participants retain their domain manager factories and constructor
+configuration. `Item.objects.recommended()` and subsequent native queryset
+chains use the composed QuerySet. Use generic QuerySets and `Self` for fluent
+methods so django-stubs preserves the complete composed chain. A custom manager
+`get_queryset()` must use `super().get_queryset()`; directly constructing its
+old QuerySet bypasses the declared composition. Composition never invokes that
+method at build time or invents an actor/request context.
+Declare the QuerySet model parameter with PEP 695 syntax, as in the example.
+Django's `QuerySet.__class_getitem__` hides the type parameter of older
+`TypeVar`-style generic classes from the renderer, so their generated bases
+cannot be parameterized and `.get()` may be inferred as `Any`.
+
+Select an unfiltered/tracking base manager separately, for example
+`compose_querysets = {"objects": RatingQuerySet, "unfiltered": TrackingQuerySet}`.
+The source owns those manager names and its `Meta.default_manager_name` and
+`Meta.base_manager_name`. An absent name fails, except Django's ordinary implicit
+`objects` when the model declares no manager. Colliding ordinary donor manager
+instances are not automatically merged. A mapped manager class adds behavior to
+the selected instance; it does not redeclare the manager slot. Competing new methods and manager
+methods that bypass a contribution fail; native QuerySet write hooks can
+cooperate through `super()` in selected donor order.
+
+Migration-enabled composed managers use stable generated class imports. Keep
+source/provider dependencies while retained migrations require them. Before
+removing declarations, migrate historical references to project-owned helpers
+or complete an authorized history migration; audit with
+`check_migrations --imports` plus native migration loader/state checks.
 
 ## Create a child with its own table
 
@@ -166,9 +253,11 @@ followed by the original abstract model and then its concrete parent. Python
 resolves methods and properties through the resulting MRO. Use cooperative
 `super()` where multiple bases participate in a method.
 
-Managers remain native Django managers. An extension manager overrides a manager
-of the same name on the original declaration. Two extensions declaring distinct
-managers under the same name are refused. Shared abstract ancestry counts once.
+Managers remain native Django managers. A concrete-target extension manager
+overrides a same-named source manager. Abstract-contract contributions preserve
+the source manager as described [above](#extend-a-shared-abstract-contract).
+Two extensions declaring distinct managers under the same name are refused.
+Shared abstract ancestry counts once.
 
 The original declaration owns model-wide `Meta` policy, such as ordering.
 Extensions may add native constraints and set structural `abstract`/`app_label`

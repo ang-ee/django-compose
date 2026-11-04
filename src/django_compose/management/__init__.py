@@ -1,4 +1,4 @@
-"""Native Django dispatch with composition and post-setup execution contexts."""
+"""Native Django dispatch with composition-mode selection and the reloader parent."""
 
 from __future__ import annotations
 
@@ -8,19 +8,16 @@ import signal
 import subprocess
 import sys
 import tempfile
-from contextlib import ExitStack
-from types import MappingProxyType
 from typing import Any
 
-from django.apps import apps
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management import ManagementUtility
 from django.core.management.base import CommandError, handle_default_options
 from django.utils import autoreload
-from django.utils.module_loading import import_string
 
 from django_compose.autoreload import inputs, report_inputs, write_report
+from django_compose.lifecycle import process
 
 MIGRATION_COMMANDS = frozenset(
     {
@@ -38,51 +35,6 @@ def require_serving_mode() -> None:
     """Migration commands require a process populated from verified serving apps."""
     if "DJANGO_COMPOSE_MODE" in os.environ:
         raise CommandError("Migration commands require serving mode; unset DJANGO_COMPOSE_MODE")
-
-
-class _Dispatch:
-    def __init__(self, command: Any) -> None:
-        self.command = command
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.command, name)
-
-    def run_from_argv(self, argv: list[str]) -> Any:
-        """Adapt native execute after parsing, retaining the winning argv dispatcher.
-
-        Custom run_from_argv implementations must call self.execute to participate.
-        Factories receive command, original argv and read-only shallow-copied options.
-        The native dispatcher continues to own parsing, errors and connection cleanup.
-        """
-        original_execute = self.command.execute
-        missing = object()
-        previous = vars(self.command).get("execute", missing)
-        original_argv = tuple(argv)
-
-        def execute(*args: Any, **options: Any) -> Any:
-            with ExitStack() as stack:
-                # runserver recovery fabricates ready flags, but not ready_event.
-                if apps.ready_event.is_set():
-                    parsed_options = MappingProxyType(options.copy())
-                    for dotted in getattr(settings, "COMPOSE_COMMAND_CONTEXT", ()):
-                        stack.enter_context(
-                            import_string(dotted)(original_argv[1], original_argv, parsed_options)
-                        )
-                return original_execute(*args, **options)
-
-        self.command.execute = execute
-        try:
-            return self.command.run_from_argv(argv)
-        finally:
-            if previous is missing:
-                del self.command.execute
-            else:
-                self.command.execute = previous
-
-
-class _Utility(ManagementUtility):
-    def fetch_command(self, subcommand: str) -> Any:
-        return _Dispatch(super().fetch_command(subcommand))
 
 
 def _default_options(arguments: list[str]) -> Any:
@@ -125,9 +77,6 @@ def _parent(arguments: list[str]) -> None:
     # The compose subprocess uses this launcher, independent of manage.py imports.
     bootstrap = "from django_compose.management import execute; import sys; execute(sys.argv[1:])"
     defaults = [f"--pythonpath={options.pythonpath}"] if options.pythonpath else []
-    for name in ("DJANGO_SETTINGS_MODULE",):
-        if name in os.environ:
-            environment[name] = os.environ[name]
     while True:
         with tempfile.TemporaryFile(mode="w+") as report:
             command = [
@@ -161,8 +110,16 @@ def _parent(arguments: list[str]) -> None:
             raise SystemExit(code)
 
 
-def execute(argv: list[str] | None = None) -> None:
-    """Drop-in management entrypoint retaining Django's native setup policy."""
+def execute(
+    argv: list[str] | None = None, *, utility_class: type[ManagementUtility] = ManagementUtility
+) -> None:
+    """Drop-in management entrypoint retaining Django's native setup policy.
+
+    Dispatch goes through ``utility_class``, Django's native ManagementUtility
+    by default. A project wraps command execution by supplying its own subclass;
+    django-compose adds no command middleware. The reloader parent's compose
+    subprocess always uses the default dispatcher and its own five-second lock wait.
+    """
     arguments = list(sys.argv if argv is None else argv)
     command = arguments[1] if len(arguments) > 1 else "help"
     if command in MIGRATION_COMMANDS:
@@ -179,9 +136,6 @@ def execute(argv: list[str] | None = None) -> None:
             pass
         return
     report_fd = None
-    old_wait = os.environ.get("DJANGO_COMPOSE_WAIT")
-    from django_compose.serving import _close_build, _close_startup_verification
-
     try:
         if command == "compose":
             from django_compose.management.commands.compose import Command
@@ -198,31 +152,28 @@ def execute(argv: list[str] | None = None) -> None:
             if existing is not None and existing != expected:
                 raise ImproperlyConfigured("DJANGO_COMPOSE_MODE conflicts with compose arguments")
             os.environ["DJANGO_COMPOSE_MODE"] = expected
-            os.environ["DJANGO_COMPOSE_WAIT"] = str(options.wait)
+            process.wait = options.wait
             sys.dont_write_bytecode = True
             if options.if_stale:
                 from django_compose.serving import verify
 
                 # Settings computes the immutable snapshot; no native setup occurs here.
                 snap = settings.COMPOSE_SNAPSHOT
+                output = process.output_identity()
                 try:
-                    verify(snap, settings.COMPOSE_OUTPUT_MODULE)
+                    verify(snap, output.module)
                 except ImproperlyConfigured:
                     pass
                 else:
-                    print(f"Composition lock: {settings.COMPOSE_OUTPUT_DIR}/.compose.lock")
+                    print(f"Composition lock: {output.dir / '.compose.lock'}")
                     print("Composition is current.")
                     return
-        _Utility(arguments).execute()
+        utility_class(arguments).execute()
     finally:
         try:
             _fallback_inputs()
             if report_fd is not None:
                 write_report(report_fd)
         finally:
-            _close_build()
-            _close_startup_verification()
-            if old_wait is None:
-                os.environ.pop("DJANGO_COMPOSE_WAIT", None)
-            else:
-                os.environ["DJANGO_COMPOSE_WAIT"] = old_wait
+            process.abort_build()
+            process.close_startup()

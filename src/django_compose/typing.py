@@ -19,7 +19,7 @@ from django.db import models
 from mypy.checkmember import analyze_member_access
 from mypy.expandtype import expand_type, expand_type_by_instance
 from mypy.maptype import map_instance_to_supertype
-from mypy.mro import calculate_mro
+from mypy.mro import MroError, calculate_mro
 from mypy.nodes import (
     MDEF,
     CallExpr,
@@ -45,12 +45,9 @@ from mypy.types import Type as MypyType
 from mypy.typevars import fill_typevars, fill_typevars_with_any
 from mypy_django_plugin.django.context import DjangoContext
 from mypy_django_plugin.lib import fullnames, helpers
+from mypy_django_plugin.lib.helpers import reparametrize_field_type, reparametrize_related_field_type
 from mypy_django_plugin.main import NewSemanalDjangoPlugin
-from mypy_django_plugin.transformers.fields import (
-    get_field_descriptor_types,
-    reparametrize_field_type,
-    reparametrize_related_field_type,
-)
+from mypy_django_plugin.transformers.fields import get_field_descriptor_types
 from mypy_django_plugin.transformers.managers import create_new_manager_class_from_from_queryset_method
 from mypy_django_plugin.transformers.manytomany import M2MArguments, M2MThrough, M2MTo
 from mypy_django_plugin.transformers.models import ProcessManyToManyFields, process_model_class
@@ -94,15 +91,20 @@ class CompositionContext(DjangoContext):
         self.static_names: dict[type[models.Model], str] = {}
         self.parents: dict[str, str] = {}
         self.required_ancestors: dict[type[models.Model], type[models.Model]] = {}
-        self.fields: dict[str, tuple[str, tuple[str, ...]]] = {}
+        self.fields: dict[str, list[tuple[str, tuple[str, ...]]]] = {}
         self.members: dict[str, dict[str, _Member]] = {}
         self.dependencies: dict[str, set[str]] = {}
+        self.queryset_managers: dict[str, dict[str, str]] = {}
 
         # The same discovery owner serves builds and optional static analysis.
         from django_compose.model_composition import ModelComposition
 
         composition = ModelComposition.discover(tuple(self.apps_registry.get_app_configs()))
         self.required_ancestors = composition.required_ancestors
+        donor_targets: dict[type[models.Model], list[type[models.Model]]] = {}
+        for source in composition.ordered_models:
+            for donor in composition.donors(source):
+                donor_targets.setdefault(donor, []).append(source)
         for source in composition.ordered_models:
             name = helpers.get_class_fullname(source)
             concrete = self.apps_registry.get_model(source._meta.app_label, source.__name__)
@@ -111,16 +113,25 @@ class CompositionContext(DjangoContext):
             parent = composition.parent(source)
             if parent is not None:
                 self.parents[name] = helpers.get_class_fullname(parent)
+            self.queryset_managers[name] = {
+                manager_name: helpers.get_class_fullname(type(concrete._meta.managers_map[manager_name]))
+                for manager_name in composition.queryset_contributions(source)
+            }
             donors = composition.donors(source)
             for donor in donors:
                 donor_name = helpers.get_class_fullname(donor)
-                self.composed[donor_name] = concrete
-                self.parents[donor_name] = name
-                self.fields[donor_name] = (
-                    name,
-                    tuple(
-                        field.name for field in composition.contributed_fields(source) if field.model is donor
-                    ),
+                if len(donor_targets[donor]) == 1:
+                    self.composed[donor_name] = concrete
+                    self.parents[donor_name] = name
+                self.fields.setdefault(donor_name, []).append(
+                    (
+                        name,
+                        tuple(
+                            field.name
+                            for field in composition.contributed_fields(source)
+                            if field.model is donor
+                        ),
+                    )
                 )
             selected: dict[str, _Member] = {}
             self.members[name] = selected
@@ -349,11 +360,49 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
             self._new_dependency(module) for module in sorted(extra) if module != file.fullname
         ]
 
+    def get_customize_class_mro_hook(self, fullname: str) -> Callable[[ClassDefContext], None] | None:
+        native = super().get_customize_class_mro_hook(fullname)
+        module, _, name = fullname.rpartition(".")
+        model = self.django_context.model_modules.get(module, {}).get(name)
+        if model in self.django_context.static_names:
+            return partial(self._composed_mro, native=native)
+        return native
+
+    def _composed_mro(
+        self, ctx: ClassDefContext, *, native: Callable[[ClassDefContext], None] | None
+    ) -> None:
+        """Recompute native ancestry after source and donor projections settle."""
+
+        if native is not None:
+            native(ctx)
+        previous = ctx.cls.info.mro
+        ctx.cls.info.mro = []
+        try:
+            calculate_mro(ctx.cls.info)
+        except MroError:
+            ctx.cls.info.mro = previous
+            if ctx.api.final_iteration:
+                ctx.api.fail(f"Unresolved composed model MRO {ctx.cls.fullname}", ctx.cls)
+            else:
+                ctx.api.defer()
+        else:
+            ctx.cls.info.bad_mro = False
+
     def get_base_class_hook(self, fullname: str) -> Callable[[ClassDefContext], None] | None:
         native = super().get_base_class_hook(fullname)
         return partial(self._model_contract, native=native) if native else None
 
     def _model_contract(self, ctx: ClassDefContext, *, native: Callable[[ClassDefContext], None]) -> None:
+        # Native TypeInfo metadata is the independent-plugin channel. Publish the
+        # discovery owner's selected identity, never a guessed abstract receiver.
+        facts = ctx.cls.info.metadata.setdefault("django_compose", {})
+        facts.pop("runtime_model", None)
+        selected = self.django_context.composed.get(ctx.cls.fullname)
+        if selected is not None and not selected._meta.abstract:
+            facts["runtime_model"] = helpers.get_class_fullname(selected)
+            ctx.api.add_plugin_dependency(make_trigger(facts["runtime_model"]))
+        elif not facts:
+            ctx.cls.info.metadata.pop("django_compose", None)
         parent_name = self.django_context.parents.get(ctx.cls.fullname)
         if parent_name:
             parent = self.lookup_fully_qualified(parent_name)
@@ -383,11 +432,14 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
             for _name, model in sorted(self.django_context.model_modules.get(module_name, {}).items()):
                 if model not in self.django_context.static_names:
                     self.project_model(ctx, model)
-        contribution = self.django_context.fields.get(ctx.cls.fullname)
-        if contribution:
-            target_name, fields = contribution
+        for target_name, fields in self.django_context.fields.get(ctx.cls.fullname, ()):
             target = self.lookup_fully_qualified(target_name)
-            assert target is not None and isinstance(target.node, TypeInfo)
+            if target is None or not isinstance(target.node, TypeInfo) or not target.node.mro:
+                if ctx.api.final_iteration:
+                    ctx.api.fail(f"Unresolved composition target {target_name}", ctx.cls)
+                else:
+                    ctx.api.defer()
+                return
             for name in fields:
                 symbol = ctx.cls.info.get(name)
                 if symbol is None:
@@ -573,6 +625,18 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
         )
 
     def _project_members(self, target: TypeInfo, function_type: Instance) -> None:
+        # Source from_queryset assignments are analyzed after the native model
+        # transformer. Project only the explicit composed manager slots after
+        # that analysis; django-stubs owns their types and method forwarding.
+        for name, fullname in self.django_context.queryset_managers.get(target.fullname, {}).items():
+            manager = self.lookup_fully_qualified(fullname)
+            if manager is not None and isinstance(manager.node, TypeInfo) and target.self_type is not None:
+                helpers.add_new_sym_for_info(
+                    target,
+                    name=name,
+                    sym_type=helpers.fill_manager(manager.node, target.self_type),
+                    is_classvar=True,
+                )
         for name in target.metadata.pop("compose_members", {}):
             symbol = target.names.get(name)
             if symbol and symbol.plugin_generated and isinstance(symbol.node, Var):

@@ -6,6 +6,7 @@ from django.apps import apps
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db.migrations.loader import MigrationLoader
 
+from django_compose.exceptions import CompositionError
 from django_compose.management import require_serving_mode
 from django_compose.migration_imports import MigrationImportReport
 from django_compose.migrations import check_native_history, history_labels
@@ -52,5 +53,5 @@ class Command(BaseCommand):
             return
         try:
             check_native_history(apps, labels=history_labels())
-        except RuntimeError as error:
+        except CompositionError as error:
             raise CommandError(str(error)) from error

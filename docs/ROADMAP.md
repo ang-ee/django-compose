@@ -6,6 +6,9 @@ The [public API](api.md) describes what is available; the
 
 Current boundaries and remaining verification:
 
+- A deterministic first-line generated-file marker in emitted modules (the protobuf,
+  gRPC and setuptools-scm `DO NOT EDIT` convention) is pending the rendering owner;
+  determinism does not require omitting it.
 - Component selection supports one Django app per participating distribution;
   app-less and multi-app components are outside that contract. See [components](components.md).
 - Python, Django, platform and typing support follow the [compatibility guide](dependencies.md),

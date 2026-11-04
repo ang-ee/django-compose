@@ -6,11 +6,29 @@ import fcntl
 import select
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 
-from django_compose import serving
+from django_compose import lifecycle, serving
+from django_compose.snapshot import Snapshot
+
+
+class FirstIntegration:
+    phase = "ready"
+    external_root = "first"
+
+    def render(self, composition, registry):
+        return {}
+
+
+class SecondIntegration:
+    phase = "ready"
+    external_root = "second"
+
+    def render(self, composition, registry):
+        return {}
 
 
 @pytest.fixture
@@ -32,7 +50,7 @@ def generated(tmp_path, monkeypatch):
             return "digest"
 
     yield root, Snapshot()
-    serving._close_startup_verification()
+    lifecycle.process.close_startup()
 
 
 def writer(root):
@@ -50,6 +68,34 @@ def writer(root):
     )
 
 
+def test_integrations_follow_active_snapshot(monkeypatch):
+    first_snapshot = Snapshot((), (), ("test_startup.FirstIntegration",), {}, {})
+    second_snapshot = Snapshot((), (), ("test_startup.SecondIntegration",), {}, {})
+    settings = SimpleNamespace(COMPOSE_SNAPSHOT=first_snapshot)
+    monkeypatch.setattr("django.conf.settings", settings)
+    classes = {
+        "test_startup.FirstIntegration": FirstIntegration,
+        "test_startup.SecondIntegration": SecondIntegration,
+    }
+    monkeypatch.setitem(
+        sys.modules,
+        "django_compose.declarations",
+        SimpleNamespace(resolve_integrations=lambda paths: tuple(classes[path]() for path in paths)),
+    )
+    process = lifecycle.Process()
+
+    first = process.integrations()
+    assert len(first) == 1 and isinstance(first[0], FirstIntegration)
+    process.set_integrations(first, first_snapshot)
+    assert process.integrations() is first
+
+    settings.COMPOSE_SNAPSHOT = second_snapshot
+    second = process.integrations()
+    assert len(second) == 1 and isinstance(second[0], SecondIntegration)
+    assert second is process.integrations()
+    assert second is not first
+
+
 def test_retained_startup_excludes_writer_until_finish(generated):
     root, snap = generated
     serving.verify(snap, "runtime", retain_startup=True)
@@ -60,7 +106,7 @@ def test_retained_startup_excludes_writer_until_finish(generated):
         # A regular build/check verifier must not consume the retained lifetime.
         serving.verify(snap, "runtime")
         assert not select.select([child.stdout], [], [], 0.1)[0]
-        serving._finish_startup_verification()
+        lifecycle.process.finish_startup()
         assert child.communicate(timeout=5)[0].strip() == "acquired"
     finally:
         if child.poll() is None:
@@ -102,9 +148,9 @@ def test_exact_receipt_change_releases_startup(generated):
     with (root / "__init__.py").open("a") as stream:
         stream.write("\n")
     with pytest.raises(ImproperlyConfigured, match="changed during population"):
-        serving._finish_startup_verification()
-    assert serving._startup_verification is None
-    serving._close_startup_verification()
+        lifecycle.process.finish_startup()
+    assert lifecycle.process.startup is None
+    lifecycle.process.close_startup()
     with (root / ".compose.lock").open("rb") as stream:
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
@@ -116,7 +162,7 @@ def test_missing_lock_fails_closed_without_writes(generated):
     with pytest.raises(ImproperlyConfigured, match="lock; run compose"):
         serving.verify(snap, "runtime", retain_startup=True)
     assert {p: p.read_bytes() for p in root.iterdir()} == before
-    assert serving._startup_verification is None
+    assert lifecycle.process.startup is None
 
 
 def test_verification_error_releases_lock(generated):
@@ -160,13 +206,13 @@ def test_write_mode_cannot_retain_reader(generated, monkeypatch):
     monkeypatch.setenv("DJANGO_COMPOSE_MODE", "write")
     with pytest.raises(ImproperlyConfigured, match="Write composition"):
         serving.verify(snap, "runtime", retain_startup=True)
-    assert serving._startup_verification is None
+    assert lifecycle.process.startup is None
 
 
 def test_verified_receipt_survives_ready_and_lease_excludes_writer(generated):
     root, snap = generated
     receipt = serving.verify(snap, "runtime", retain_startup=True)
-    serving._finish_startup_verification()
+    lifecycle.process.finish_startup()
     assert serving.verified_receipt() is receipt
     child = None
     try:
@@ -191,7 +237,7 @@ def test_verified_receipt_survives_ready_and_lease_excludes_writer(generated):
 def test_lease_refuses_exact_byte_change(generated):
     root, snap = generated
     serving.verify(snap, "runtime", retain_startup=True)
-    serving._finish_startup_verification()
+    lifecycle.process.finish_startup()
     with (root / "__init__.py").open("a") as stream:
         stream.write("\n")
     with pytest.raises(ImproperlyConfigured, match="changed since startup"), serving.receipt_lease():
@@ -248,7 +294,7 @@ def test_native_reloader_child_holds_lock_after_ready(generated):
             """
 import os, sys
 from pathlib import Path
-from django_compose import serving
+from django_compose import lifecycle, serving
 os.environ['RUN_MAIN'] = 'true'
 serving.output_directory = lambda module: Path(sys.argv[1])
 class Snapshot:
@@ -256,7 +302,7 @@ class Snapshot:
     def check_mode(self): pass
     def digest(self): return 'digest'
 serving.verify(Snapshot(), 'runtime', retain_startup=True)
-serving._finish_startup_verification()
+lifecycle.process.finish_startup()
 print('ready', flush=True)
 sys.stdin.readline()
 """,

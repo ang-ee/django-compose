@@ -13,7 +13,7 @@ from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
 
-from django_compose.serving import Receipt, _validate_output_root, read_receipt
+from django_compose.serving import Receipt, read_receipt, validate_output_root
 from django_compose.serving import receipt_lock as receipt_lock
 
 
@@ -66,7 +66,7 @@ class GeneratedTree:
 
     @staticmethod
     def validate_artifacts(root: Path, artifacts: Mapping[Path, bytes | str]) -> None:
-        _validate_output_root(root)
+        validate_output_root(root)
         paths = set(artifacts)
         for relative, source in artifacts.items():
             if (
@@ -109,7 +109,7 @@ class GeneratedTree:
                 continue
             raise ValueError(f"{self.root} lacks the required generated-output marker: {relative}")
 
-    def _validate(self) -> Receipt | None:
+    def validate(self) -> Receipt | None:
         self.validate_artifacts(self.root, self.artifacts)
         receipt = read_receipt(self.root)
         if receipt is None:
@@ -121,7 +121,7 @@ class GeneratedTree:
             if (
                 "migrations" in relative.parts
                 and target.exists()
-                and target.read_bytes() != self._bytes(source)
+                and target.read_bytes() != self.as_bytes(source)
             ):
                 raise ValueError(f"Cannot overwrite native migration history: {relative}")
             if (
@@ -134,15 +134,15 @@ class GeneratedTree:
         return receipt
 
     @staticmethod
-    def _bytes(value: bytes | str) -> bytes:
+    def as_bytes(value: bytes | str) -> bytes:
         return value.encode() if isinstance(value, str) else value
 
     def drift(self) -> list[Path]:
-        previous = self._validate()
+        previous = self.validate()
         changed = {
             p
             for p, value in self.artifacts.items()
-            if not (self.root / p).is_file() or (self.root / p).read_bytes() != self._bytes(value)
+            if not (self.root / p).is_file() or (self.root / p).read_bytes() != self.as_bytes(value)
         }
         old = {Path(p) for p in previous.OWNED_FILES} if previous else set()
         return sorted(
@@ -155,11 +155,11 @@ class GeneratedTree:
         )
 
     def reconcile(self, *, prune: bool = True) -> bool:
-        previous = self._validate()
+        previous = self.validate()
         changed = False
         for relative, value in sorted(self.artifacts.items()):
             target = self.root / relative
-            content = self._bytes(value)
+            content = self.as_bytes(value)
             if not target.is_file() or target.read_bytes() != content:
                 atomic_write(target, content)
                 changed = True
@@ -173,14 +173,14 @@ class GeneratedTree:
 
     def hashes(self) -> dict[str, str]:
         return {
-            p.as_posix(): hashlib.sha256(self._bytes(value)).hexdigest()
+            p.as_posix(): hashlib.sha256(self.as_bytes(value)).hexdigest()
             for p, value in sorted(self.artifacts.items())
             if p != Path("__init__.py") and "migrations" not in p.parts
         }
 
     def clean(self) -> tuple[Path, ...]:
         with receipt_lock(self.root):
-            receipt = self._validate()
+            receipt = self.validate()
             if receipt is None:
                 return ()
             invalid = Receipt(

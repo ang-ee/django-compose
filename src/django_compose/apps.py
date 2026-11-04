@@ -6,8 +6,8 @@ from django.apps import AppConfig
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
-from django_compose import checks  # noqa: F401 -- register deferred native system checks
-from django_compose.serving import _close_startup_verification, _finish_startup_verification, mode, verify
+from django_compose.lifecycle import process
+from django_compose.serving import mode
 from django_compose.snapshot import Snapshot
 
 
@@ -23,9 +23,9 @@ class ComposeConfig(AppConfig):
                 raise ImproperlyConfigured("ComposeConfig must be last in INSTALLED_APPS")
             if mode() is not None:
                 raise ImproperlyConfigured("Compose mode requires BuildComposeConfig last in INSTALLED_APPS")
-            _finish_startup_verification(required=True)
+            process.finish_startup(required=True)
         finally:
-            _close_startup_verification()
+            process.close_startup()
 
 
 class BuildComposeConfig(AppConfig):
@@ -49,18 +49,16 @@ class BuildComposeConfig(AppConfig):
         if not isinstance(snap, Snapshot):
             raise ImproperlyConfigured("Settings must create COMPOSE_SNAPSHOT before population")
         snap.check_mode()
-        output_dir = settings.COMPOSE_OUTPUT_DIR
-        output_module = getattr(settings, "COMPOSE_OUTPUT_MODULE", "runtime")
-        if selected_mode == "check":
-            verify(snap, output_module)
+        output = process.output_identity()
         integrations = resolve_integrations(snap.integration_paths)
+        process.set_integrations(integrations, snap)
         self.plan = emit(
             snap,
             self.apps.get_app_configs(),
             mode=selected_mode,
             integrations=integrations,
-            output_dir=output_dir,
-            output_module=output_module,
+            output_dir=output.dir,
+            output_module=output.module,
         )
         try:
             self.plan.render_artifacts(
@@ -93,7 +91,7 @@ class BuildComposeConfig(AppConfig):
                 from django_compose.migrations import check_native_history
 
                 check_native_history(self.apps, labels=self.plan.labels)
-            _finish_startup_verification()
+            process.finish_startup()
         finally:
             self.plan.close()
-            _close_startup_verification()
+            process.close_startup()

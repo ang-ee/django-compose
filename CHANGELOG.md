@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased
+
+- Separate pure, deterministic model compilation from receipt-owned publication
+  while preserving build and check behavior.
+- Reject the removed command-context setting with migration guidance, allow an
+  unrelated importable output module before the first compose, and refresh
+  integrations when the active settings snapshot changes.
+- Add a Django-compatible composition exception family for stale output and
+  native-history failures; management commands translate it to `CommandError`.
+- Document the package's purpose, ownership table and non-goals in the
+  specification; describe `requires_apps` as a django-compose `AppConfig`
+  contract; state the deterministic-content rule for generated modules.
+- Make `retire_history --purge` author the guarded native deletion migration and
+  report the routed aliases; Django's `migrate` applies it before retirement.
+- Centralize startup and build ownership in one process lifecycle, verify check
+  mode once during configuration, and require generated directory/module identity.
+  Read composition settings from the frozen snapshot after configuration.
+- Remove URL composition (`django_compose.urls`, `compose_urls*`, check
+  `django_compose.E001`), ASGI composition (`django_compose.asgi`,
+  `compose_asgi()`) and the `COMPOSE_COMMAND_CONTEXT` launcher middleware. The
+  compiler owns no web, protocol or command-dispatch vocabulary; projects route
+  and serve with Django's native `include()` and handlers, and wrap command
+  execution through the new `execute(..., utility_class=...)` keyword. These
+  seams continue in the Angee framework's `angee.server` addon. See
+  [proposal 0004](docs/proposals/0004-serving-boundary.md).
+- Require the post4 django-stubs typing fork and use its field helper exports;
+  generated manager internals now typecheck without private-attribute ignores.
+- Add donor `compose_managers` mappings that combine cooperative manager classes
+  with the source-owned manager instance, including across concrete inheritance.
+  Refuse donor manager methods that bypass contributed QuerySet methods.
+- Type generated managers' `get_queryset()` and `all()` as the composed QuerySet
+  while retaining Django's forwarded method signatures.
+
+## 0.1.0.dev9
+
+- Add explicit donor `compose_querysets` mappings, preserving native domain
+  managers, constructor configuration, named base/default managers and fluent
+  source/runtime typing. Emit stable migration manager imports; compiler
+  revision 3 requires recomposition of previous receipts.
+
 ## 0.1.0.dev8
 
 - Replace reusable transition discovery, binding, baseline/adoption and sealing

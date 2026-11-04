@@ -523,12 +523,12 @@ def test_native_startup_releases_after_last_ready(tmp_path: Path) -> None:
             root,
             script="""
 import django
-from django_compose import serving
+from django_compose import lifecycle, serving
 from django.conf import settings
 settings.INSTALLED_APPS
-assert serving._startup_verification is not None
+assert lifecycle.process.startup is not None
 django.setup()
-assert serving._startup_verification is None
+assert lifecycle.process.startup is None
 import fcntl
 with (settings.COMPOSE_OUTPUT_DIR / '.compose.lock').open('rb') as stream:
     fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -551,8 +551,8 @@ except BaseException as error:
     assert 'native migration history does not match' in str(error), error
 else:
     raise AssertionError('check should refuse missing migration history')
-from django_compose import serving
-assert serving._startup_verification is None
+from django_compose import lifecycle, serving
+assert lifecycle.process.startup is None
 import fcntl
 from django.conf import settings
 with (settings.COMPOSE_OUTPUT_DIR / '.compose.lock').open('rb') as stream:
@@ -568,10 +568,10 @@ def test_retained_lock_protects_native_ready_and_launcher_failure(tmp_path: Path
     source = app.read_text()
     source = source.replace(
         '        EVENTS.append("ready")',
-        """        from django_compose import serving
+        """        from django_compose import lifecycle, serving
         if serving.mode() != "write":
             import fcntl
-            assert serving._startup_verification is not None
+            assert lifecycle.process.startup is not None
             with (settings.COMPOSE_OUTPUT_DIR / ".compose.lock").open("rb") as stream:
                 try:
                     fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -595,8 +595,8 @@ except RuntimeError as error:
     assert str(error) == 'native ready failure'
 else:
     raise AssertionError('ready should fail')
-from django_compose import serving
-assert serving._startup_verification is None
+from django_compose import lifecycle, serving
+assert lifecycle.process.startup is None
 import fcntl
 from django.conf import settings
 with (settings.COMPOSE_OUTPUT_DIR / '.compose.lock').open('rb') as stream:

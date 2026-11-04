@@ -20,12 +20,10 @@ from django.utils.module_loading import import_string
 from django_compose.autoreload import report_inputs, report_watch_paths
 from django_compose.sources import SourceResolver
 
-COMPILER = "django-compose:2"
+COMPILER = "django-compose:3"
 DEFAULT_EXCLUDES = ("**/__pycache__/**", "**/migrations/**", "**/tests/**")
 
-NON_INPUT_SETTINGS = frozenset(
-    {"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_CLOSURE", "COMPOSE_COMMAND_CONTEXT"}
-)
+NON_INPUT_SETTINGS = frozenset({"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_CLOSURE"})
 STRUCTURAL_SETTINGS = frozenset(
     {
         "INSTALLED_APPS",

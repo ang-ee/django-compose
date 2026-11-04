@@ -46,6 +46,7 @@ class ExplicitChild(Required, inherits="modelapp.Entity"):
         base_manager_name = "objects"
 class Link(Composable, concrete=True):
     entity = models.ForeignKey("modelapp.Entity", on_delete=models.CASCADE)
+    child = models.ForeignKey("modelapp.Child", null=True, on_delete=models.CASCADE)
     entities = models.ManyToManyField("modelapp.Entity", related_name="all_links")
     class Meta:
         abstract = True
@@ -124,7 +125,8 @@ from typing import assert_type
 from uuid import UUID
 from django.apps import apps
 from modelapp.models import Entity, Child, Link, Required, Ordinary, ExplicitChild, Grandchild
-from typed_runtime.modelapp.models import Entity as ConcreteEntity
+from typed_runtime.modelapp.models import Entity as ConcreteEntity, Child as ConcreteChild
+from typed_runtime.modelapp.models import Grandchild as ConcreteGrandchild
 
 def check(entity: Entity, child: Child, link: Link, required: Required, grandchild: Grandchild) -> None:
     assert_type(entity.rank, int)
@@ -163,6 +165,15 @@ def check(entity: Entity, child: Child, link: Link, required: Required, grandchi
     child.entity_ptr = entity
     assert_type(link.entity, ConcreteEntity)
     assert_type(link.entity_id, UUID)
+    assert_type(link.child, ConcreteChild | None)
+    if link.child is not None:
+        assert_type(link.child.score(), int)
+        assert_type(link.child.ancestor_title(), str)
+        assert_type(link.child.clone(), ConcreteChild)
+        source_child: Child = link.child
+        assert_type(source_child, Child)
+    assert_type(ConcreteGrandchild.objects.get().score(), int)
+    assert_type(ConcreteGrandchild().clone(), ConcreteGrandchild)
     link.entity = child
     link.entities.add(entity, child)
     assert_type(link.entities.get().score(), int)
@@ -202,6 +213,7 @@ def check(entity: Entity, child: Child, link: Link, required: Required, grandchi
     grandchild.title = {}
     child.entity_ptr = link
     link.entity = link
+    link.child = link
     link.entity_id = {}
     link.entities.add(link)
     link.entity.missing()

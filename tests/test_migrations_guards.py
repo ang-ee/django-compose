@@ -61,11 +61,12 @@ model = before.apps.get_model("alpha", "Record")
 row = model._base_manager.create(old="seeded")
 after = before.clone()
 after.remove_model("alpha", "record")
+from django_compose.lifecycle import process
 class Retirement:
     def retired_primary_keys(self, model, alias):
         assert alias == "default"
         return [row.pk] if {retire!r} else []
-with patch("django_compose.migrations.resolve_integrations", return_value=(Retirement(),)):
+with patch.object(process, "integrations", return_value=(Retirement(),)):
     action = lambda: DropGuardAutodetector(before, after).changes(executor.loader.graph)
     if {retire!r}:
         assert action()["alpha"]
@@ -138,7 +139,7 @@ else:
 before = files()
 from django.db.migrations.recorder import MigrationRecorder
 records = set(MigrationRecorder(connection).applied_migrations())
-expect(RuntimeError, message, lambda: reset_migration_history(("alpha",)))
+expect(HistoryError, message, lambda: reset_migration_history(("alpha",)))
 assert before == files()
 assert records == set(MigrationRecorder(connection).applied_migrations())
 """)
@@ -220,7 +221,7 @@ connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other
 settings.DATABASE_ROUTERS = ["explicit-router-presence"]
 before = files()
 with patch("django_compose.migrations.router.allow_migrate_model", return_value=True):
-    expect(RuntimeError, "also routed", lambda: reset_migration_history(("alpha",)))
+    expect(HistoryError, "also routed", lambda: reset_migration_history(("alpha",)))
 assert files() == before
 assert not Path("database.sqlite3").exists()
 assert not Path("other.sqlite3").exists()
@@ -380,7 +381,7 @@ for alias in ("default", "other"):
 original = files()
 recorded = {alias: set(MigrationRecorder(connections[alias]).applied_migrations())
             for alias in ("default", "other")}
-expect(RuntimeError, "also routed", lambda: reset_migration_history(("alpha",)))
+expect(HistoryError, "also routed", lambda: reset_migration_history(("alpha",)))
 assert files() == original
 for alias in ("default", "other"):
     assert set(MigrationRecorder(connections[alias]).applied_migrations()) == recorded[alias]

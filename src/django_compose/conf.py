@@ -18,6 +18,7 @@ from django.utils.module_loading import module_has_submodule
 from django_compose import serving
 from django_compose.autoreload import report_inputs, report_watch_paths
 from django_compose.components import Closure, enabled_apps
+from django_compose.lifecycle import process
 from django_compose.snapshot import Entry, mode, snapshot, structural_settings
 
 _DERIVED = frozenset({"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_CLOSURE"})
@@ -307,6 +308,12 @@ def configure(namespace: MutableMapping[str, Any]) -> None:
         raise ImproperlyConfigured(
             "COMPOSE_ADDON_GROUP was renamed to COMPOSE_COMPONENT_GROUP; migrate the authored setting"
         )
+    if "COMPOSE_COMMAND_CONTEXT" in namespace:
+        raise ImproperlyConfigured(
+            "COMPOSE_COMMAND_CONTEXT was removed with the launcher's command middleware; "
+            "wrap command execution through management.execute(..., utility_class=...) "
+            "and a project-owned setting instead"
+        )
     selected_mode = mode()
     for name in _DERIVED:
         if name in namespace:
@@ -321,12 +328,14 @@ def configure(namespace: MutableMapping[str, Any]) -> None:
     report_watch_paths(namespace.get("COMPOSE_WATCH_PATHS", ()))
     namespace["COMPOSE_ROOTS"] = roots
     snap = snapshot(closure.app_entries, namespace=namespace, dependencies=closure.dependencies)
+    process.reset_integrations()
     namespace["COMPOSE_SNAPSHOT"] = snap
     output_module = snap.settings["COMPOSE_OUTPUT_MODULE"]
     namespace["COMPOSE_OUTPUT_MODULE"] = output_module
     try:
+        process.output = serving.Output.from_values(snap.settings["COMPOSE_OUTPUT_DIR"], output_module)
         receipt = (
-            serving.read_receipt(Path(namespace["COMPOSE_OUTPUT_DIR"]))
+            serving.read_receipt(process.output.dir)
             if selected_mode == "write"
             else serving.verify(snap, output_module, retain_startup=True)
         )
@@ -345,5 +354,5 @@ def configure(namespace: MutableMapping[str, Any]) -> None:
             else "django_compose.apps.ComposeConfig",
         )
     except BaseException:
-        serving._close_startup_verification()
+        process.close_startup()
         raise

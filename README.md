@@ -50,6 +50,25 @@ The [model guide](https://github.com/ang-ee/django-compose/blob/main/docs/models
 also covers `inherits` for Django multi-table inheritance and `demands` for
 required ancestors.
 
+Extension donors can add a QuerySet and a cooperative manager class to an existing
+manager slot:
+
+```python
+class Protection(Composable, extends="catalog.Item"):
+    compose_querysets = {"objects": ProtectedQuerySet}
+    compose_managers = {"objects": ProtectedManager}
+
+    class Meta:
+        abstract = True
+```
+
+The source's selected `objects` instance keeps its factory, constructor settings,
+database binding and manager selectors. The generated manager combines the donor
+class with that source class and forwards through the composed QuerySet. Donor
+manager classes must be importable and cooperative, without constructors or
+instance state. See the [model guide](https://github.com/ang-ee/django-compose/blob/main/docs/models.md)
+for the full contract.
+
 ## How a project uses it
 
 Author your Django settings and `manage.py`, call `configure(globals())` at the

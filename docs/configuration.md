@@ -195,11 +195,10 @@ from django_compose.autoreload import report_inputs
 report_inputs(files=(BASE_DIR / "settings.yaml", BASE_DIR / ".env"))
 ```
 
-Use `COMPOSE_WATCH_PATHS` for extra files or `(directory, glob)` pairs.
-For command wrappers, `COMPOSE_COMMAND_CONTEXT` accepts dotted context-manager
-factories called with `(command, argv, options)` after Django setup and native
-argument parsing. See the [example context](../examples/shop/contexts.py) and
-[lifecycle contract](SPEC.md#setup-lifecycle) for the complete launcher interface.
+Use `COMPOSE_WATCH_PATHS` for extra files or `(directory, glob)` pairs. The
+[lifecycle contract](SPEC.md#setup-lifecycle) defines the complete launcher
+interface. Command dispatch is Django's native `ManagementUtility`; to wrap
+command execution, pass a subclass as `execute(sys.argv, utility_class=...)`.
 
 ## App settings contributions
 
@@ -257,17 +256,21 @@ already included. Globs are relative to each selected app directory. Changing
 `COMPOSE_FINGERPRINT_EXCLUDES` replaces its defaults; consult the
 [input contract](SPEC.md#settings-and-snapshots) before overriding it.
 
-## Compose app URLs
+## Route app URLs
 
-A selected AppConfig can set `compose_urls` to its native URLconf module, with
-optional `compose_url_prefix` and `compose_url_namespace` attributes. Set the
-project's `ROOT_URLCONF` to `"django_compose.urls"` to include those contributions
-after setup. Ordinary project-authored URLconfs remain supported.
+django-compose does not compose URLconfs or ASGI applications. Route a selected
+app's URLconf with Django's native `include()` in the project's `ROOT_URLCONF`,
+and serve with Django's ordinary ASGI or WSGI application:
 
-`django_compose.E001` reports identical native matching chains. Django still
-resolves other overlapping patterns in order; this is not a general overlap
-detector. See the [serving contract](SPEC.md#serving-composition) for URL and ASGI
-contributions.
+```python
+# shop/urls.py
+from django.urls import include, path
+
+urlpatterns = [path("catalog/", include("catalog.urls"))]
+```
+
+Generated models are available to views through Django's app registry as usual.
+The [example URLconf](../examples/shop/urls.py) uses this layout.
 
 ## Startup consistency
 
