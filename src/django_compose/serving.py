@@ -34,7 +34,7 @@ class Output:
     @classmethod
     def from_values(cls, directory: Path | str, module: str) -> Output:
         root = Path(directory)
-        if len(SourceResolver().locate(module).search_locations) == 1:
+        if root.exists() and len(SourceResolver().locate(module).search_locations) == 1:
             imported = output_directory(module)
             if imported != root.resolve():
                 raise ImproperlyConfigured(

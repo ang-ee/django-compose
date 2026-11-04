@@ -51,7 +51,7 @@ class BuildComposeConfig(AppConfig):
         snap.check_mode()
         output = process.output_identity()
         integrations = resolve_integrations(snap.integration_paths)
-        process.set_integrations(integrations)
+        process.set_integrations(integrations, snap)
         self.plan = emit(
             snap,
             self.apps.get_app_configs(),

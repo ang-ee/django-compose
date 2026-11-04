@@ -34,6 +34,7 @@ class Process:
         self.wait = 5.0
         self.output: Output | None = None
         self._integrations: tuple[object, ...] | None = None
+        self._integration_snapshot: Snapshot | None = None
         self._lifetime_lock: AbstractContextManager[None] | None = None
         self._pending_artifacts: tuple[Path, serving.Receipt] | None = None
         self._build_cleanup: Callable[[], None] | None = None
@@ -123,17 +124,23 @@ class Process:
     def output_identity(self) -> serving.Output:
         return self.output if self.output is not None else serving.Output.from_settings()
 
-    def set_integrations(self, integrations: tuple[object, ...]) -> None:
+    def reset_integrations(self) -> None:
+        self._integrations = None
+        self._integration_snapshot = None
+
+    def set_integrations(self, integrations: tuple[object, ...], snapshot: Snapshot) -> None:
         self._integrations = integrations
+        self._integration_snapshot = snapshot
 
     def integrations(self) -> tuple[object, ...]:
-        if self._integrations is None:
-            from django.conf import settings
+        from django.conf import settings
 
+        snapshot = getattr(settings, "COMPOSE_SNAPSHOT", None)
+        if self._integrations is None or self._integration_snapshot is not snapshot:
             from django_compose.declarations import resolve_integrations
 
-            snapshot = getattr(settings, "COMPOSE_SNAPSHOT", None)
             self._integrations = resolve_integrations(snapshot.integration_paths if snapshot else ())
+            self._integration_snapshot = snapshot
         return self._integrations
 
 

@@ -6,11 +6,29 @@ import fcntl
 import select
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
 
 from django_compose import lifecycle, serving
+from django_compose.snapshot import Snapshot
+
+
+class FirstIntegration:
+    phase = "ready"
+    external_root = "first"
+
+    def render(self, composition, registry):
+        return {}
+
+
+class SecondIntegration:
+    phase = "ready"
+    external_root = "second"
+
+    def render(self, composition, registry):
+        return {}
 
 
 @pytest.fixture
@@ -48,6 +66,34 @@ def writer(root):
         stdout=subprocess.PIPE,
         text=True,
     )
+
+
+def test_integrations_follow_active_snapshot(monkeypatch):
+    first_snapshot = Snapshot((), (), ("test_startup.FirstIntegration",), {}, {})
+    second_snapshot = Snapshot((), (), ("test_startup.SecondIntegration",), {}, {})
+    settings = SimpleNamespace(COMPOSE_SNAPSHOT=first_snapshot)
+    monkeypatch.setattr("django.conf.settings", settings)
+    classes = {
+        "test_startup.FirstIntegration": FirstIntegration,
+        "test_startup.SecondIntegration": SecondIntegration,
+    }
+    monkeypatch.setitem(
+        sys.modules,
+        "django_compose.declarations",
+        SimpleNamespace(resolve_integrations=lambda paths: tuple(classes[path]() for path in paths)),
+    )
+    process = lifecycle.Process()
+
+    first = process.integrations()
+    assert len(first) == 1 and isinstance(first[0], FirstIntegration)
+    process.set_integrations(first, first_snapshot)
+    assert process.integrations() is first
+
+    settings.COMPOSE_SNAPSHOT = second_snapshot
+    second = process.integrations()
+    assert len(second) == 1 and isinstance(second[0], SecondIntegration)
+    assert second is process.integrations()
+    assert second is not first
 
 
 def test_retained_startup_excludes_writer_until_finish(generated):

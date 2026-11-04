@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reject the removed command-context setting with migration guidance, allow an
+  unrelated importable output module before the first compose, and refresh
+  integrations when the active settings snapshot changes.
 - Add a Django-compatible composition exception family for stale output and
   native-history failures; management commands translate it to `CommandError`.
 - Document the package's purpose, ownership table and non-goals in the

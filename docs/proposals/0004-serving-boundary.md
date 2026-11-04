@@ -30,6 +30,5 @@ addon (`angee.server.urls`, `angee.server.asgi`, `angee.server.management` in
 API replaces them.
 
 Compatibility: this is a prerelease API cutoff recorded in the changelog. The
-snapshot no longer lists `COMPOSE_COMMAND_CONTEXT` as a non-input setting; a
-project that still sets it fails at `configure` because unknown `COMPOSE_*`
-values must be literal snapshot inputs.
+snapshot no longer lists `COMPOSE_COMMAND_CONTEXT` as a non-input setting;
+`configure` rejects `COMPOSE_COMMAND_CONTEXT` by name with a migration error.

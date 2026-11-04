@@ -308,6 +308,12 @@ def configure(namespace: MutableMapping[str, Any]) -> None:
         raise ImproperlyConfigured(
             "COMPOSE_ADDON_GROUP was renamed to COMPOSE_COMPONENT_GROUP; migrate the authored setting"
         )
+    if "COMPOSE_COMMAND_CONTEXT" in namespace:
+        raise ImproperlyConfigured(
+            "COMPOSE_COMMAND_CONTEXT was removed with the launcher's command middleware; "
+            "wrap command execution through management.execute(..., utility_class=...) "
+            "and a project-owned setting instead"
+        )
     selected_mode = mode()
     for name in _DERIVED:
         if name in namespace:
@@ -322,6 +328,7 @@ def configure(namespace: MutableMapping[str, Any]) -> None:
     report_watch_paths(namespace.get("COMPOSE_WATCH_PATHS", ()))
     namespace["COMPOSE_ROOTS"] = roots
     snap = snapshot(closure.app_entries, namespace=namespace, dependencies=closure.dependencies)
+    process.reset_integrations()
     namespace["COMPOSE_SNAPSHOT"] = snap
     output_module = snap.settings["COMPOSE_OUTPUT_MODULE"]
     namespace["COMPOSE_OUTPUT_MODULE"] = output_module

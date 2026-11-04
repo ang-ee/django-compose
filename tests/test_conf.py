@@ -39,6 +39,7 @@ def project(tmp_path, monkeypatch):
 
 def test_output_identity_rejects_disagreeing_directory_and_module(project, tmp_path):
     _, ns = project
+    ns["COMPOSE_OUTPUT_DIR"].mkdir()
     package = tmp_path / "other_runtime"
     package.mkdir()
     (package / "__init__.py").write_text("")
@@ -46,6 +47,27 @@ def test_output_identity_rejects_disagreeing_directory_and_module(project, tmp_p
     ns["COMPOSE_OUTPUT_MODULE"] = "other_runtime"
     with pytest.raises(ImproperlyConfigured, match="COMPOSE_OUTPUT_DIR and COMPOSE_OUTPUT_MODULE"):
         conf.configure(ns)
+
+
+@pytest.mark.parametrize("output_exists", [False, True], ids=["first-compose", "existing-output"])
+def test_unrelated_importable_output_module_only_conflicts_with_existing_dir(
+    project, tmp_path, monkeypatch, output_exists
+):
+    _, ns = project
+    unrelated = tmp_path / "unrelated"
+    package = unrelated / "runtime"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    monkeypatch.syspath_prepend(str(unrelated))
+    importlib.invalidate_caches()
+    if output_exists:
+        ns["COMPOSE_OUTPUT_DIR"].mkdir()
+        with pytest.raises(ImproperlyConfigured, match="COMPOSE_OUTPUT_DIR and COMPOSE_OUTPUT_MODULE"):
+            conf.configure(ns)
+    else:
+        conf.configure(ns)
+        assert conf.process.output is not None
+        assert conf.process.output.dir == ns["COMPOSE_OUTPUT_DIR"]
 
 
 def test_output_identity_keeps_symlink_guard(project, tmp_path):
@@ -81,6 +103,20 @@ def test_defaults_native_merges_and_provenance(project):
     assert ns["COMPOSE_ROOTS"] == ("confapp_0", "confapp_1")
     assert ns["COMPOSE_SNAPSHOT"].settings["DEFAULT_AUTO_FIELD"]
     assert ns["INSTALLED_APPS"][-1] == "django_compose.apps.BuildComposeConfig"
+
+
+def test_configure_resets_integration_cache_for_new_snapshot(project, tmp_path):
+    _, first = project
+    conf.configure(first)
+    old_snapshot = first["COMPOSE_SNAPSHOT"]
+    conf.process.set_integrations((object(),), old_snapshot)
+
+    second = {"COMPOSE_OUTPUT_DIR": tmp_path / "next_runtime", "INSTALLED_APPS": []}
+    conf.configure(second)
+
+    assert second["COMPOSE_SNAPSHOT"] is not old_snapshot
+    assert conf.process._integrations is None
+    assert conf.process._integration_snapshot is None
 
 
 def test_apply_app_settings_retains_native_selection_without_composition(project, monkeypatch):
@@ -875,6 +911,17 @@ def test_authored_legacy_group_fails_before_app_selection(project, legacy):
     namespace["COMPOSE_ADDON_GROUP"] = legacy
     namespace["INSTALLED_APPS"] = ["must_not_import"]
     with pytest.raises(ImproperlyConfigured, match="COMPOSE_ADDON_GROUP.*COMPOSE_COMPONENT_GROUP"):
+        conf.configure(namespace)
+
+
+def test_removed_command_context_fails_with_migration_guidance(project):
+    _, namespace = project
+    namespace["COMPOSE_COMMAND_CONTEXT"] = ("project.commands.CommandContext",)
+    namespace["INSTALLED_APPS"] = ["must_not_import"]
+    with pytest.raises(
+        ImproperlyConfigured,
+        match=r"COMPOSE_COMMAND_CONTEXT.*management\.execute.*utility_class.*project-owned setting",
+    ):
         conf.configure(namespace)
 
 

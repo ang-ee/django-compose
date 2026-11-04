@@ -528,10 +528,11 @@ registry in the final ready callback, before publication. See [build integration
 ```
 
 `COMPOSE_OUTPUT_DIR` and `COMPOSE_OUTPUT_MODULE` identify one generated package.
-When the module is importable, its resolved package directory must equal the
-resolved output directory; `configure` refuses disagreement with both setting
-names. Before the first compose, an unimportable module may use the authored
-directory. The process retains this output identity for subsequent readers.
+When the output directory exists and the module is importable, its resolved
+package directory must equal the resolved output directory; `configure` refuses
+disagreement with both setting names. Before the first compose, an importable
+module may be unrelated; the generated package will shadow it once created.
+The process retains this output identity for subsequent readers.
 
 `Receipt` records `HISTORY_LABELS`, `RETIRED_LABELS`, `MODEL_LABELS`,
 `DIGEST`, `OWNED_FILES` with sha256 hashes, `COMPILER`, and `IN_PROGRESS`.
