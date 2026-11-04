@@ -575,11 +575,13 @@ Retirement requires consistent fully applied history across all configured
 migration-relevant aliases and refuses retained incoming cross-app dependencies.
 The alias scope includes native data-operation routing hints; custom database
 behavior that cannot establish a narrower scope requires all configured aliases.
-Optional purge authors/applies a final native deletion migration on that same alias
-scope; purge alone is not retirement. Successful retirement updates the record;
-the next compose removes the history-only config. Databases absent from command
-settings lie outside that proof. Guarded history reset additionally requires a
-fully applied, model-clean graph and uses transactional recorder changes with
+Optional purge authors a final native deletion migration and stops with its path
+and routed aliases. Django's `migrate` applies it on each alias before a later
+retirement call; an existing purge migration is never reauthored. Successful
+retirement updates the record; the next compose removes the history-only config.
+Databases absent from command settings lie outside that proof. Guarded history
+reset additionally requires a fully applied, model-clean graph and uses
+transactional recorder changes with
 filesystem rollback preserving original bytes and permissions. Normal build and
 clean never reset history.
 

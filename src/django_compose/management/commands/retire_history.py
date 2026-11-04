@@ -9,11 +9,16 @@ from django_compose.migrations import retire_history
 
 
 class Command(BaseCommand):
-    help = "Retire history-only labels after routed database and dependency checks."
+    help = (
+        "Retire history-only labels after routed database and dependency checks. "
+        "--purge authors a migration; run migrate on the named aliases, then retire again."
+    )
 
     def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("label")
-        parser.add_argument("--purge", action="store_true")
+        parser.add_argument(
+            "--purge", action="store_true", help="Author a deletion migration for Django to apply"
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
         require_serving_mode()

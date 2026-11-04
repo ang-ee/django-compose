@@ -209,14 +209,15 @@ routes cannot be inferred require every configured alias. Rebase or squash
 incoming dependencies first. Databases absent from the command's settings are
 outside that proof.
 
-Its optional `--purge` authors and applies a final native deletion migration
-across the same database scope before retirement. It refuses deletion of tables
-still owned by active models before authoring or applying changes. A failed
-application retains that migration for retry and does not mark retirement
-complete. Successful retirement updates the build record under the normal writer
-lock; the next compose removes the history-only configuration. Removing the
-retired migration package from version control is a separate coordinated cutoff
-decision.
+Its optional `--purge` authors a final native deletion migration and stops,
+reporting the file path and routed database aliases. It refuses deletion of tables
+still owned by active models before authoring. Run Django's
+`migrate <label> --database <alias>` for each reported alias, then run `retire_history <label>`
+again. An existing purge migration is never reauthored; an unsuccessful migrate
+leaves that file for retry and cannot complete retirement. Successful retirement
+updates the build record under the normal writer lock; the next compose removes
+the history-only configuration. Removing the retired migration package from
+version control is a separate coordinated cutoff decision.
 
 `reset_migration_history` replaces an explicitly selected, fully applied,
 model-clean history with fresh initial migrations. It refuses unsafe cross-app

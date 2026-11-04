@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Make `retire_history --purge` author the guarded native deletion migration and
+  report the routed aliases; Django's `migrate` applies it before retirement.
 - Centralize startup and build ownership in one process lifecycle, verify check
   mode once during configuration, and require generated directory/module identity.
   Read composition settings from the frozen snapshot after configuration.

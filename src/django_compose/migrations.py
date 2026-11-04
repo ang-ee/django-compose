@@ -642,9 +642,8 @@ def _fully_applied(labels: set[str], aliases: Iterable[str]) -> None:
 def retire_history(label: str, *, purge: bool = False) -> None:
     """Retire a disabled label only after all routed configured databases agree.
 
-    Purge authors a native final migration, applies it on every routed alias, and
-    then runs the same retirement proof. A failed application leaves durable
-    history for retry; it never records retirement prematurely.
+    Purge authors a native final migration and stops. Django applies it on every
+    routed alias before a later call runs the ordinary retirement proof.
     """
     from django_compose.artifacts import receipt_lock, update_receipt
 
@@ -664,23 +663,30 @@ def retire_history(label: str, *, purge: bool = False) -> None:
         loader = MigrationLoader(None, ignore_no_migrations=True)
         _check_dependents(loader, {label})
         aliases = _history_aliases(loader, {label})
-        if purge:
+        if purge and not tuple(_directory(label).glob("*compose_purge.py")):
             before, after = effective_states(loader, global_apps, purge=frozenset({label}))
             changes = MigrationAutodetector(before, after).changes(
                 graph=loader.graph, trim_to_apps={label}, migration_name="compose_purge"
             )
             _shared_table_drops(before, after, changes, database=True)
+            authored: list[Path] = []
             for migration in changes.get(label, ()):
                 writer = MigrationWriter(migration, include_header=False)
                 path = Path(writer.path)
                 if path.exists():
                     raise RuntimeError(f"Refusing to overwrite native purge migration {path}")
                 atomic_write(path, writer.as_string().encode(), exclusive=True)
+                authored.append(path)
             _forget_history({label})
-            for alias in aliases:
-                executor = MigrationExecutor(connections[alias])
-                executor.loader.check_consistent_history(connections[alias])
-                executor.migrate(executor.loader.graph.leaf_nodes(label))
+            if authored:
+                paths = ", ".join(str(path) for path in authored)
+                routed = ", ".join(aliases) if aliases else "none"
+                commands = "; ".join(f"migrate {label} --database {alias}" for alias in aliases)
+                next_step = commands or f"migrate {label}"
+                raise RuntimeError(
+                    f"Authored purge migration(s) for {label}: {paths}; routed aliases: {routed}. "
+                    f"Run {next_step} and then retire_history {label} again"
+                )
         _fully_applied({label}, aliases)
         loader = MigrationLoader(None, ignore_no_migrations=True)
         _check_dependents(loader, {label})
