@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Remove URL composition (`django_compose.urls`, `compose_urls*`, check
+  `django_compose.E001`), ASGI composition (`django_compose.asgi`,
+  `compose_asgi()`) and the `COMPOSE_COMMAND_CONTEXT` launcher middleware. The
+  compiler owns no web, protocol or command-dispatch vocabulary; projects route
+  and serve with Django's native `include()` and handlers, and wrap command
+  execution through the new `execute(..., utility_class=...)` keyword. These
+  seams continue in the Angee framework's `angee.server` addon. See
+  [proposal 0004](docs/proposals/0004-serving-boundary.md).
 - Require the post4 django-stubs typing fork and use its field helper exports;
   generated manager internals now typecheck without private-attribute ignores.
 - Add donor `compose_managers` mappings that combine cooperative manager classes

@@ -44,7 +44,7 @@ class BlockModels:
             raise AssertionError(fullname)
 sys.meta_path.insert(0, BlockModels())
 import importlib
-for name in ('snapshot', 'serving', 'history', 'components', 'conf', 'autoreload', 'checks', 'apps'):
+for name in ('snapshot', 'serving', 'history', 'components', 'conf', 'autoreload', 'apps'):
     importlib.import_module('django_compose.' + name)
 from django.apps import apps
 assert not apps.apps_ready
@@ -58,7 +58,7 @@ assert not apps.apps_ready
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_phase_two_and_post_setup_modules_use_native_population(tmp_path):
+def test_phase_two_modules_use_native_population(tmp_path):
     from pathlib import Path
 
     (tmp_path / "probe").mkdir()
@@ -74,12 +74,9 @@ class Config(AppConfig):
             importlib.import_module("django_compose." + name)
 """)
     script = """from django.conf import settings
-settings.configure(INSTALLED_APPS=["probe.apps.Config"], SECRET_KEY="boundary",
-                   ROOT_URLCONF="django_compose.urls")
+settings.configure(INSTALLED_APPS=["probe.apps.Config"], SECRET_KEY="boundary")
 import django
 django.setup()
-import django_compose.urls
-import django_compose.asgi
 from django.apps import apps
 assert apps.ready
 """

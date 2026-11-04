@@ -442,16 +442,7 @@ def test_structural_settings_owns_environment_boundary_and_custom_inputs():
     assert {"INSTALLED_APPS", "MIGRATION_MODULES", "COMPOSE_ENV_PREFIXES", "CUSTOM_MODEL"} <= keys
     assert "COMPOSE_EXTENSION" in keys
     assert "EXTRA" in structural_settings({}, settings_keys=("EXTRA",))
-    assert not {"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_COMMAND_CONTEXT"}.intersection(keys)
-
-
-def test_command_context_never_enters_snapshot_even_when_explicitly_requested():
-    assert (
-        snapshot(()).digest()
-        == snapshot(
-            (), namespace={"COMPOSE_COMMAND_CONTEXT": object()}, settings_keys=("COMPOSE_COMMAND_CONTEXT",)
-        ).digest()
-    )
+    assert not {"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT"}.intersection(keys)
 
 
 @pytest.mark.parametrize("declared", ("CUSTOM", (12,), None))

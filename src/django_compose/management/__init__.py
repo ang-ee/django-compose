@@ -1,4 +1,4 @@
-"""Native Django dispatch with composition and post-setup execution contexts."""
+"""Native Django dispatch with composition-mode selection and the reloader parent."""
 
 from __future__ import annotations
 
@@ -8,17 +8,13 @@ import signal
 import subprocess
 import sys
 import tempfile
-from contextlib import ExitStack
-from types import MappingProxyType
 from typing import Any
 
-from django.apps import apps
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management import ManagementUtility
 from django.core.management.base import CommandError, handle_default_options
 from django.utils import autoreload
-from django.utils.module_loading import import_string
 
 from django_compose.autoreload import inputs, report_inputs, write_report
 
@@ -38,51 +34,6 @@ def require_serving_mode() -> None:
     """Migration commands require a process populated from verified serving apps."""
     if "DJANGO_COMPOSE_MODE" in os.environ:
         raise CommandError("Migration commands require serving mode; unset DJANGO_COMPOSE_MODE")
-
-
-class _Dispatch:
-    def __init__(self, command: Any) -> None:
-        self.command = command
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.command, name)
-
-    def run_from_argv(self, argv: list[str]) -> Any:
-        """Adapt native execute after parsing, retaining the winning argv dispatcher.
-
-        Custom run_from_argv implementations must call self.execute to participate.
-        Factories receive command, original argv and read-only shallow-copied options.
-        The native dispatcher continues to own parsing, errors and connection cleanup.
-        """
-        original_execute = self.command.execute
-        missing = object()
-        previous = vars(self.command).get("execute", missing)
-        original_argv = tuple(argv)
-
-        def execute(*args: Any, **options: Any) -> Any:
-            with ExitStack() as stack:
-                # runserver recovery fabricates ready flags, but not ready_event.
-                if apps.ready_event.is_set():
-                    parsed_options = MappingProxyType(options.copy())
-                    for dotted in getattr(settings, "COMPOSE_COMMAND_CONTEXT", ()):
-                        stack.enter_context(
-                            import_string(dotted)(original_argv[1], original_argv, parsed_options)
-                        )
-                return original_execute(*args, **options)
-
-        self.command.execute = execute
-        try:
-            return self.command.run_from_argv(argv)
-        finally:
-            if previous is missing:
-                del self.command.execute
-            else:
-                self.command.execute = previous
-
-
-class _Utility(ManagementUtility):
-    def fetch_command(self, subcommand: str) -> Any:
-        return _Dispatch(super().fetch_command(subcommand))
 
 
 def _default_options(arguments: list[str]) -> Any:
@@ -161,8 +112,16 @@ def _parent(arguments: list[str]) -> None:
             raise SystemExit(code)
 
 
-def execute(argv: list[str] | None = None) -> None:
-    """Drop-in management entrypoint retaining Django's native setup policy."""
+def execute(
+    argv: list[str] | None = None, *, utility_class: type[ManagementUtility] = ManagementUtility
+) -> None:
+    """Drop-in management entrypoint retaining Django's native setup policy.
+
+    Dispatch goes through ``utility_class``, Django's native ManagementUtility
+    by default. A project wraps command execution by supplying its own subclass;
+    django-compose adds no command middleware. The reloader parent's compose
+    subprocess always uses the default dispatcher.
+    """
     arguments = list(sys.argv if argv is None else argv)
     command = arguments[1] if len(arguments) > 1 else "help"
     if command in MIGRATION_COMMANDS:
@@ -213,7 +172,7 @@ def execute(argv: list[str] | None = None) -> None:
                     print(f"Composition lock: {settings.COMPOSE_OUTPUT_DIR}/.compose.lock")
                     print("Composition is current.")
                     return
-        _Utility(arguments).execute()
+        utility_class(arguments).execute()
     finally:
         try:
             _fallback_inputs()

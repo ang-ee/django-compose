@@ -23,9 +23,7 @@ from django_compose.sources import SourceResolver
 COMPILER = "django-compose:3"
 DEFAULT_EXCLUDES = ("**/__pycache__/**", "**/migrations/**", "**/tests/**")
 
-NON_INPUT_SETTINGS = frozenset(
-    {"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_CLOSURE", "COMPOSE_COMMAND_CONTEXT"}
-)
+NON_INPUT_SETTINGS = frozenset({"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_CLOSURE"})
 STRUCTURAL_SETTINGS = frozenset(
     {
         "INSTALLED_APPS",

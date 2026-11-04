@@ -1,3 +1,5 @@
-from django_compose.urls import urlpatterns
+"""The project URLconf includes app URLconfs with Django's native include()."""
 
-__all__ = ["urlpatterns"]
+from django.urls import include, path
+
+urlpatterns = [path("catalog/", include("catalog.urls"))]
