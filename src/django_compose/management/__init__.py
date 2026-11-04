@@ -77,9 +77,6 @@ def _parent(arguments: list[str]) -> None:
     # The compose subprocess uses this launcher, independent of manage.py imports.
     bootstrap = "from django_compose.management import execute; import sys; execute(sys.argv[1:])"
     defaults = [f"--pythonpath={options.pythonpath}"] if options.pythonpath else []
-    for name in ("DJANGO_SETTINGS_MODULE",):
-        if name in os.environ:
-            environment[name] = os.environ[name]
     while True:
         with tempfile.TemporaryFile(mode="w+") as report:
             command = [

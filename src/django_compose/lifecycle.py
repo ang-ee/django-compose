@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from django.core.exceptions import ImproperlyConfigured
 
 from django_compose import serving
+from django_compose.exceptions import StaleOutput
 from django_compose.snapshot import Snapshot, mode
 
 if TYPE_CHECKING:
@@ -71,7 +72,7 @@ class Process:
             raise ImproperlyConfigured("Startup must verify composition before population; use configure()")
         try:
             if session is not None and (session.root / "__init__.py").read_bytes() != session.source:
-                raise ImproperlyConfigured("Generated composition changed during population; run compose")
+                raise StaleOutput("Generated composition changed during population; run compose")
             if session is not None and os.environ.get("RUN_MAIN") == "true":
                 self._lifetime_lock = session.lock
                 self.startup = None
@@ -109,9 +110,7 @@ class Process:
             raise ImproperlyConfigured("No startup-verified composition")
         with serving.receipt_lock(session.root, write=False, required=True):
             if (session.root / "__init__.py").read_bytes() != session.source:
-                raise ImproperlyConfigured(
-                    "Generated composition changed since startup; restart this process"
-                )
+                raise StaleOutput("Generated composition changed since startup; restart this process")
             yield session.receipt
 
     def artifact_source(self) -> tuple[Path, serving.Receipt]:

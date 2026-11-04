@@ -118,6 +118,10 @@ ordered models, donors, parents and contributed fields; see [model contracts](SP
 | `serving.receipt_lease()` | Context manager holding shared output ownership while acting on that receipt |
 | `provision.require_provisioned(using="default", timeout=0)` | Require database readiness for the verified build without repairing it |
 
+`django_compose.exceptions` exposes `CompositionError` (a Django
+`ImproperlyConfigured` subclass), `StaleOutput` for generated-output failures,
+and `HistoryError` for native-history proof failures.
+
 See [artifact access](SPEC.md#artifact-access), [build records](SPEC.md#generated-output-and-freshness)
 and [readiness](provisioning.md). Lower-level integrations can use
 `serving.read_receipt(output_module)` (a path or module name) and

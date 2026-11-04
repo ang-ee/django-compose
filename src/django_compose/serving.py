@@ -16,6 +16,7 @@ from types import MappingProxyType
 
 from django.core.exceptions import ImproperlyConfigured
 
+from django_compose.exceptions import StaleOutput
 from django_compose.snapshot import Entry, Snapshot, app_entries
 from django_compose.snapshot import mode as mode
 from django_compose.sources import SourceResolver
@@ -81,7 +82,7 @@ def receipt_lock(
                     fcntl.flock(stream, fcntl.LOCK_UN)
         else:
             if required:
-                raise ImproperlyConfigured("Missing generated composition lock; run compose")
+                raise StaleOutput("Missing generated composition lock; run compose")
             yield
         return
     root.mkdir(parents=True, exist_ok=True)
@@ -210,13 +211,13 @@ def read_receipt(output_module: Path | str) -> Receipt | None:
             receipt.IN_PROGRESS,
         )
     except (OSError, SyntaxError, ValueError, TypeError) as error:
-        raise ImproperlyConfigured(f"Invalid generated receipt: {error}; run compose") from error
+        raise StaleOutput(f"Invalid generated receipt: {error}; run compose") from error
 
 
 def output_directory(output_module: str) -> Path:
     source = SourceResolver().locate(output_module)
     if len(source.search_locations) != 1:
-        raise ImproperlyConfigured(f"Missing generated package {output_module!r}; run compose")
+        raise StaleOutput(f"Missing generated package {output_module!r}; run compose")
     root = source.search_locations[0]
     validate_output_root(root)
     return root
@@ -231,7 +232,7 @@ def verify_output(snap: Snapshot, root: Path) -> Receipt:
         or receipt.DIGEST != snap.digest()
         or receipt.COMPILER != snap.compiler
     ):
-        raise ImproperlyConfigured("Generated composition is absent, interrupted or stale; run compose")
+        raise StaleOutput("Generated composition is absent, interrupted or stale; run compose")
     for relative, digest in receipt.OWNED_FILES.items():
         _owned_path(root, Path(relative), digest)
     return receipt
@@ -338,5 +339,5 @@ def _owned_path(root: Path, relative: Path, digest: str | None) -> Path:
         or not target.is_file()
         or hashlib.sha256(target.read_bytes()).hexdigest() != digest
     ):
-        raise ImproperlyConfigured(f"Generated file is missing or altered: {relative}; run compose")
+        raise StaleOutput(f"Generated file is missing or altered: {relative}; run compose")
     return target

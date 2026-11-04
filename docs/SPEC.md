@@ -443,6 +443,11 @@ The process lifecycle owns retained verification, the active build, its lock wai
 and pending artifacts. `--wait` applies to the invoked compose process; the
 reloader parent's separate compose subprocess uses the five-second default.
 
+Configuration and declaration faults raise `ImproperlyConfigured`.
+`django_compose.exceptions.CompositionError` subclasses it; `StaleOutput` names
+generated output that must be recomposed, and `HistoryError` names failed
+native-history proofs. Commands translate these composition errors to `CommandError`.
+
 `configure` selects the process configuration. In write/check mode it installs
 selected source configs, retained history-only configs, then
 `django_compose.apps.BuildComposeConfig` last. In serving mode it verifies the

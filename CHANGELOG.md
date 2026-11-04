@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a Django-compatible composition exception family for stale output and
+  native-history failures; management commands translate it to `CommandError`.
 - Document the package's purpose, ownership table and non-goals in the
   specification; describe `requires_apps` as a django-compose `AppConfig`
   contract; state the deterministic-content rule for generated modules.
