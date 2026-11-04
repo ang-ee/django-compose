@@ -17,7 +17,6 @@ defines supported versions and platforms.
 - [Artifact access](#artifact-access)
 - [Native history](#native-history)
 - [Database preparation and readiness](#database-preparation-and-readiness)
-- [Serving composition](#serving-composition)
 - [Typing and import boundaries](#typing-and-import-boundaries)
 
 ## Terms
@@ -246,7 +245,6 @@ keep ordering and input ownership in one place. See the
 | `COMPOSE_OUTPUT_DIR` | Project-selected generated package directory; required for building |
 | `COMPOSE_OUTPUT_MODULE` | Import path for that directory; defaults to `"runtime"` |
 | `COMPOSE_WATCH_PATHS` | Files and `(directory, glob)` pairs additionally watched by native reloaders |
-| `COMPOSE_COMMAND_CONTEXT` | Ordered dotted post-setup/post-parse `(command, argv, options)` context-manager factories; empty by default |
 | `COMPOSE_INTEGRATIONS` | Ordered dotted integration class paths; empty by default |
 | `COMPOSE_FINGERPRINT_GLOBS` | Additional per-app source globs; empty by default |
 | `COMPOSE_FINGERPRINT_EXCLUDES` | Source exclusion patterns; defaults to `**/tests/**`, `**/migrations/**`, `**/__pycache__/**` |
@@ -257,9 +255,9 @@ keep ordering and input ownership in one place. See the
 
 Mandatory inputs include resolved app/config identities, source Python and
 extra-glob bytes, selected config MRO implementation modules, integration modules,
-`DEFAULT_AUTO_FIELD`, `AUTH_USER_MODEL`, authored
-migration mappings, every `COMPOSE_*` value except derived `COMPOSE_ROOTS`,
-`COMPOSE_SNAPSHOT`, `COMPOSE_CLOSURE` and execution-only `COMPOSE_COMMAND_CONTEXT`, and compiler identity. Built-in/frozen config owners use a
+`DEFAULT_AUTO_FIELD`, `AUTH_USER_MODEL`, authored migration mappings, every
+`COMPOSE_*` value except derived `COMPOSE_ROOTS`, `COMPOSE_SNAPSHOT` and
+`COMPOSE_CLOSURE`, and compiler identity. Built-in/frozen config owners use a
 deterministic interpreter implementation/version identity instead of file bytes.
 A redundant root list cannot alter the digest of an unchanged resolved selection.
 
@@ -296,13 +294,11 @@ launcher is the native reloader parent: compose first, then start the serving ch
 on failure watch reported candidates and retry after changes. Settings loaders
 call `autoreload.report_inputs(files=(), globs=())` before reads. Files may be
 absent and globs initially empty. `COMPOSE_WATCH_PATHS` extends the same owner.
-`COMPOSE_COMMAND_CONTEXT` factories receive `(command, tuple(argv), options)`
-after successful native setup and parsing, around `execute`. `options` is a
-read-only shallow copy of native parsed options, including default or explicitly
-selected `database` where that command declares it. Native dispatch owns parser
-errors and connection cleanup. Settings-free/help/version paths skip contexts.
-A custom `run_from_argv` participates by calling `self.execute`; bypassing execute
-also bypasses these contexts.
+`execute(argv=None, *, utility_class=ManagementUtility)` dispatches through the
+given native `ManagementUtility` class, which owns command parsing, parser errors
+and connection cleanup. A project wraps command execution by supplying a subclass;
+the launcher adds no middleware of its own, and the reloader parent's compose
+subprocess uses the default dispatcher.
 Direct Django launchers must set composition mode themselves before settings
 load; migration commands require it to be absent.
 
@@ -511,26 +507,10 @@ under its lease and reads readiness and native migration state without repair.
 The single private recorder, durable failure/retry boundary, PostgreSQL lock and
 explicit `base_provision` table cutover are defined in [provisioning](provisioning.md).
 
-## Serving composition
-
-After `django.setup()`, `django_compose.urls.urlpatterns` includes selected
-configs' optional `compose_urls` modules using `compose_url_prefix` (default empty)
-and `compose_url_namespace` (default absent). The registered native system check
-reports identical native matching chains as `django_compose.E001`, naming both
-contributing apps. Chains must have the same include boundaries, native matcher
-types, compiled regex text and flags, endpoint behavior, capture names and
-converter instances. Reverse namespaces do not distinguish matches. Different
-converters, differently expressed chains and custom matching implementations
-retain Django's ordered resolution; the check neither executes converters nor
-proves arbitrary regex equivalence or overlap.
-
-`django_compose.asgi.application` composes optional `config.compose_asgi()` factories
-returning `AsgiContribution(http_mounts=..., lifespans=..., protocols=...)`.
-Absolute mount paths use longest-prefix matching on path boundaries; the original
-path is retained and root_path extended. Unmounted HTTP uses Django's ASGIHandler.
-Lifespan factories enter in app order, unwind in reverse and report startup/shutdown
-failure. HTTP and lifespan are reserved protocols; duplicate mounts or protocol
-claims fail. These modules require completed setup and install no server policy.
+django-compose composes no URLconf, ASGI application or command middleware.
+Projects route selected apps' URLconfs with Django's native `include()` and serve
+them with Django's ASGI or WSGI handlers; see
+[proposal 0004](proposals/0004-serving-boundary.md).
 
 ## Typing and import boundaries
 

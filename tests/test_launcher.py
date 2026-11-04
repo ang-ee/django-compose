@@ -1,4 +1,4 @@
-"""Plain Django projects verify the native command-dispatch adapter."""
+"""Plain Django projects verify the native command-dispatch launcher."""
 
 from __future__ import annotations
 
@@ -37,44 +37,47 @@ def project(root: Path) -> None:
     for path in (package, package / "management", package / "management" / "commands"):
         (path / "__init__.py").write_text("")
     (package / "models.py").write_text("from django.db import models\nclass Record(models.Model): pass\n")
-    (package / "contexts.py").write_text("""from contextlib import contextmanager
-from django.apps import apps
-@contextmanager
-def first(command, argv, options):
-    assert apps.get_model("plain.Record")
-    print("first-enter", command)
-    try: yield
-    finally: print("first-exit")
-@contextmanager
-def second(command, argv, options):
-    print("second-enter")
-    try: yield
-    finally: print("second-exit")
-""")
     (
         package / "management" / "commands" / "probe.py"
     ).write_text("""from django.core.management.base import BaseCommand
+from django.apps import apps
 class Command(BaseCommand):
     requires_system_checks = []
-    def handle(self, *args, **kwargs): print("dispatched")
+    def handle(self, *args, **kwargs):
+        assert apps.get_model("plain.Record")
+        print("dispatched")
 """)
     (root / "alternate.py").write_text("""SECRET_KEY = "test"
 INSTALLED_APPS = ["plain"]
-COMPOSE_COMMAND_CONTEXT = ["plain.contexts.first", "plain.contexts.second"]
 """)
 
 
-def test_native_defaults_setup_and_ordered_contexts(tmp_path: Path) -> None:
+def test_native_defaults_setup_and_dispatch(tmp_path: Path) -> None:
     project(tmp_path)
     result = invoke(tmp_path, "probe", "--settings=alternate", f"--pythonpath={tmp_path}")
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == [
-        "first-enter probe",
-        "second-enter",
-        "dispatched",
-        "second-exit",
-        "first-exit",
-    ]
+    assert result.stdout.splitlines() == ["dispatched"]
+
+
+def test_execute_dispatches_through_supplied_native_utility(tmp_path: Path) -> None:
+    project(tmp_path)
+    script = """import sys
+from django.core.management import ManagementUtility
+from django_compose.management import execute
+class Wrapped(ManagementUtility):
+    def fetch_command(self, subcommand):
+        print("wrapped", subcommand)
+        return super().fetch_command(subcommand)
+execute(["manage.py", "probe", "--settings=alternate", "--pythonpath=" + sys.argv[1]], utility_class=Wrapped)
+"""
+    environment = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+    environment.pop("DJANGO_COMPOSE_MODE", None)
+    environment.pop("DJANGO_SETTINGS_MODULE", None)
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)], env=environment, text=True, capture_output=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["wrapped probe", "dispatched"]
 
 
 @pytest.mark.parametrize(
@@ -147,13 +150,6 @@ raise SystemExit(main(['inspect-apps', 'django.contrib.contenttypes']))
     assert json.loads(result.stdout)["roots"] == ["django.contrib.contenttypes"]
 
 
-def test_command_help_does_not_enter_context(tmp_path: Path) -> None:
-    project(tmp_path)
-    result = invoke(tmp_path, "probe", "--settings=alternate", f"--pythonpath={tmp_path}", "--help")
-    assert result.returncode == 0, result.stderr
-    assert "first-enter" not in result.stdout
-
-
 def test_fallback_settings_input_is_reported_without_import_or_distribution_metadata(tmp_path, monkeypatch):
     package = tmp_path / "fallbackprobe"
     package.mkdir()
@@ -208,7 +204,7 @@ raise ValueError("malformed YAML")
     assert [str(tmp_path), "*.zed"] in payload["globs"]
 
 
-def test_native_failed_runserver_setup_skips_context(tmp_path: Path) -> None:
+def test_native_failed_runserver_setup_recovers_dispatch(tmp_path: Path) -> None:
     project(tmp_path)
     (tmp_path / "plain" / "apps.py").write_text("""from django.apps import AppConfig
 class PlainConfig(AppConfig):
@@ -224,7 +220,6 @@ class Command(Native):
 """)
     (tmp_path / "alternate.py").write_text("""SECRET_KEY = "test"
 INSTALLED_APPS = ["plain.apps.PlainConfig"]
-COMPOSE_COMMAND_CONTEXT = ["plain.contexts.first"]
 """)
     script = """from django.core.management.commands.runserver import Command
 Command.handle = lambda *a, **kw: print("recoverable-dispatch")
@@ -243,7 +238,6 @@ execute(["manage.py", "runserver", "--settings=alternate", "--pythonpath=" + __i
     )
     assert result.returncode == 0, result.stderr
     assert "recoverable-dispatch" in result.stdout
-    assert "first-enter" not in result.stdout
 
 
 def test_parent_recomposes_before_each_native_child_and_repairs_cold_failure(tmp_path: Path) -> None:
@@ -384,7 +378,7 @@ configure(globals())
             process.wait(timeout=10)
 
 
-def test_contexts_unwind_after_native_command_failure_and_logging_runs_once(tmp_path: Path) -> None:
+def test_native_command_failure_runs_logging_once(tmp_path: Path) -> None:
     project(tmp_path)
     (tmp_path / "plain" / "logging.py").write_text("""def configure(config):
     print("logging-configured")
@@ -399,13 +393,7 @@ def test_contexts_unwind_after_native_command_failure_and_logging_runs_once(tmp_
     )
     result = invoke(tmp_path, "probe", "--settings=alternate", f"--pythonpath={tmp_path}")
     assert result.returncode != 0
-    assert result.stdout.splitlines() == [
-        "logging-configured",
-        "first-enter probe",
-        "second-enter",
-        "second-exit",
-        "first-exit",
-    ]
+    assert result.stdout.splitlines() == ["logging-configured"]
 
 
 @pytest.mark.parametrize("seconds", ["-1", "nan", "inf"])

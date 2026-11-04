@@ -1,6 +1,8 @@
 # 0001: preserve native URL converter semantics
 
-Status: accepted.
+Status: accepted; superseded by [0004](0004-serving-boundary.md), which removed
+URL composition from django-compose. This record documents the check's semantics
+for whichever package owns it.
 
 Django owns URL matching through native patterns, converters and ordered
 resolution. A converter's `to_python()` may raise `ValueError` to reject a regex
@@ -20,6 +22,7 @@ registry, setting or dependency. Identical native chains remain errors,
 including duplicates reached through different reverse namespaces.
 Valid custom-converter routes previously rejected need no caller migration.
 
-The implemented contract belongs in [the API reference](../SPEC.md#serving-composition)
-and the native check's docstring. Django's [converter documentation](https://docs.djangoproject.com/en/6.1/topics/http/urls/#registering-custom-path-converters)
+The implemented contract left this distribution with [0004](0004-serving-boundary.md);
+the package owning the check documents it beside the check's docstring. Django's
+[converter documentation](https://docs.djangoproject.com/en/6.1/topics/http/urls/#registering-custom-path-converters)
 owns matching behavior.

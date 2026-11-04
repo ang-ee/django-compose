@@ -97,4 +97,4 @@ migration history when rebuilding generated files.
 - [Configure your project](configuration.md) for complete settings, launcher and model files.
 - [Model declarations](models.md) explains extensions, multi-table inheritance and constraints.
 - [Public API](api.md) maps commands, Python entry points and app hooks.
-- [Example details](../examples/shop/README.md) cover its settings, artifacts, URLs and ASGI hooks.
+- [Example details](../examples/shop/README.md) cover its settings, artifacts and integrations.
