@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Centralize startup and build ownership in one process lifecycle, verify check
+  mode once during configuration, and require generated directory/module identity.
+  Read composition settings from the frozen snapshot after configuration.
 - Remove URL composition (`django_compose.urls`, `compose_urls*`, check
   `django_compose.E001`), ASGI composition (`django_compose.asgi`,
   `compose_asgi()`) and the `COMPOSE_COMMAND_CONTEXT` launcher middleware. The

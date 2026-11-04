@@ -298,6 +298,7 @@ def main() -> None:
             "provision.py",
             "migration_imports.py",
             "serving.py",
+            "lifecycle.py",
             "build.py",
             "typing.py",
             "management/commands/makemigrations.py",

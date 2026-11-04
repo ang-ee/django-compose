@@ -359,6 +359,11 @@ Explicit `integration_paths=`, `fingerprint_globs=` and `fingerprint_excludes=`
 arguments must agree with corresponding namespace values when both are supplied.
 Explicit authored migration mappings must also agree with `MIGRATION_MODULES` in
 the namespace. Deployment secrets are excluded unless deliberately named.
+After `configure`, composition reads `COMPOSE_*` inputs from
+`COMPOSE_SNAPSHOT.settings`, not later mutations of live Django settings.
+Authored migration overrides come from the snapshot as well. Serving migration
+policies resolve once from its frozen integration paths; the build config supplies
+the already resolved build integrations to the same process owner.
 
 Default exclusions can be replaced and prune the default Python walk. Explicit
 extra globs include matching files even beneath excluded directories. Other
@@ -391,6 +396,9 @@ the launcher adds no middleware of its own, and the reloader parent's compose
 subprocess uses the default dispatcher.
 Direct Django launchers must set composition mode themselves before settings
 load; migration commands require it to be absent.
+The process lifecycle owns retained verification, the active build, its lock wait
+and pending artifacts. `--wait` applies to the invoked compose process; the
+reloader parent's separate compose subprocess uses the five-second default.
 
 `configure` selects the process configuration. In write/check mode it installs
 selected source configs, retained history-only configs, then
@@ -401,9 +409,10 @@ and retained history, then installs `django_compose.apps.ComposeConfig` last. Th
 Build begins in native app-population phase 2, after source `import_models()`
 hooks, and finalizes in the final `ready()` callback:
 
-1. Check mode verifies the build record and owned file contents before resolving
-   integrations or discovering model declarations. Write mode permits an absent
-   output package.
+1. Check mode verifies the build record and owned file contents once in
+   `configure`, before resolving integrations or discovering model declarations.
+   The process lifecycle retains that verified receipt through native population.
+   Write mode permits an absent output package.
 2. Discover and validate declarations; render or compare generated models.
 3. Import generated models so native concrete classes are registered.
 4. Render or compare `models` artifacts through the restricted model view.
@@ -468,6 +477,12 @@ registry in the final ready callback, before publication. See [build integration
     ├── models.py        # concrete composed classes
     └── migrations/      # durable native migration history
 ```
+
+`COMPOSE_OUTPUT_DIR` and `COMPOSE_OUTPUT_MODULE` identify one generated package.
+When the module is importable, its resolved package directory must equal the
+resolved output directory; `configure` refuses disagreement with both setting
+names. Before the first compose, an unimportable module may use the authored
+directory. The process retains this output identity for subsequent readers.
 
 `Receipt` records `HISTORY_LABELS`, `RETIRED_LABELS`, `MODEL_LABELS`,
 `DIGEST`, `OWNED_FILES` with sha256 hashes, `COMPILER`, and `IN_PROGRESS`.

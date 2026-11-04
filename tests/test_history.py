@@ -329,12 +329,10 @@ with patch("django_compose.migrations.read_receipt", return_value=receipt):
 
 def test_dynamic_history_factory_preserves_native_labels_without_models(tmp_path, monkeypatch):
     import sys
-    from types import SimpleNamespace
 
     from django.apps import AppConfig
     from django.apps.registry import Apps
 
-    from django_compose import history
     from django_compose.serving import Receipt, tombstones
 
     labels = ("settings", "_archive", "__name__")
@@ -348,7 +346,10 @@ def test_dynamic_history_factory_preserves_native_labels_without_models(tmp_path
         (package / "__init__.py").write_text("")
         (package / "models.py").write_text("raise AssertionError('stale history models imported')")
     monkeypatch.syspath_prepend(str(tmp_path))
-    monkeypatch.setattr(history, "_settings", SimpleNamespace(COMPOSE_OUTPUT_MODULE=root.name))
+    from django_compose.lifecycle import process
+    from django_compose.serving import Output
+
+    monkeypatch.setattr(process, "output", Output(root, root.name))
     registry = Apps(installed_apps=[])
     entries = tombstones(receipt, (), root.name)
     assert entries == tuple(f"django_compose.history.History_{label}" for label in labels)

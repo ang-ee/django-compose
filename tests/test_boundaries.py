@@ -44,7 +44,7 @@ class BlockModels:
             raise AssertionError(fullname)
 sys.meta_path.insert(0, BlockModels())
 import importlib
-for name in ('snapshot', 'serving', 'history', 'components', 'conf', 'autoreload', 'apps'):
+for name in ('snapshot', 'serving', 'lifecycle', 'history', 'components', 'conf', 'autoreload', 'apps'):
     importlib.import_module('django_compose.' + name)
 from django.apps import apps
 assert not apps.apps_ready

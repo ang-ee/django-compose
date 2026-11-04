@@ -17,6 +17,7 @@ from django.core.management.base import CommandError, handle_default_options
 from django.utils import autoreload
 
 from django_compose.autoreload import inputs, report_inputs, write_report
+from django_compose.lifecycle import process
 
 MIGRATION_COMMANDS = frozenset(
     {
@@ -120,7 +121,7 @@ def execute(
     Dispatch goes through ``utility_class``, Django's native ManagementUtility
     by default. A project wraps command execution by supplying its own subclass;
     django-compose adds no command middleware. The reloader parent's compose
-    subprocess always uses the default dispatcher.
+    subprocess always uses the default dispatcher and its own five-second lock wait.
     """
     arguments = list(sys.argv if argv is None else argv)
     command = arguments[1] if len(arguments) > 1 else "help"
@@ -138,9 +139,6 @@ def execute(
             pass
         return
     report_fd = None
-    old_wait = os.environ.get("DJANGO_COMPOSE_WAIT")
-    from django_compose.serving import _close_build, _close_startup_verification
-
     try:
         if command == "compose":
             from django_compose.management.commands.compose import Command
@@ -157,19 +155,20 @@ def execute(
             if existing is not None and existing != expected:
                 raise ImproperlyConfigured("DJANGO_COMPOSE_MODE conflicts with compose arguments")
             os.environ["DJANGO_COMPOSE_MODE"] = expected
-            os.environ["DJANGO_COMPOSE_WAIT"] = str(options.wait)
+            process.wait = options.wait
             sys.dont_write_bytecode = True
             if options.if_stale:
                 from django_compose.serving import verify
 
                 # Settings computes the immutable snapshot; no native setup occurs here.
                 snap = settings.COMPOSE_SNAPSHOT
+                output = process.output_identity()
                 try:
-                    verify(snap, settings.COMPOSE_OUTPUT_MODULE)
+                    verify(snap, output.module)
                 except ImproperlyConfigured:
                     pass
                 else:
-                    print(f"Composition lock: {settings.COMPOSE_OUTPUT_DIR}/.compose.lock")
+                    print(f"Composition lock: {output.dir / '.compose.lock'}")
                     print("Composition is current.")
                     return
         utility_class(arguments).execute()
@@ -179,9 +178,5 @@ def execute(
             if report_fd is not None:
                 write_report(report_fd)
         finally:
-            _close_build()
-            _close_startup_verification()
-            if old_wait is None:
-                os.environ.pop("DJANGO_COMPOSE_WAIT", None)
-            else:
-                os.environ["DJANGO_COMPOSE_WAIT"] = old_wait
+            process.abort_build()
+            process.close_startup()

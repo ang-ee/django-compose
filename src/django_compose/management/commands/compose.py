@@ -2,13 +2,12 @@
 
 import math
 from argparse import ArgumentParser, ArgumentTypeError
-from pathlib import Path
 from typing import Any
 
 from django.apps import apps
-from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
+from django_compose.lifecycle import process
 from django_compose.serving import mode
 
 
@@ -38,5 +37,5 @@ class Command(BaseCommand):
                 "django_compose.management.execute; direct django-admin compose requires the mode variable"
             )
 
-        self.stdout.write(f"Composition lock: {Path(settings.COMPOSE_OUTPUT_DIR) / '.compose.lock'}")
+        self.stdout.write(f"Composition lock: {process.output_identity().dir / '.compose.lock'}")
         self.stdout.write("Composition is current." if options["check"] else "Composition generated.")

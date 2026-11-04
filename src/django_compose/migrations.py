@@ -36,7 +36,8 @@ from django.db.models.expressions import DatabaseDefault
 from django.utils.module_loading import module_dir
 
 from django_compose.artifacts import atomic_write
-from django_compose.declarations import MigrationPolicy, resolve_integrations
+from django_compose.declarations import MigrationPolicy
+from django_compose.lifecycle import process
 from django_compose.management import require_serving_mode as require_serving_mode
 from django_compose.migration_imports import HistoricalImport as HistoricalImport
 from django_compose.migration_imports import historical_imports as historical_imports
@@ -52,7 +53,7 @@ def history_only_labels() -> frozenset[str]:
     snap = getattr(settings, "COMPOSE_SNAPSHOT", None)
     if snap is None:
         return frozenset()
-    receipt = read_receipt(Path(settings.COMPOSE_OUTPUT_DIR))
+    receipt = read_receipt(process.output_identity().dir)
     if receipt is None:
         return frozenset()
     active = {entry.label for entry in snap.entries}
@@ -117,7 +118,7 @@ def _directory(label: str, *, missing: bool = False) -> Path:
 
 def history_labels() -> tuple[str, ...]:
     """Read the compiler receipt without invoking composition."""
-    receipt = read_receipt(Path(settings.COMPOSE_OUTPUT_DIR))
+    receipt = read_receipt(process.output_identity().dir)
     if receipt is None:
         raise CommandError("Migration authoring requires a receipt; run compose first")
     return tuple(receipt.HISTORY_LABELS)
@@ -367,9 +368,7 @@ class DropGuardAutodetector(MigrationAutodetector):
                         model = self.from_state.apps.get_model(label, operation.name)
                         integrations = tuple(
                             integration
-                            for integration in resolve_integrations(
-                                getattr(settings, "COMPOSE_INTEGRATIONS", ())
-                            )
+                            for integration in process.integrations()
                             if isinstance(integration, MigrationPolicy)
                         )
 
@@ -650,7 +649,7 @@ def retire_history(label: str, *, purge: bool = False) -> None:
     from django_compose.artifacts import receipt_lock, update_receipt
 
     require_serving_mode()
-    output = Path(settings.COMPOSE_OUTPUT_DIR)
+    output = process.output_identity().dir
     with receipt_lock(output):
         receipt = read_receipt(output)
         if receipt is None:

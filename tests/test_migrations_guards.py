@@ -61,11 +61,12 @@ model = before.apps.get_model("alpha", "Record")
 row = model._base_manager.create(old="seeded")
 after = before.clone()
 after.remove_model("alpha", "record")
+from django_compose.lifecycle import process
 class Retirement:
     def retired_primary_keys(self, model, alias):
         assert alias == "default"
         return [row.pk] if {retire!r} else []
-with patch("django_compose.migrations.resolve_integrations", return_value=(Retirement(),)):
+with patch.object(process, "integrations", return_value=(Retirement(),)):
     action = lambda: DropGuardAutodetector(before, after).changes(executor.loader.graph)
     if {retire!r}:
         assert action()["alpha"]

@@ -14,6 +14,7 @@ from django_compose import conf
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
+    monkeypatch.setattr(conf.process, "output", None)
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setenv("DJANGO_COMPOSE_MODE", "write")
     created = []
@@ -34,6 +35,28 @@ def project(tmp_path, monkeypatch):
     for name in tuple(sys.modules):
         if name.split(".")[0] in created:
             sys.modules.pop(name)
+
+
+def test_output_identity_rejects_disagreeing_directory_and_module(project, tmp_path):
+    _, ns = project
+    package = tmp_path / "other_runtime"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    importlib.invalidate_caches()
+    ns["COMPOSE_OUTPUT_MODULE"] = "other_runtime"
+    with pytest.raises(ImproperlyConfigured, match="COMPOSE_OUTPUT_DIR and COMPOSE_OUTPUT_MODULE"):
+        conf.configure(ns)
+
+
+def test_output_identity_keeps_symlink_guard(project, tmp_path):
+    _, ns = project
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "linked"
+    link.symlink_to(target, target_is_directory=True)
+    ns["COMPOSE_OUTPUT_DIR"] = link
+    with pytest.raises(ValueError, match="traverses a symlink"):
+        conf.configure(ns)
 
 
 def test_defaults_native_merges_and_provenance(project):
@@ -333,7 +356,7 @@ def test_snapshot_once_after_contributions_and_projection_cleanup(project, monke
 
     monkeypatch.setattr(conf, "snapshot", freeze)
     monkeypatch.setattr(conf.serving, "verify", verify)
-    monkeypatch.setattr(conf.serving, "_close_startup_verification", lambda: closed.append(True))
+    monkeypatch.setattr(conf.process, "close_startup", lambda: closed.append(True))
     with pytest.raises(RuntimeError, match="startup failure"):
         conf.configure(ns)
     assert len(calls) == 1

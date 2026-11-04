@@ -105,7 +105,7 @@ def test_artifact_accessor_checks_pending_ownership_hash_and_symlinks(tmp_path, 
     import django.conf
     from django.core.exceptions import ImproperlyConfigured
 
-    from django_compose import serving
+    from django_compose import lifecycle, serving
 
     root = tmp_path / "runtime"
     tree = GeneratedTree(root, {Path("capability/models.txt"): b"models"})
@@ -115,16 +115,17 @@ def test_artifact_accessor_checks_pending_ownership_hash_and_symlinks(tmp_path, 
     tree.reconcile()
 
     def cleanup():
-        serving._clear_build(cleanup)
+        lifecycle.process.end_build(cleanup)
 
-    serving._register_build(cleanup)
+    lifecycle.process.begin_build(cleanup)
     request.addfinalizer(cleanup)
-    serving._publish_build_artifacts(cleanup, root, receipt)
+    lifecycle.process.publish_artifacts(cleanup, root, receipt)
     monkeypatch.setattr(
         django.conf,
         "settings",
         SimpleNamespace(
-            COMPOSE_EXTERNAL_ARTIFACT_ROOTS=("capability",),
+            COMPOSE_EXTERNAL_ARTIFACT_ROOTS=(),
+            COMPOSE_SNAPSHOT=SimpleNamespace(settings={"COMPOSE_EXTERNAL_ARTIFACT_ROOTS": ("capability",)}),
         ),
     )
 
@@ -132,10 +133,10 @@ def test_artifact_accessor_checks_pending_ownership_hash_and_symlinks(tmp_path, 
         pass
 
     with pytest.raises(ImproperlyConfigured, match="already active"):
-        serving._register_build(other_cleanup)
+        lifecycle.process.begin_build(other_cleanup)
     with pytest.raises(ImproperlyConfigured, match="inactive build"):
-        serving._publish_build_artifacts(other_cleanup, root, receipt)
-    serving._clear_build(other_cleanup)
+        lifecycle.process.publish_artifacts(other_cleanup, root, receipt)
+    lifecycle.process.end_build(other_cleanup)
     target = serving.artifact_path("capability/models.txt")
     assert target.read_bytes() == b"models"
     for invalid in ("../escape", "capability", str(target)):

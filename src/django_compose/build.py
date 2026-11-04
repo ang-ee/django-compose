@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,15 +10,14 @@ from typing import Any, Literal
 
 from django.apps import AppConfig, apps
 from django.apps.registry import Apps
-from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
-from django_compose import serving
 from django_compose.artifacts import GeneratedTree, atomic_write, receipt_lock
 from django_compose.declarations import ArtifactHook, ModelDeclarationHook, ModelsView, model_declaration
+from django_compose.lifecycle import process
 from django_compose.model_composition import ModelComposition
 from django_compose.rendering import render_models
-from django_compose.serving import Receipt, read_receipt, verify
+from django_compose.serving import Receipt, read_receipt
 from django_compose.snapshot import Snapshot
 
 
@@ -63,7 +61,7 @@ class BuildPlan:
         self._lock = receipt_lock(
             output_dir,
             write=mode == "write",
-            wait=float(os.environ["DJANGO_COMPOSE_WAIT"]) if "DJANGO_COMPOSE_WAIT" in os.environ else 5.0,
+            wait=process.wait,
         )
         self._locked = False
 
@@ -91,11 +89,13 @@ class BuildPlan:
         self._lock.__enter__()
         self._locked = True
         try:
-            serving._register_build(self.close)
+            process.begin_build(self.close)
             if self.mode == "check":
-                self.previous = verify(self.snapshot, self.output_module)
+                self.previous = process.receipt()
             # Guard ownership before invalidation. A failed discovery remains invalid.
-            self.previous = GeneratedTree(self.output_dir, {})._validate()
+            current = GeneratedTree(self.output_dir, {}).validate()
+            if self.mode == "write":
+                self.previous = current
             if self.mode == "write":
                 receipt = self._receipt(progress=True)
                 if self.previous is None:
@@ -150,7 +150,7 @@ class BuildPlan:
                         declarations=declarations,
                     )
                 migration_init = self.output_dir / label / "migrations" / "__init__.py"
-                effective = getattr(settings, "MIGRATION_MODULES", {}).get(
+                effective = self.snapshot.authored_migration_modules.get(
                     label, f"{self.output_module}.{label}.migrations"
                 )
                 if effective == f"{self.output_module}.{label}.migrations" and not migration_init.exists():
@@ -166,7 +166,7 @@ class BuildPlan:
             raise
 
     def render_artifacts(self, models_view: ModelsView | Apps, hooks: Iterable[ArtifactHook]) -> None:
-        external = set(getattr(settings, "COMPOSE_EXTERNAL_ARTIFACT_ROOTS", ()))
+        external = set(self.snapshot.settings["COMPOSE_EXTERNAL_ARTIFACT_ROOTS"])
         receipt = self._receipt(progress=True)
         reserved = {*receipt.MODEL_LABELS, *receipt.HISTORY_LABELS, *receipt.RETIRED_LABELS}
         for hook in hooks:
@@ -192,18 +192,18 @@ class BuildPlan:
                     raise ImproperlyConfigured(f"ArtifactHook must render bytes: {path}")
                 self.sources[path] = content
         tree = self._publish_sources()
-        serving._publish_build_artifacts(
+        process.publish_artifacts(
             self.close, self.output_dir, self._receipt(progress=True, hashes=tree.hashes())
         )
 
     def _publish_sources(self) -> GeneratedTree:
         """Validate before claiming paths, then record ownership before any write."""
         tree = GeneratedTree(self.output_dir, self.sources)
-        current = tree._validate()
+        current = tree.validate()
         if self.mode == "check":
             if any(
                 not (self.output_dir / path).is_file()
-                or (self.output_dir / path).read_bytes() != tree._bytes(value)
+                or (self.output_dir / path).read_bytes() != tree.as_bytes(value)
                 for path, value in self.sources.items()
             ):
                 raise ImproperlyConfigured("Generated artifacts are stale; run compose")
@@ -233,7 +233,7 @@ class BuildPlan:
             self.close()
 
     def close(self) -> None:
-        serving._clear_build(self.close)
+        process.end_build(self.close)
         if self._locked:
             self._locked = False
             self._lock.__exit__(None, None, None)
