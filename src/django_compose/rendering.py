@@ -150,7 +150,7 @@ def render_models(
                 f"            return {typed_cast}({queryset_name}[{model_parameter}], super().all())"
             )
             expression = f"{manager_class}(*{native(args)}, **{native(kwargs)})"
-            hints = manager._hints  # type: ignore[attr-defined]
+            hints = manager._hints
             if manager._db is not None or hints:
                 expression += f".db_manager(using={native(manager._db)}, hints={native(hints)})"
             manager_attributes.append(f"    {manager_name} = {expression}")

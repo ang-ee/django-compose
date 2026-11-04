@@ -20,7 +20,7 @@ Issues = "https://github.com/ang-ee/django-compose/issues"
 
 [project.optional-dependencies]
 typing = [
-    "angee-django-stubs[compatible-mypy]==6.1.2.post3",
+    "angee-django-stubs[compatible-mypy]>=6.1.2.post4",
     "angee-django-stubs-ext==6.1.2",
     "angee-mypy==2.1.0",
 ]
@@ -54,6 +54,10 @@ python_version = "3.14"
 strict = true
 files = ["src/django_compose"]
 ignore_missing_imports = true
+
+[tool.uv.sources]
+angee-django-stubs = { git = "https://github.com/ang-ee/django-stubs.git", rev = "10bf2bdd683fc11a9def78a8e985edb3a8717dc6" }
+angee-django-stubs-ext = { git = "https://github.com/ang-ee/django-stubs.git", rev = "10bf2bdd683fc11a9def78a8e985edb3a8717dc6", subdirectory = "ext" }
 
 
 [tool.uv]

@@ -405,9 +405,7 @@ class ModelComposition:
                     raise ImproperlyConfigured(
                         f"{model._meta.label}.{name}: manager construction bypasses Manager contributions"
                     )
-                # The six private-manager attribute ignores here and in rendering.py
-                # can go when the pinned django-stubs fork moves to 6.1.2.post4.
-                actual = manager._queryset_class  # type: ignore[attr-defined]
+                actual = manager._queryset_class
                 if not isinstance(actual, type) or not all(issubclass(actual, base) for base in querysets):
                     raise ImproperlyConfigured(
                         f"{model._meta.label}.{name}: manager construction bypasses QuerySet contributions"
@@ -533,8 +531,8 @@ class ModelComposition:
                         or type(source_manager) is type(donor_manager)
                         or not isinstance(source_manager, type(donor_manager))
                         or not issubclass(
-                            source_manager._queryset_class,  # type: ignore[attr-defined]
-                            donor_manager._queryset_class,  # type: ignore[attr-defined]
+                            source_manager._queryset_class,
+                            donor_manager._queryset_class,
                         )
                     ):
                         continue
@@ -624,7 +622,7 @@ class ModelComposition:
                 ),
                 (name,),
             )
-            original = manager._queryset_class  # type: ignore[attr-defined]
+            original = manager._queryset_class
             candidates = list(dict.fromkeys([*querysets, original]))
             for queryset in candidates:
                 if not _importable(queryset):
@@ -732,7 +730,7 @@ class ModelComposition:
                 rebuilt = {key: value for key, value in vars(reconstructed).items() if key not in ignored}
                 if state != rebuilt:
                     raise ValueError("state changed after construction")
-                for value in (args, kwargs, manager._db, manager._hints):  # type: ignore[attr-defined]
+                for value in (args, kwargs, manager._db, manager._hints):
                     MigrationWriter.serialize(value)
             except (TypeError, ValueError) as error:
                 raise ImproperlyConfigured(

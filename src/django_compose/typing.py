@@ -45,12 +45,9 @@ from mypy.types import Type as MypyType
 from mypy.typevars import fill_typevars, fill_typevars_with_any
 from mypy_django_plugin.django.context import DjangoContext
 from mypy_django_plugin.lib import fullnames, helpers
+from mypy_django_plugin.lib.helpers import reparametrize_field_type, reparametrize_related_field_type
 from mypy_django_plugin.main import NewSemanalDjangoPlugin
-from mypy_django_plugin.transformers.fields import (
-    get_field_descriptor_types,
-    reparametrize_field_type,
-    reparametrize_related_field_type,
-)
+from mypy_django_plugin.transformers.fields import get_field_descriptor_types
 from mypy_django_plugin.transformers.managers import create_new_manager_class_from_from_queryset_method
 from mypy_django_plugin.transformers.manytomany import M2MArguments, M2MThrough, M2MTo
 from mypy_django_plugin.transformers.models import ProcessManyToManyFields, process_model_class

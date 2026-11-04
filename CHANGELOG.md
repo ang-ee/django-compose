@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Require the post4 django-stubs typing fork and use its field helper exports;
+  generated manager internals now typecheck without private-attribute ignores.
 - Add donor `compose_managers` mappings that combine cooperative manager classes
   with the source-owned manager instance, including across concrete inheritance.
   Refuse donor manager methods that bypass contributed QuerySet methods.
