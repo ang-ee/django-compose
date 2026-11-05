@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import sysconfig
+from bisect import bisect_left
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from importlib import metadata
@@ -43,7 +45,8 @@ class SourceResolver:
     ) -> None:
         self.entries = tuple(sorted(entries, key=lambda entry: -len(entry.name)))
         self._distributions = distributions
-        self._files: dict[Path, set[str]] | None = None
+        self._files: dict[str, set[str]] | None = None
+        self._sorted_files: list[str] = []
         self._projects: list[tuple[Path, str]] = []
 
     def distribution_names(self, path: Path) -> tuple[str, ...]:
@@ -56,8 +59,8 @@ class SourceResolver:
                 if not name:
                     continue
                 for file in distribution.files or ():
-                    location = Path(str(distribution.locate_file(file))).resolve()
-                    self._files.setdefault(location, set()).add(name)
+                    owned = str(Path(str(distribution.locate_file(file))).resolve())
+                    self._files.setdefault(owned, set()).add(name)
                 direct = distribution.read_text("direct_url.json")
                 if direct:
                     try:
@@ -67,15 +70,18 @@ class SourceResolver:
                             self._projects.append((Path(unquote(url.path)).resolve(), name))
                     except ValueError, TypeError, AttributeError:
                         continue
+            self._sorted_files = sorted(self._files)
         location = path.resolve()
-        names = self._files.get(location, set()).copy()
+        names = self._files.get(str(location), set()).copy()
         if location.is_dir():
-            names.update(
-                name
-                for file, owners in self._files.items()
-                if file.is_relative_to(location)
-                for name in owners
-            )
+            # Resolved paths sort by prefix: every file below the directory
+            # forms one contiguous run after the directory's own key.
+            prefix = str(location).rstrip(os.sep) + os.sep
+            start = bisect_left(self._sorted_files, prefix)
+            for candidate in self._sorted_files[start:]:
+                if not candidate.startswith(prefix):
+                    break
+                names.update(self._files[candidate])
         names.update(name for root, name in self._projects if location.is_relative_to(root))
         return tuple(sorted(names))
 

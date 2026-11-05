@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Index installed distribution files once by sorted resolved path so directory
+  ownership lookups (`SourceResolver.distribution_names`, the migration import
+  audit) take a prefix slice instead of testing every installed file per call;
+  `check_migrations --imports` on a 170-app stack drops from six minutes to
+  seconds.
 - Separate pure, deterministic model compilation from receipt-owned publication
   while preserving build and check behavior.
 - Reject the removed command-context setting with migration guidance, allow an
