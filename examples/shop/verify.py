@@ -1,8 +1,7 @@
 """Check the same plain Django example from a checkout or installed distribution."""
 
-# Serving composition intentionally imports only after native setup.
+# Composed models and verified-output readers import only after native setup.
 # ruff: noqa: E402
-import asyncio
 import os
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "settings")
@@ -11,31 +10,13 @@ import django
 
 django.setup()
 
-from asgiref.testing import ApplicationCommunicator
 from catalog.schema import schema
-from catalog.transport import EVENTS
 from django.apps import apps
 from django.conf import settings
 from django.test import Client
 
-from django_compose.asgi import application
 from django_compose.components import installed_components
 from django_compose.serving import artifact_path, receipt_lease, verified_receipt
-
-
-async def transports():
-    http = ApplicationCommunicator(application, {"type": "http", "path": "/status/live", "root_path": ""})
-    assert (await http.receive_output())["status"] == 200
-    assert (await http.receive_output())["body"] == b"catalog ready"
-    await http.wait()
-    lifespan = ApplicationCommunicator(application, {"type": "lifespan"})
-    await lifespan.send_input({"type": "lifespan.startup"})
-    assert (await lifespan.receive_output())["type"] == "lifespan.startup.complete"
-    await lifespan.send_input({"type": "lifespan.shutdown"})
-    assert (await lifespan.receive_output())["type"] == "lifespan.shutdown.complete"
-    await lifespan.wait()
-    assert EVENTS == ["startup", "shutdown"]
-
 
 Item = apps.get_model("catalog", "Item")
 assert not Item._meta.abstract
@@ -61,5 +42,4 @@ with receipt_lease() as receipt:
     assert artifact_path(ready_paths[0]).read_bytes() == expected
     assert apps.get_app_config("catalog").schema == expected
 assert Client().get("/catalog/items/").status_code == 200
-asyncio.run(transports())
-print("Installed app closure, ready callbacks, URL/ASGI/lifespan and both schema phases agree.")
+print("Installed app closure, ready callbacks, native URL routing and both schema phases agree.")

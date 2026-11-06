@@ -439,9 +439,6 @@ assert Item.objects.get(pk=item.pk).rating == 5
 """
         run([str(python), "-c", cold], cwd=host, env=environment)
         run([str(python), "verify.py"], cwd=host, env=environment)
-        for arguments, expected in (([], "default"), (["--database", "reporting"], "reporting")):
-            result = run([str(python), "manage.py", "verify_context", *arguments], cwd=host, env=environment)
-            assert result.strip() == expected, result
         history = digest(host / "runtime/catalog/migrations")
         (host / "runtime/keep.txt").write_text("Unowned file\n")
         models = host / "runtime/catalog/models.py"

@@ -23,9 +23,7 @@ from django_compose.sources import SourceResolver
 COMPILER = "django-compose:2"
 DEFAULT_EXCLUDES = ("**/__pycache__/**", "**/migrations/**", "**/tests/**")
 
-NON_INPUT_SETTINGS = frozenset(
-    {"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_CLOSURE", "COMPOSE_COMMAND_CONTEXT"}
-)
+NON_INPUT_SETTINGS = frozenset({"COMPOSE_ROOTS", "COMPOSE_SNAPSHOT", "COMPOSE_CLOSURE"})
 STRUCTURAL_SETTINGS = frozenset(
     {
         "INSTALLED_APPS",
@@ -205,6 +203,11 @@ def snapshot(
         raise ImproperlyConfigured(
             "COMPOSE_TRANSITION_SOURCE is no longer supported; review pending schema and data work "
             "and author native project migrations before upgrading"
+        )
+    if "COMPOSE_COMMAND_CONTEXT" in values:
+        raise ImproperlyConfigured(
+            "COMPOSE_COMMAND_CONTEXT is no longer supported; wrap command execution through "
+            "execute(..., utility_class=...) with a native ManagementUtility subclass"
         )
     normalized = app_entries(entries)
     positions = {entry.name: index for index, entry in enumerate(normalized)}

@@ -861,3 +861,11 @@ def test_removed_transition_setting_fails_before_output_verification(project, va
     namespace["COMPOSE_TRANSITION_SOURCE"] = value
     with pytest.raises(ImproperlyConfigured, match="native project migrations"):
         conf.configure(namespace)
+
+
+@pytest.mark.parametrize("value", ((), ["project.contexts.first"], None))
+def test_removed_command_context_setting_fails_before_output_verification(project, value):
+    _, namespace = project
+    namespace["COMPOSE_COMMAND_CONTEXT"] = value
+    with pytest.raises(ImproperlyConfigured, match="utility_class"):
+        conf.configure(namespace)

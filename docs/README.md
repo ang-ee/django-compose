@@ -16,7 +16,7 @@ Django supplies the registry, ORM and migrations.
 | --- | --- |
 | Add fields or behavior from another app | [Model declarations](models.md) |
 | Choose apps and follow their dependencies | [App selection and package metadata](components.md) |
-| Contribute settings or URLs | [Project configuration](configuration.md#app-settings-contributions) |
+| Contribute settings | [Project configuration](configuration.md#app-settings-contributions) |
 | Generate additional files or model metadata | [Build integrations](extensions.md) |
 | Change models, disable apps or maintain history | [Migrations](migrations.md) |
 | Prepare a database and check readiness | [Provisioning](provisioning.md) |
