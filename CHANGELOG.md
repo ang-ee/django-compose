@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0.dev9
 
 - Remove the URL/ASGI serving and command-context seams; consumers own serving
   (prerelease API cutoff; see [proposal 0004](docs/proposals/0004-serving-boundary.md)).
