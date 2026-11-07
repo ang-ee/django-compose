@@ -136,3 +136,114 @@ def test_regular_package_ownership_does_not_claim_every_child_distribution(tmp_p
     monkeypatch.syspath_prepend(str(tmp_path))
     assert resolve_module("regularprobe").distributions == ("package-dist",)
     assert resolve_module("regularprobe.extension").distributions == ("extension-dist",)
+
+
+def test_directory_owners_are_the_owners_of_every_recorded_file_beneath_it(tmp_path):
+    site = tmp_path / "site"
+    for file in ("nestprobe/sub/deep/mod.py", "nestprobe/other/mod.py"):
+        (site / file).parent.mkdir(parents=True, exist_ok=True)
+        (site / file).write_text("")
+    (site / "nestprobe/sub/empty").mkdir()
+    deep = distribution(site, "deep-dist", ("nestprobe/sub/deep/mod.py",))
+    other = distribution(site, "other-dist", ("nestprobe/other/mod.py",))
+    resolver = SourceResolver(distributions=(deep, other))
+    assert resolver.distribution_names(site / "nestprobe/sub/deep/mod.py") == ("deep-dist",)
+    assert resolver.distribution_names(site / "nestprobe/sub/deep") == ("deep-dist",)
+    assert resolver.distribution_names(site / "nestprobe/sub") == ("deep-dist",)
+    assert resolver.distribution_names(site / "nestprobe/other") == ("other-dist",)
+    assert resolver.distribution_names(site / "nestprobe") == ("deep-dist", "other-dist")
+    assert resolver.distribution_names(site / "nestprobe/sub/empty") == ()
+
+
+def test_namespace_portion_is_owned_only_by_files_recorded_beneath_it(tmp_path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    for root, file in ((first, "portionprobe/one/mod.py"), (second, "portionprobe/two/mod.py")):
+        (root / file).parent.mkdir(parents=True)
+        (root / file).write_text("")
+    one = distribution(first, "portion-one", ("portionprobe/one/mod.py",))
+    two = distribution(second, "portion-two", ("portionprobe/two/mod.py",))
+    resolver = SourceResolver(distributions=(one, two))
+    assert resolver.distribution_names(first / "portionprobe") == ("portion-one",)
+    assert resolver.distribution_names(second / "portionprobe") == ("portion-two",)
+    assert resolver.distribution_names(tmp_path) == ("portion-one", "portion-two")
+
+
+def test_pep610_project_directory_owns_itself_and_descendants_not_its_parent(tmp_path):
+    project = tmp_path / "workspace/editable"
+    (project / "src/pkg").mkdir(parents=True)
+    native = distribution(tmp_path / "site", "editable-dist", ("_editable.pth",), project=project)
+    (tmp_path / "site/_editable.pth").write_text("")
+    resolver = SourceResolver(distributions=(native,))
+    assert resolver.distribution_names(project) == ("editable-dist",)
+    assert resolver.distribution_names(project / "src/pkg") == ("editable-dist",)
+    assert resolver.distribution_names(project.parent) == ()
+    assert resolver.distribution_names(tmp_path / "site") == ("editable-dist",)
+
+
+def test_recorded_file_identity_follows_symlinks_and_parent_entries_like_resolve(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    (store / "mod.py").write_text("")
+    package = tmp_path / "real-site/linkprobe"
+    package.mkdir(parents=True)
+    (package / "mod.py").symlink_to(store / "mod.py")  # a file-linking installer
+    (package / "plain.py").write_text("")
+    site = tmp_path / "site"
+    site.symlink_to(package.parent, target_is_directory=True)  # a linked installation root
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin/tool").write_text("")
+    files = ("linkprobe/mod.py", "linkprobe/plain.py", "../bin/tool")
+    resolver = SourceResolver(distributions=(distribution(site, "link-dist", files),))
+    for path in (
+        store / "mod.py",
+        store,
+        site / "linkprobe/mod.py",
+        site / "linkprobe/plain.py",
+        package,
+        tmp_path / "bin/tool",
+        tmp_path / "bin",
+    ):
+        assert resolver.distribution_names(path) == ("link-dist",), path
+    assert resolver.distribution_names(tmp_path / "real-site/bin") == ()
+
+
+class PointReads(dict):
+    """An ownership index that counts point reads and refuses to be scanned."""
+
+    def __init__(self, values):
+        super().__init__(values)
+        self.reads = 0
+
+    def get(self, key, default=None):
+        self.reads += 1
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        self.reads += 1
+        return super().__getitem__(key)
+
+    def scan(self, *args):
+        raise AssertionError("ownership lookup scanned its index")
+
+    __iter__ = keys = values = items = scan
+
+
+def test_ownership_lookup_reads_its_indexes_by_key_not_by_recorded_file_count(tmp_path):
+    files = [f"scaleprobe/part{index}/module{index}.py" for index in range(500)]
+    projects = [
+        distribution(tmp_path / f"editables/{index}", f"editable-{index}", project=tmp_path / f"e{index}")
+        for index in range(50)
+    ]
+    resolver = SourceResolver(distributions=(distribution(tmp_path, "scale-dist", files), *projects))
+    for file in files:
+        (tmp_path / file).parent.mkdir(parents=True)
+        (tmp_path / file).write_text("")
+    package = tmp_path / "scaleprobe"
+    assert resolver.distribution_names(package) == ("scale-dist",)  # builds the index once
+    resolver._records = PointReads(resolver._records)
+    resolver._projects = PointReads(resolver._projects)
+    for path in (package, package / "part7/module7.py"):
+        resolver._records.reads = resolver._projects.reads = 0
+        assert resolver.distribution_names(path) == ("scale-dist",)
+        assert resolver._records.reads == 1
+        assert resolver._projects.reads <= len(path.resolve().parts)

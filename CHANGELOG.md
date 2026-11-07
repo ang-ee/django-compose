@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Answer directory and editable-project distribution ownership by key from the one
+  audit index instead of scanning every recorded file per lookup.
+
 ## 0.1.0.dev9
 
 - Remove the URL/ASGI serving and command-context seams; consumers own serving
