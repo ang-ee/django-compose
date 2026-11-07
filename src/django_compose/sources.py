@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from importlib import metadata
 from importlib.machinery import BuiltinImporter, FrozenImporter, ModuleSpec, PathFinder
+from itertools import chain
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import unquote, urlsplit
@@ -42,41 +43,49 @@ class SourceResolver:
         distributions: Iterable[metadata.Distribution] | None = None,
     ) -> None:
         self.entries = tuple(sorted(entries, key=lambda entry: -len(entry.name)))
-        self._distributions = distributions
-        self._files: dict[Path, set[str]] | None = None
-        self._projects: list[tuple[Path, str]] = []
+        # A one-shot iterable is held whole so a failed index build fails again on retry.
+        self._distributions = None if distributions is None else tuple(distributions)
+        self._owners: dict[Path, set[str]] | None = None
+
+    def _index(self) -> tuple[dict[Path, set[str]], dict[Path, set[str]]]:
+        """Key each resolved RECORD file and its ancestors, and each PEP 610 project, to owners."""
+        owners: dict[Path, set[str]] = {}
+        projects: dict[Path, set[str]] = {}
+        distributions = self._distributions
+        for distribution in metadata.distributions() if distributions is None else distributions:
+            name = distribution.metadata["Name"]
+            if not name:
+                continue
+            for file in distribution.files or ():
+                location = Path(str(distribution.locate_file(file))).resolve()
+                for directory in chain((location,), location.parents):
+                    names = owners.setdefault(directory, set())
+                    if name in names:
+                        break  # Every further ancestor already records this distribution.
+                    names.add(name)
+            direct = distribution.read_text("direct_url.json")
+            if direct:
+                try:
+                    direct_url = json.loads(direct)
+                    url = urlsplit(direct_url.get("url", ""))
+                    if "dir_info" in direct_url and url.scheme == "file" and url.netloc in ("", "localhost"):
+                        projects.setdefault(Path(unquote(url.path)).resolve(), set()).add(name)
+                except ValueError, TypeError, AttributeError:
+                    continue
+        return owners, projects
 
     def distribution_names(self, path: Path) -> tuple[str, ...]:
-        """Match RECORD files or a PEP 610 local project directory, never package names."""
-        if self._files is None:
-            self._files = {}
-            distributions = self._distributions
-            for distribution in metadata.distributions() if distributions is None else distributions:
-                name = distribution.metadata["Name"]
-                if not name:
-                    continue
-                for file in distribution.files or ():
-                    location = Path(str(distribution.locate_file(file))).resolve()
-                    self._files.setdefault(location, set()).add(name)
-                direct = distribution.read_text("direct_url.json")
-                if direct:
-                    try:
-                        record = json.loads(direct)
-                        url = urlsplit(record.get("url", ""))
-                        if "dir_info" in record and url.scheme == "file" and url.netloc in ("", "localhost"):
-                            self._projects.append((Path(unquote(url.path)).resolve(), name))
-                    except ValueError, TypeError, AttributeError:
-                        continue
+        """Match RECORD files or a PEP 610 local project directory, never package names.
+
+        A path is owned by every distribution recording a file at or beneath it. Lookups
+        read the once-built index by key, so their cost never grows with recorded files.
+        """
+        if self._owners is None:
+            self._owners, self._projects = self._index()
         location = path.resolve()
-        names = self._files.get(location, set()).copy()
-        if location.is_dir():
-            names.update(
-                name
-                for file, owners in self._files.items()
-                if file.is_relative_to(location)
-                for name in owners
-            )
-        names.update(name for root, name in self._projects if location.is_relative_to(root))
+        names = set(self._owners.get(location, ()))
+        for directory in chain((location,), location.parents):
+            names.update(self._projects.get(directory, ()))
         return tuple(sorted(names))
 
     @staticmethod
