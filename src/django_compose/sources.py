@@ -43,13 +43,13 @@ class SourceResolver:
         distributions: Iterable[metadata.Distribution] | None = None,
     ) -> None:
         self.entries = tuple(sorted(entries, key=lambda entry: -len(entry.name)))
-        self._distributions = distributions
-        self._records: dict[Path, set[str]] | None = None
-        self._projects: dict[Path, set[str]] = {}
+        # A one-shot iterable is held whole so a failed index build fails again on retry.
+        self._distributions = None if distributions is None else tuple(distributions)
+        self._owners: dict[Path, set[str]] | None = None
 
     def _index(self) -> tuple[dict[Path, set[str]], dict[Path, set[str]]]:
         """Key each resolved RECORD file and its ancestors, and each PEP 610 project, to owners."""
-        records: dict[Path, set[str]] = {}
+        owners: dict[Path, set[str]] = {}
         projects: dict[Path, set[str]] = {}
         distributions = self._distributions
         for distribution in metadata.distributions() if distributions is None else distributions:
@@ -59,31 +59,31 @@ class SourceResolver:
             for file in distribution.files or ():
                 location = Path(str(distribution.locate_file(file))).resolve()
                 for directory in chain((location,), location.parents):
-                    owners = records.setdefault(directory, set())
-                    if name in owners:
+                    names = owners.setdefault(directory, set())
+                    if name in names:
                         break  # Every further ancestor already records this distribution.
-                    owners.add(name)
+                    names.add(name)
             direct = distribution.read_text("direct_url.json")
             if direct:
                 try:
-                    record = json.loads(direct)
-                    url = urlsplit(record.get("url", ""))
-                    if "dir_info" in record and url.scheme == "file" and url.netloc in ("", "localhost"):
+                    direct_url = json.loads(direct)
+                    url = urlsplit(direct_url.get("url", ""))
+                    if "dir_info" in direct_url and url.scheme == "file" and url.netloc in ("", "localhost"):
                         projects.setdefault(Path(unquote(url.path)).resolve(), set()).add(name)
                 except ValueError, TypeError, AttributeError:
                     continue
-        return records, projects
+        return owners, projects
 
     def distribution_names(self, path: Path) -> tuple[str, ...]:
         """Match RECORD files or a PEP 610 local project directory, never package names.
 
-        A directory is owned by every distribution recording a file beneath it. Lookups
+        A path is owned by every distribution recording a file at or beneath it. Lookups
         read the once-built index by key, so their cost never grows with recorded files.
         """
-        if self._records is None:
-            self._records, self._projects = self._index()
+        if self._owners is None:
+            self._owners, self._projects = self._index()
         location = path.resolve()
-        names = set(self._records.get(location, ()))
+        names = set(self._owners.get(location, ()))
         for directory in chain((location,), location.parents):
             names.update(self._projects.get(directory, ()))
         return tuple(sorted(names))

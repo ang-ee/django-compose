@@ -4,6 +4,8 @@
 
 - Answer directory and editable-project distribution ownership by key from the one
   audit index instead of scanning every recorded file per lookup.
+- Attribute zip-imported namespace portions to the distributions recording files
+  inside them, so removal audits retain those providers.
 
 ## 0.1.0.dev9
 

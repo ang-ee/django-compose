@@ -1,7 +1,9 @@
 """One import-free source and exact file ownership seam for every caller."""
 
+import gc
 import json
 import sys
+import zipfile
 from importlib import metadata
 from pathlib import Path
 
@@ -207,43 +209,72 @@ def test_recorded_file_identity_follows_symlinks_and_parent_entries_like_resolve
     assert resolver.distribution_names(tmp_path / "real-site/bin") == ()
 
 
-class PointReads(dict):
-    """An ownership index that counts point reads and refuses to be scanned."""
+def lookup_calls(resolver, path):
+    """Count the Python and C calls one ownership lookup makes after its index exists."""
+    calls = 0
 
-    def __init__(self, values):
-        super().__init__(values)
-        self.reads = 0
+    def profile(frame, event, arg):
+        nonlocal calls
+        calls += event in ("call", "c_call")
 
-    def get(self, key, default=None):
-        self.reads += 1
-        return super().get(key, default)
-
-    def __getitem__(self, key):
-        self.reads += 1
-        return super().__getitem__(key)
-
-    def scan(self, *args):
-        raise AssertionError("ownership lookup scanned its index")
-
-    __iter__ = keys = values = items = scan
+    gc.collect()
+    sys.setprofile(profile)
+    try:
+        resolver.distribution_names(path)
+    finally:
+        sys.setprofile(None)
+    return calls
 
 
-def test_ownership_lookup_reads_its_indexes_by_key_not_by_recorded_file_count(tmp_path):
-    files = [f"scaleprobe/part{index}/module{index}.py" for index in range(500)]
-    projects = [
-        distribution(tmp_path / f"editables/{index}", f"editable-{index}", project=tmp_path / f"e{index}")
-        for index in range(50)
-    ]
-    resolver = SourceResolver(distributions=(distribution(tmp_path, "scale-dist", files), *projects))
-    for file in files:
-        (tmp_path / file).parent.mkdir(parents=True)
-        (tmp_path / file).write_text("")
-    package = tmp_path / "scaleprobe"
-    assert resolver.distribution_names(package) == ("scale-dist",)  # builds the index once
-    resolver._records = PointReads(resolver._records)
-    resolver._projects = PointReads(resolver._projects)
-    for path in (package, package / "part7/module7.py"):
-        resolver._records.reads = resolver._projects.reads = 0
-        assert resolver.distribution_names(path) == ("scale-dist",)
-        assert resolver._records.reads == 1
-        assert resolver._projects.reads <= len(path.resolve().parts)
+def test_ownership_lookup_work_does_not_grow_with_recorded_files_or_projects(tmp_path):
+    work = []
+    for count in (50, 500):
+        root = tmp_path / str(count)
+        files = [f"scaleprobe/part{index}/module{index}.py" for index in range(count)]
+        for file in files:
+            (root / file).parent.mkdir(parents=True)
+            (root / file).write_text("")
+        editables = [
+            distribution(root / f"editables/{index}", f"editable-{index}", project=root / f"e{index}")
+            for index in range(count // 10)
+        ]
+        resolver = SourceResolver(distributions=(distribution(root, "scale-dist", files), *editables))
+        package = root / "scaleprobe"
+        assert resolver.distribution_names(package) == ("scale-dist",)  # builds the index once
+        work.append((lookup_calls(resolver, package), lookup_calls(resolver, package / "part7/module7.py")))
+    assert work[0] == work[1]
+
+
+def test_ownership_index_is_stored_only_when_complete(tmp_path):
+    (tmp_path / "first.py").write_text("")
+    (tmp_path / "later.py").write_text("")
+    corrupt = tmp_path / "corrupt-dist.dist-info"
+    corrupt.mkdir()
+    (corrupt / "METADATA").write_bytes(b"Metadata-Version: 2.1\nName: \xff\n")
+    distributions = iter(
+        (
+            distribution(tmp_path, "first-dist", ("first.py",)),
+            metadata.PathDistribution(corrupt),
+            distribution(tmp_path, "later-dist", ("later.py",)),
+        )
+    )
+    resolver = SourceResolver(distributions=distributions)
+    for _ in range(2):
+        with pytest.raises(UnicodeDecodeError):
+            resolver.distribution_names(tmp_path / "later.py")
+
+
+def test_zip_imported_namespace_portion_is_owned_by_its_recorded_files(tmp_path, monkeypatch):
+    archive = tmp_path / "installed.zip"
+    with zipfile.ZipFile(archive, "w") as contents:
+        contents.writestr("zipnsprobe/mod.py", "raise AssertionError('must not execute')")
+        contents.writestr("zipdist-1.dist-info/METADATA", "Name: zipdist\nVersion: 1\n")
+        contents.writestr("zipdist-1.dist-info/RECORD", "zipnsprobe/mod.py,,\n")
+    monkeypatch.syspath_prepend(str(archive))
+    resolver = SourceResolver(distributions=tuple(metadata.distributions(path=[str(archive)])))
+    assert resolver.distribution_names(archive / "zipnsprobe") == ("zipdist",)
+    assert resolver.distribution_names(archive / "zipnsprobe/mod.py") == ("zipdist",)
+    namespace = resolver.resolve("zipnsprobe")
+    assert namespace.search_locations == (archive / "zipnsprobe",)
+    assert (namespace.kind, namespace.distributions) == ("distribution", ("zipdist",))
+    assert "zipnsprobe" not in sys.modules
