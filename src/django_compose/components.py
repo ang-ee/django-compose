@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import os
@@ -218,14 +219,46 @@ def index_components(distributions: Iterable[metadata.Distribution], *, group: s
 
 
 def installed_components(group: str) -> InstalledComponents:
-    """Index installed metadata using native same-name installation precedence."""
+    """Index installed metadata using native same-name installation precedence.
 
+    The index is reused for the same group and import path until
+    importlib.invalidate_caches() runs, which a process that installs or writes
+    distribution metadata at runtime calls before discovering it, as for imports.
+    Code that replaces importlib.metadata functions must call it too.
+    """
+    return _installed_components(group, tuple(sys.path))
+
+
+@functools.lru_cache(maxsize=8)
+def _installed_components(group: str, path: tuple[str, ...]) -> InstalledComponents:
     def distributions() -> Iterator[metadata.Distribution]:
         names = {canonicalize_name(dist.metadata["Name"]) for dist in metadata.distributions()}
         for name in sorted(names):
             yield metadata.distribution(name)
 
     return index_components(distributions(), group=group)
+
+
+class _InstalledComponentsFinder:
+    """Find nothing; let importlib.invalidate_caches() clear the installed index."""
+
+    @staticmethod
+    def find_spec(*args: object) -> None:
+        return None
+
+    @staticmethod
+    def invalidate_caches() -> None:
+        _installed_components.cache_clear()
+
+
+# A reload re-runs this module in the same namespace, where a registered finder
+# already clears the new cache; register once per process.
+if not any(
+    getattr(finder, "__module__", None) == __name__
+    and getattr(finder, "__qualname__", None) == _InstalledComponentsFinder.__qualname__
+    for finder in sys.meta_path
+):
+    sys.meta_path.append(_InstalledComponentsFinder)
 
 
 def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:

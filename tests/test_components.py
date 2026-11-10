@@ -509,6 +509,32 @@ def test_active_requirements_are_native_platform_filtered_and_extra_empty(instal
     assert str(requirements[1].specifier) == ">=1"
 
 
+def test_installed_index_is_reused_until_import_caches_or_the_path_change(installed, monkeypatch, tmp_path):
+    installed.distribution("first-provider", app="first_app")
+    index = installed_components(GROUP)
+    installed.distribution("second-provider", app="second_app")
+    assert installed_components(GROUP) is index
+    importlib.invalidate_caches()
+    assert set(installed_components(GROUP).providers) == {"first_app", "second_app"}
+    installed.distribution("third-provider", app="third_app")
+    monkeypatch.setattr(sys, "path", [*sys.path, str(tmp_path / "elsewhere")])
+    assert set(installed_components(GROUP).providers) == {"first_app", "second_app", "third_app"}
+
+
+def test_reloaded_components_keep_one_hook_that_clears_the_new_index():
+    script = (
+        "import importlib, sys\n"
+        "from django_compose import components\n"
+        "importlib.reload(components)\n"
+        "hooks = [f for f in sys.meta_path if getattr(f, '__module__', None) == components.__name__]\n"
+        "components.installed_components('testsite.none')\n"
+        "importlib.invalidate_caches()\n"
+        "print(len(hooks), components._installed_components.cache_info().currsize)\n"
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True)
+    assert result.stdout.split() == ["1", "0"]
+
+
 @pytest.mark.parametrize("kind", ("provider", "entries"))
 def test_installed_index_rejects_metadata_collisions_without_activation(installed, kind):
     installed.distribution(
