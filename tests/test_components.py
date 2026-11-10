@@ -509,6 +509,18 @@ def test_active_requirements_are_native_platform_filtered_and_extra_empty(instal
     assert str(requirements[1].specifier) == ">=1"
 
 
+def test_installed_index_is_reused_until_import_caches_or_the_path_change(installed, monkeypatch, tmp_path):
+    installed.distribution("first-provider", app="first_app")
+    index = installed_components(GROUP)
+    installed.distribution("second-provider", app="second_app")
+    assert installed_components(GROUP) is index
+    importlib.invalidate_caches()
+    assert set(installed_components(GROUP).providers) == {"first_app", "second_app"}
+    installed.distribution("third-provider", app="third_app")
+    monkeypatch.setattr(sys, "path", [*sys.path, str(tmp_path / "elsewhere")])
+    assert set(installed_components(GROUP).providers) == {"first_app", "second_app", "third_app"}
+
+
 @pytest.mark.parametrize("kind", ("provider", "entries"))
 def test_installed_index_rejects_metadata_collisions_without_activation(installed, kind):
     installed.distribution(

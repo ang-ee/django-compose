@@ -166,6 +166,10 @@ nor checks importability, actual AppConfig identity or installed dependencies.
 
 `components.installed_components(group)` selects each canonical installed name's
 native `metadata.distribution()` winner, then delegates to that same index owner.
+The index is reused for the same group and `sys.path` until
+`importlib.invalidate_caches()` runs. A process that installs or writes
+distribution metadata at runtime invalidates the import caches before indexing
+again, as it must before importing modules written at runtime.
 `active_requirements(iterable_of_strings)` and the index method
 `active_requirements(provider)` return native Requirement values active with
 `extra=""`. Metadata inspection does not activate apps.

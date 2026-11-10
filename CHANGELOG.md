@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0.dev11
+
+- Reuse the `installed_components(group)` index for the same group and `sys.path`
+  until `importlib.invalidate_caches()` runs, instead of re-reading every installed
+  distribution's metadata on each call: with 280 distributions a call fell from
+  about 40 ms to a lookup. A process that installs or writes distribution metadata
+  at runtime invalidates the import caches before indexing again, as before
+  importing new modules; `monkeypatch.syspath_prepend` already does.
+
 ## 0.1.0.dev10
 
 - Answer directory and editable-project distribution ownership by key from the one
