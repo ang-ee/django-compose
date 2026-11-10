@@ -7,7 +7,11 @@
   distribution's metadata on each call: with 280 distributions a call fell from
   about 40 ms to a lookup. A process that installs or writes distribution metadata
   at runtime invalidates the import caches before indexing again, as before
-  importing new modules; `monkeypatch.syspath_prepend` already does.
+  importing new modules. Code that replaces `importlib.metadata` functions, such
+  as a test that monkeypatches `metadata.distributions`, must call
+  `importlib.invalidate_caches()` too; `monkeypatch.syspath_prepend` already does.
+- Register the cache's invalidation hook on `sys.meta_path` once per process,
+  including across `importlib.reload` of `django_compose.components`.
 
 ## 0.1.0.dev10
 

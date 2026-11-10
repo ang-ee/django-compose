@@ -521,6 +521,20 @@ def test_installed_index_is_reused_until_import_caches_or_the_path_change(instal
     assert set(installed_components(GROUP).providers) == {"first_app", "second_app", "third_app"}
 
 
+def test_reloaded_components_keep_one_hook_that_clears_the_new_index():
+    script = (
+        "import importlib, sys\n"
+        "from django_compose import components\n"
+        "importlib.reload(components)\n"
+        "hooks = [f for f in sys.meta_path if getattr(f, '__module__', None) == components.__name__]\n"
+        "components.installed_components('testsite.none')\n"
+        "importlib.invalidate_caches()\n"
+        "print(len(hooks), components._installed_components.cache_info().currsize)\n"
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True)
+    assert result.stdout.split() == ["1", "0"]
+
+
 @pytest.mark.parametrize("kind", ("provider", "entries"))
 def test_installed_index_rejects_metadata_collisions_without_activation(installed, kind):
     installed.distribution(

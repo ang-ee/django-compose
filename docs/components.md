@@ -147,9 +147,11 @@ an explicitly empty or invalid group fails. `configure` uses this same helper.
 distribution and entry-point objects without importing apps or loading entry
 points. The index is reused for the same group and `sys.path`; after installing
 or writing distribution metadata at runtime, call `importlib.invalidate_caches()`
-before indexing again, as before importing new modules. To inspect metadata
-prepared separately by a package build backend, pass native `Distribution`
-objects to the same indexing owner:
+before indexing again, as before importing new modules. Code that replaces
+`importlib.metadata` functions, such as a test that monkeypatches
+`metadata.distributions`, must call it too; pytest's `monkeypatch.syspath_prepend`
+already does. To inspect metadata prepared separately by a package build
+backend, pass native `Distribution` objects to the same indexing owner:
 
 ```python
 from importlib.metadata import Distribution

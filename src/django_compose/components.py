@@ -224,6 +224,7 @@ def installed_components(group: str) -> InstalledComponents:
     The index is reused for the same group and import path until
     importlib.invalidate_caches() runs, which a process that installs or writes
     distribution metadata at runtime calls before discovering it, as for imports.
+    Code that replaces importlib.metadata functions must call it too.
     """
     return _installed_components(group, tuple(sys.path))
 
@@ -250,7 +251,14 @@ class _InstalledComponentsFinder:
         _installed_components.cache_clear()
 
 
-sys.meta_path.append(_InstalledComponentsFinder)
+# A reload re-runs this module in the same namespace, where a registered finder
+# already clears the new cache; register once per process.
+if not any(
+    getattr(finder, "__module__", None) == __name__
+    and getattr(finder, "__qualname__", None) == _InstalledComponentsFinder.__qualname__
+    for finder in sys.meta_path
+):
+    sys.meta_path.append(_InstalledComponentsFinder)
 
 
 def enabled_apps(roots: Iterable[str], *, group: str | None = None) -> Closure:
