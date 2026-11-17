@@ -371,6 +371,21 @@ def test_native_c3_source_precedes_later_donor_ancestor(tmp_path):
         assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("source_first", [False, True])
+def test_generated_model_linearizes_completely_rebased_ancestry(tmp_path, source_first):
+    from typing_fixtures import CHAIN_CONSUMER, CHAIN_DONOR, CHAIN_MODELS, CHAIN_SOURCE, CHAIN_TARGET
+
+    config, env = host(tmp_path)
+    middle = (CHAIN_SOURCE, CHAIN_TARGET) if source_first else (CHAIN_TARGET, CHAIN_SOURCE)
+    (tmp_path / "modelapp/models.py").write_text(CHAIN_MODELS.format(middle="".join(middle)))
+    (tmp_path / "modelapp/donors.py").write_text(CHAIN_DONOR)
+    source = tmp_path / "consumer.py"
+    source.write_text(CHAIN_CONSUMER)
+    for _ in range(2):
+        result = check(config, env, source)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_union_receivers_keep_each_native_member_owner_and_binding(tmp_path):
     config, env = host(tmp_path)
     model = tmp_path / "modelapp/models.py"

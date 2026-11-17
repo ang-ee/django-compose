@@ -349,3 +349,68 @@ def invalid_relations(row: RuntimeRow, anchor: Anchor) -> None:
     anchor.m2m_rows.add(anchor)
     anchor.member_rows.add(anchor)
 """
+
+# A parent chain whose root is declared last: the middle target becomes
+# resolvable, and is rebased on the root, one semantic-analysis iteration late.
+CHAIN_MODELS = """
+from django.db import models
+from django_compose.models import Composable
+class Archive(Composable):
+    def archive(self) -> bool:
+        return True
+    class Meta:
+        abstract = True
+{middle}
+class Party(Archive, Composable, concrete=True):
+    name = models.CharField(max_length=30)
+    class Meta:
+        abstract = True
+from .donors import CompanyBilling as CompanyBilling
+"""
+
+CHAIN_TARGET = """
+class Organization(Composable, inherits="modelapp.Party"):
+    legal_name = models.CharField(max_length=30)
+    class Meta:
+        abstract = True
+"""
+
+CHAIN_SOURCE = """
+class Company(Archive, Composable, inherits="modelapp.Organization"):
+    code = models.CharField(max_length=30)
+    class Meta:
+        abstract = True
+"""
+
+CHAIN_DONOR = """
+from django.db import models
+from django_compose.models import Composable
+class CompanyBilling(Composable, extends="modelapp.Company"):
+    vat = models.CharField(max_length=30)
+    def billed(self) -> int:
+        return 1
+    class Meta:
+        abstract = True
+"""
+
+CHAIN_CONSUMER = """
+from typing import assert_type
+from django.db import models
+from modelapp.models import Company, CompanyBilling, Organization, Party
+from typed_runtime.modelapp.models import Company as ConcreteCompany
+
+def check(concrete: ConcreteCompany, company: Company, billing: CompanyBilling) -> None:
+    model: models.Model = concrete
+    source: Company = concrete
+    donor: CompanyBilling = concrete
+    parent: Organization = concrete
+    root: Party = company
+    donor_root: Party = billing
+    assert_type(concrete.code, str)
+    assert_type(concrete.vat, str)
+    assert_type(concrete.billed(), int)
+    assert_type(concrete.legal_name, str)
+    assert_type(concrete.name, str)
+    assert_type(concrete.archive(), bool)
+    assert_type(ConcreteCompany.objects.get(), ConcreteCompany)
+"""
