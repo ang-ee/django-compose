@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0.dev12
+
+- Rebase each composition target on its own target first in `django_compose.typing`,
+  so no source, donor or `demands` mixin is linearized over a partial ancestry.
+  Depending on declaration and import order, a source or donor analyzed before its
+  parent was rebased was not a subtype of that parent's ancestors, and the generated
+  concrete model kept mypy's placeholder MRO: it was neither a `Model` nor a subtype
+  of its source, and consumers saw only the resulting assignment and attribute errors.
+
 ## 0.1.0.dev11
 
 - Reuse the `installed_components(group)` index for the same group and `sys.path`

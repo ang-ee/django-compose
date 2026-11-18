@@ -356,23 +356,13 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
     def _model_contract(self, ctx: ClassDefContext, *, native: Callable[[ClassDefContext], None]) -> None:
         parent_name = self.django_context.parents.get(ctx.cls.fullname)
         if parent_name:
-            parent = self.lookup_fully_qualified(parent_name)
-            if parent is None or not isinstance(parent.node, TypeInfo) or not parent.node.mro:
+            unresolved = self._rebase(ctx.cls.info, complete=not ctx.api.final_iteration)
+            if unresolved:
                 if ctx.api.final_iteration:
-                    ctx.api.fail(f"Unresolved composition target {parent_name}", ctx.cls)
+                    ctx.api.fail(f"Unresolved composition target {unresolved}", ctx.cls)
                 else:
                     ctx.api.defer()
                 return
-            if not any(base.type.has_base(parent_name) for base in ctx.cls.info.bases):
-                ancestors = {base.fullname for base in parent.node.mro}
-                instance = fill_typevars(parent.node)
-                assert isinstance(instance, Instance)
-                ctx.cls.info.bases = [
-                    *[base for base in ctx.cls.info.bases if base.type.fullname not in ancestors],
-                    instance,
-                ]
-            ctx.cls.info.mro = []
-            calculate_mro(ctx.cls.info)
             ctx.api.add_plugin_dependency(make_trigger(parent_name))
         native(ctx)
         runtime = self.django_context.get_model_class_by_fullname(ctx.cls.fullname)
@@ -401,6 +391,34 @@ class CompositionPlugin(NewSemanalDjangoPlugin):
             self._schedule_projection(ctx, target.node)
         if ctx.cls.fullname in self.django_context.members:
             self._schedule_projection(ctx, ctx.cls.info)
+
+    def _rebase(self, info: TypeInfo, *, complete: bool) -> str | None:
+        """Rebase a source, donor or demanding class on its composition target.
+
+        The target is rebased on its own target first. Mypy linearizes each class
+        once and reuses that MRO for every subclass, including the generated
+        concrete class, so no class may be rebased on an ancestry that a later
+        rebase would still change. Return the unresolved target name instead:
+        any in the chain when ``complete``, otherwise only the direct target.
+        """
+
+        parent_name = self.django_context.parents.get(info.fullname)
+        if parent_name is None:
+            return None
+        parent = self.lookup_fully_qualified(parent_name)
+        if parent is None or not isinstance(parent.node, TypeInfo) or not parent.node.mro:
+            return parent_name
+        unresolved = self._rebase(parent.node, complete=complete)
+        if unresolved and complete:
+            return unresolved
+        if not any(base.type.has_base(parent_name) for base in info.bases):
+            ancestors = {base.fullname for base in parent.node.mro}
+            instance = fill_typevars(parent.node)
+            assert isinstance(instance, Instance)
+            info.bases = [*[base for base in info.bases if base.type.fullname not in ancestors], instance]
+        info.mro = []
+        calculate_mro(info)
+        return None
 
     def project_model(self, ctx: ClassDefContext, model: type[models.Model]) -> TypeInfo | None:
         """Project a supplied native model lacking a source declaration in memory.
