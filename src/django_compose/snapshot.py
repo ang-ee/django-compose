@@ -133,7 +133,7 @@ class Snapshot:
 
     def digest(self) -> str:
         payload = {
-            "entries": [(e.name, e.label, e.config, e.entry) for e in self.entries],
+            "entries": [(e.name, e.label, e.config, e.entry, e.path) for e in self.entries],
             "dependencies": self.dependencies,
             "files": self.files,
             "integrations": self.integration_paths,

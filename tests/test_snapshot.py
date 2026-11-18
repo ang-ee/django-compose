@@ -47,6 +47,22 @@ def test_snapshot_fingerprints_files_and_settings(tmp_path):
     assert make().digest() != original
 
 
+def test_a_component_that_moves_changes_the_digest_with_identical_bytes(tmp_path):
+    """An editable install replacing a site-packages copy recomposes: emitted roots name the path."""
+    copies = []
+    for where in ("site-packages", "checkout"):
+        app = tmp_path / where / "app"
+        app.mkdir(parents=True)
+        (app / "models.py").write_text("source")
+        copies.append(app)
+
+    def make(app):
+        return snapshot((Entry("app", "app", "django.apps.AppConfig", str(app), "app"),), namespace={})
+
+    assert make(copies[0]).digest() == make(copies[0]).digest()
+    assert make(copies[0]).digest() != make(copies[1]).digest()
+
+
 def test_receipt_verify_checks_content_and_interruption(tmp_path, monkeypatch):
     def unexpected():
         raise AssertionError("receipt verification must not query distribution metadata")
