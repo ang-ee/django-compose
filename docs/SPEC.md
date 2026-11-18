@@ -31,6 +31,9 @@ defines supported versions and platforms.
   Each component currently provides one Django app. Distribution names, Python
   import paths and native app identities remain distinct.
 - A **snapshot** is the immutable set of composition inputs and their digest.
+  The digest covers each selected component's resolved `path`, so a component
+  that moves (an editable install replacing a site-packages copy, or a moved
+  checkout) changes it even when its bytes are identical.
   A **build record**, represented by `serving.Receipt`, records generated-file
   hashes and retained migration labels in the generated package.
 - A **history-only app** retains a Django app label for migrations after the
