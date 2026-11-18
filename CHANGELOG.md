@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0.dev13
+
+- Include each selected component's resolved `path` in the snapshot digest. A
+  component that moved with identical bytes, such as an editable install replacing
+  a site-packages copy or a moved checkout, left the digest unchanged, so
+  `compose --if-stale` reported the composition current while the emitted roots
+  still named the old location, which might no longer exist.
+
 ## 0.1.0.dev12
 
 - Rebase each composition target on its own target first in `django_compose.typing`,
