@@ -509,6 +509,69 @@ with patch("django_compose.migrations.resolve_integrations", return_value=(Retir
     )
 
 
+@pytest.mark.parametrize("removal", ["column", "table", "declared"])
+def test_a_base_manager_absent_from_history_does_not_stop_the_proof(host, removal):
+    root, run = host
+    # Meta.base_manager_name survives in history; a manager without use_in_migrations does not.
+    migration(
+        root,
+        "0002_options",
+        ['migrations.AlterModelOptions(name="record", options={"base_manager_name": "everything"})'],
+    )
+    operation = {
+        "column": REMOVE_OLD,
+        "table": DELETE_RECORD,
+        "declared": 'IntendedRemoveField(model_name="record", name="old")',
+    }[removal]
+    migration(root, "0003_drop", [operation], after="0002_options")
+    run(
+        PRELUDE
+        + f"""
+seed(old="kept")
+if {removal!r} == "declared":
+    migrate()
+    assert columns() == ["id"]
+else:
+    expect(CommandError, "alpha_record.{"*" if removal == "table" else "old"} holds data in 1 rows", migrate)
+    assert columns() == ["id", "old"]
+"""
+    )
+
+
+@pytest.mark.parametrize("removal", ["column", "table"])
+def test_a_row_filtering_base_manager_hides_no_rows_from_the_proof(host, removal):
+    root, run = host
+    write(
+        root,
+        "alpha/managers.py",
+        """
+from django.db import models
+class Live(models.Manager):
+    use_in_migrations = True
+    def get_queryset(self):
+        return super().get_queryset().exclude(old="archived")
+""",
+    )
+    migration(
+        root,
+        "0002_manager",
+        [
+            'migrations.AlterModelManagers(name="record", managers=[("live", alpha.managers.Live())])',
+            'migrations.AlterModelOptions(name="record", options={"base_manager_name": "live"})',
+        ],
+        preamble="import alpha.managers",
+    )
+    migration(root, "0003_drop", [REMOVE_OLD if removal == "column" else DELETE_RECORD], after="0002_manager")
+    run(
+        PRELUDE
+        + f"""
+seed(old="archived")
+expect(CommandError, "alpha_record.{"old" if removal == "column" else "*"} holds data in 1 rows", migrate)
+assert columns() == ["id", "old"]
+"""
+    )
+
+
 def test_declared_drops_round_trip_through_the_native_writer(host):
     _, run = host
     run("""

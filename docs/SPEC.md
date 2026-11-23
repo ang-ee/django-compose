@@ -496,9 +496,9 @@ The drop guard refuses a native removal that would destroy stored data. A remova
 a `RemoveField` or `DeleteModel`, also one among the database operations of a
 `SeparateDatabaseAndState`. It drops a concrete field's column, a field's implicit
 many-to-many table, or a model's table; explicit through models and generated columns
-own no storage of their own. Storage is empty when no row holds data in it: a nullable
-column is empty at NULL and a non-null column at its native default, while a database
-default cannot prove emptiness. A deleted table may still hold rows that
+own no storage of their own. Storage is empty when no row holds data in it, read
+without the model's managers: a nullable column is empty at NULL and a non-null
+column at its native default, while a database default cannot prove emptiness. A deleted table may still hold rows that
 `MigrationPolicy.retired_primary_keys(model, alias)` explicitly retires. Eligibility
 follows native model options and routers. Quoted identifiers resolve through backend
 semantics; uncertain storage identity and an unavailable eligible database cannot

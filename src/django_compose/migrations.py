@@ -32,6 +32,7 @@ from django.db.migrations.operations.special import RunPython, RunSQL, SeparateD
 from django.db.migrations.recorder import MigrationRecorder
 from django.db.migrations.state import ProjectState
 from django.db.migrations.writer import MigrationWriter
+from django.db.models import QuerySet
 from django.db.models.expressions import DatabaseDefault
 from django.utils.module_loading import module_dir
 
@@ -359,12 +360,15 @@ def _dropped(model: Any, field: str | None, policies: tuple[MigrationPolicy, ...
     A database default cannot prove emptiness. Explicit through models and
     generated columns own no independently dropped storage. ``policies`` may
     explicitly retire rows of a deleted table; other rows remain protected.
+    Rows are read through a plain ``QuerySet``, not the model's base manager: a
+    historical model keeps ``Meta.base_manager_name`` but only the managers marked
+    ``use_in_migrations``, and a manager may filter rows out.
     """
     if field is None:
 
         def remaining_rows(alias: str) -> Any:
             retired = {pk for policy in policies for pk in policy.retired_primary_keys(model, alias)}
-            return model._base_manager.exclude(pk__in=retired)
+            return QuerySet(model).exclude(pk__in=retired)
 
         return _Dropped(model._meta.db_table, None, remaining_rows)
     removed = model._meta.get_field(field)
@@ -372,11 +376,11 @@ def _dropped(model: Any, field: str | None, policies: tuple[MigrationPolicy, ...
         through = next(_model_storage(model, removed_field=field), None)
         if through is None:
             return None
-        return _Dropped(through._meta.db_table, None, lambda alias: through._base_manager.all())
+        return _Dropped(through._meta.db_table, None, lambda alias: QuerySet(through))
     if not removed.concrete or removed.generated:
         return None
     empty = None if removed.null else removed.get_default()
-    query = model._base_manager.all()
+    query: QuerySet[Any] = QuerySet(model)
     if empty is None:
         query = query.exclude(**{f"{removed.attname}__isnull": True})
     elif not isinstance(empty, DatabaseDefault):
