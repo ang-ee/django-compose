@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 
 import pytest
+from test_migrations import host as host
+from test_migrations_plan_guard import DELETE_RECORD, PRELUDE, REMOVE_OLD, add_field, migration
 from test_provision_postgres import ROOT, _configure, _database
 
 
@@ -191,6 +193,76 @@ def test_postgres_migration_storage_identity(tmp_path: Path) -> None:
             stream.write(result.stderr)
         pytest.fail(f"PostgreSQL migration storage proof failed; private diagnostic: {diagnostic}")
     assert "namespaces, quoting, search paths, aliases and teardown verified" in result.stdout
+
+
+@pytest.mark.parametrize("scenario", ["column", "table", "declared"])
+def test_postgres_migrate_refuses_undeclared_drops_before_any_ddl(
+    host, tmp_path: Path, scenario: str
+) -> None:
+    environment = os.environ.get("DJANGO_COMPOSE_PROVISION_POSTGRES_ENV")
+    if not environment:
+        pytest.skip("requires an explicit private PostgreSQL test environment")
+    root, run = host
+    if scenario == "declared":
+        operations = [
+            add_field("new"),
+            "migrations.RunPython(move, migrations.RunPython.noop)",
+            'IntendedRemoveField(model_name="record", name="old")',
+        ]
+        preamble = """
+def move(apps, editor):
+    Record = apps.get_model("alpha", "Record")
+    Record._base_manager.using(editor.connection.alias).update(new=models.F("old"))
+"""
+    else:
+        operations = [add_field("new"), REMOVE_OLD if scenario == "column" else DELETE_RECORD]
+        preamble = ""
+    migration(root, "0002_drop", operations, preamble=preamble)
+    # Only the private environment file's path enters the probe; it reads the credentials.
+    result = run(
+        PRELUDE
+        + f"""
+import sys
+sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})
+from test_provision_postgres import _database
+database = _database(Path({environment!r}), prefix="compose_plan_guard")
+connections.settings["default"] = connections.configure_settings({{"default": database}})["default"]
+# Model population already created the configured default wrapper; replace it.
+del connections["default"]
+original = connection.settings_dict["NAME"]
+# Create an empty database without running the host's migrations into it.
+test_name = connection.creation._create_test_db(verbosity=0, autoclobber=False, keepdb=False)
+connection.close()
+connection.settings_dict["NAME"] = test_name
+try:
+    assert connection.vendor == "postgresql"
+    Record = seed(old="kept")
+    if {scenario!r} == "declared":
+        migrate(skip_checks=True)
+        assert columns() == ["id", "new"]
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT new FROM alpha_record")
+            assert cursor.fetchall() == [("kept",)]
+    else:
+        detail = "alpha_record.old" if {scenario!r} == "column" else "alpha_record.*"
+        expect(CommandError, f"alpha.record: {{detail}} holds data in 1 rows on 'default'", migrate)
+        assert columns() == ["id", "old"]
+        assert list(Record._base_manager.values_list("old", flat=True)) == ["kept"]
+        assert ("alpha", "0002_drop") not in applied()
+finally:
+    connections.close_all()
+    connection.creation.destroy_test_db(old_database_name=original, verbosity=0)
+print("PostgreSQL migrate drop guard verified")
+""",
+        success=False,
+    )
+    if result.returncode:
+        diagnostic = tmp_path / "plan-guard-postgres-private.stderr"
+        descriptor = os.open(diagnostic, os.O_CREAT | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(result.stderr)
+        pytest.fail(f"PostgreSQL migrate drop guard proof failed; private diagnostic: {diagnostic}")
+    assert "PostgreSQL migrate drop guard verified" in result.stdout
 
 
 if __name__ == "__main__":
