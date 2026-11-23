@@ -87,8 +87,8 @@ Python package before migration commands or serving.
 These are separate changes:
 
 - **Delete a model from an enabled app:** Django detects the schema deletion,
-  even when the app now has no models module. Automatic destructive changes must
-  pass the data guards described below.
+  even when the app now has no models module. Its removal must pass the
+  [drop guard](#advanced-the-drop-guard-and-history-cutoffs).
 - **Disable an app:** remove it from the project's selected apps and compose
   again. Its retained migration history is represented by a history-only app
   configuration, without loading its old models or lifecycle hooks. Disabling
@@ -142,8 +142,8 @@ Declare native dependencies so Django applies schema and data work in order.
 A final-shaped schema does not prove that earlier data work ran.
 
 Django owns `--check`, `--dry-run`, `--empty`, `--merge` and `--update`, migration
-serialization and destinations. Authoring uses the shared destructive-change
-guards and can read eligible databases. Native command failure semantics apply;
+serialization and destinations. Authoring uses the drop guard and can read
+eligible databases. Native command failure semantics apply;
 there is no separate multi-phase authoring rollback journal. Authoring and compose
 do not write migration recorder rows. `compose --check` compares native state
 without querying a deployment database.
@@ -173,48 +173,22 @@ An explicit native `makemigrations --update` retains Django's deliberate rewrite
 semantics; the former seal-based ban is gone. Audit retained imports before
 removing providers, using `check_migrations --imports --removing`.
 
-## Advanced: destructive changes and history cutoffs
+## Advanced: the drop guard and history cutoffs
 
-The shared `DropGuardAutodetector` requires relevant rows or columns to be empty
-before automatic field/model removal, on every configured database eligible for
-that native migration operation. Django's model options, including
-`required_db_vendor` and `required_db_features`, and routers determine eligibility.
-Only eligible databases are checked for stored rows; native feature eligibility
-checks may themselves connect. An unavailable eligible database cannot prove
-emptiness. Integration-owned retirement exemptions remain explicit. Implement
-required data cutovers as reviewed migrations.
+The [drop guard](SPEC.md#drop-guard) refuses a migration that would remove a column
+or table still holding data. `makemigrations` applies it to what it autodetects, on
+every eligible configured database. `migrate`, and therefore `provision`, applies it
+to the plan it is about to run, before any operation and also under `--skip-checks`.
+At `migrate` it judges the project's composed history only; Django's own migrations
+and those of other apps are their owners' responsibility. A refusal names each
+migration, operation, model, column or table and row count, and nothing is migrated.
+Integration-owned row exemptions use `MigrationPolicy`. Implement required data
+cutovers as reviewed migrations. Proving an unindexed column empty scans its table.
+The specification lists what the guard does not judge.
 
-The guards compare storage on each eligible alias. A table still owned by an
-active model cannot be deleted, even when empty or reached through differently
-quoted names. This includes Django's implicit many-to-many tables deleted with
-their owning model or field. Identical table names on disjoint database aliases do not
-establish shared ownership.
-
-Ordinary and double-quoted identifiers use Django's backend interpretation.
-PostgreSQL checks account for quoted case, explicit schemas and `search_path`;
-SQLite checks use its native case and temporary-table visibility rules. Attached
-SQLite databases, unsupported quoting or namespaces, excessive identifier lengths
-and otherwise unprovable identity refuse the automatic safety proof. Use reviewed
-explicit migrations for these cases. Other backends retain native introspection
-with conservative refusal of uncertain identity; the real-backend regression
-coverage is SQLite and PostgreSQL.
-
-### Drops at migrate
-
-`migrate` applies the same proof to the plan it is about to run, so a removal
-migration authored against another database, copied in or written by hand cannot
-drop stored data unnoticed. Before any operation runs, also under `--skip-checks`
-and therefore in `provision`, every forward `RemoveField` and `DeleteModel` in the
-plan, including `SeparateDatabaseAndState` database operations, must find its
-storage empty on the database being migrated. The same emptiness rules and
-retirement exemptions apply, and Django's routing decides as it would at that point
-of the plan. The storage checked is the column or table the model or field had
-before the plan, followed through `RenameModel` and `RenameField`. Storage the plan
-itself creates needs no proof, and storage that is already absent is skipped. One
-error names every refused migration, operation, model, column or table and row
-count, and nothing is migrated. `migrate --fake` runs no operations and is not
-checked; neither is unapplying migrations to an explicit target. `RunSQL` and other
-custom database code are not inspected.
+On upgrade, a host whose unapplied composed history removes storage that still holds
+data is refused at `migrate` and `provision` until each named removal is reviewed:
+keep the storage, or move the data and declare the drop.
 
 ### Declare an intended drop
 
@@ -246,20 +220,32 @@ class Migration(migrations.Migration):
     ]
 ```
 
-Both are native subclasses: Django applies and serializes them exactly like
-`RemoveField` and `DeleteModel`, and squashing keeps them. A declaration covers
-only its own operation. Other removals in the same migration, or the same storage
-removed by another migration, remain guarded. Operations that drop no stored data,
-such as `RemoveConstraint`, stay native and are not judged. A `RunPython` that copies
-data may leave the source holding it; the declaration is what allows the drop. The
-import becomes part of retained history; the module imports only Django.
+A declaration covers only its own operation; other removals in the same migration,
+or the same storage removed by another migration, remain guarded. Operations that
+drop no stored data, such as `RemoveConstraint`, stay native. A `RunPython` that
+copies data may leave the source holding it: the declaration is what allows the drop.
+The import becomes part of retained history; the module imports only Django.
 
-`makemigrations` keeps refusing to autodetect a drop while an eligible database
-still holds the data. Author the cutover migration first, for example from
-`makemigrations --empty`, so the models and history agree. On upgrade, a host whose
-unapplied history removes storage that still holds data is refused at `migrate` and
-`provision` until each removal is reviewed: keep the storage, or move the data and
-declare the drop.
+`makemigrations` keeps refusing to autodetect a drop while an eligible database still
+holds the data. Author the cutover migration first, for example from
+`makemigrations --empty`, so the models and history agree.
+
+### Storage identity
+
+The drop guard compares storage on each eligible alias. A table still owned by an
+active model cannot be deleted, even when empty or reached through differently
+quoted names. This includes Django's implicit many-to-many tables deleted with
+their owning model or field. Identical table names on disjoint database aliases do not
+establish shared ownership.
+
+Ordinary and double-quoted identifiers use Django's backend interpretation.
+PostgreSQL checks account for quoted case, explicit schemas and `search_path`;
+SQLite checks use its native case and temporary-table visibility rules. Attached
+SQLite databases, unsupported quoting or namespaces, excessive identifier lengths
+and otherwise unprovable identity cannot prove a drop safe. Use reviewed
+explicit migrations for these cases. Other backends retain native introspection
+with conservative refusal of uncertain identity; the real-backend regression
+coverage is SQLite and PostgreSQL.
 
 ### History cutoffs
 

@@ -103,8 +103,8 @@ in [`django_compose.declarations`](../src/django_compose/declarations.py) are:
   `ModelDeclaration(attributes=..., meta_options=...)` using `DeclarationValue` values.
 - `ArtifactHook` declares `external_root`, `phase` and `render(composition, models)`.
   Models-phase hooks receive `ModelsView`; ready-phase hooks receive Django's registry.
-- `MigrationPolicy.retired_primary_keys(model, alias)` supplies explicit exemptions
-  to destructive-change checks.
+- `MigrationPolicy.retired_primary_keys(model, alias)` supplies explicit row
+  exemptions to the [drop guard](SPEC.md#drop-guard).
 
 The supplied [`ModelComposition`](../src/django_compose/model_composition.py) exposes
 ordered models, donors, parents and contributed fields; see [model contracts](SPEC.md#model-declarations).
@@ -141,7 +141,7 @@ project startup normally delegates verification to `configure`.
 - `operations.IntendedRemoveField` and `operations.IntendedDeleteModel` declare a
   drop of stored data that a migration intends, such as after a `RunPython` move;
   see [intended drops](migrations.md#declare-an-intended-drop).
-  `migrations.check_plan_drops(plan, *, using, apps)` is the proof `migrate` runs
-  from `pre_migrate`.
+  `migrations.check_plan_drops(plan, *, using)` is the [drop guard](SPEC.md#drop-guard)
+  `migrate` runs from `pre_migrate`.
 - The optional `django_compose.typing` mypy plugin analyzes composed models through
   django-stubs. See [installation, configuration and limitations](dependencies.md#advanced-typing).

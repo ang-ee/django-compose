@@ -2,30 +2,29 @@
 
 ## Unreleased
 
-- Guard `migrate` against dropping stored data. Before any operation runs, also
-  under `--skip-checks` and therefore in `provision`, every forward `RemoveField`
-  and `DeleteModel` in the plan, including `SeparateDatabaseAndState` database
-  operations, must find its column or table empty on the database being migrated,
-  under the rules and `MigrationPolicy` exemptions of the `makemigrations` drop
-  guard. Renames earlier in the plan are followed back to the stored data; storage
-  the plan creates needs no proof and storage already absent is skipped. One
-  `CommandError` names every refused migration, operation, model, column or table
-  and row count, and nothing is migrated. Previously only autodetected removals were
-  checked, at `makemigrations`, against whichever database that command reached, so
-  a removal migration already on disk was applied unchecked. Faked and backwards
-  plans are not judged. See [proposal 0005](docs/proposals/0005-migrate-time-drop-guard.md).
-- Add `django_compose.operations.IntendedRemoveField` and `IntendedDeleteModel`:
-  native subclasses that declare a drop a migration intends, for example after a
-  `RunPython` moves or copies the data. Only that exact operation is exempt; see
+- Apply the [drop guard](docs/SPEC.md#drop-guard) when `migrate` runs, and so in
+  `provision`, also under `--skip-checks`: a pending removal in the project's composed
+  history that would destroy stored data is refused before any operation runs.
+  Previously only autodetected removals were judged, at `makemigrations`, so a removal
+  migration already on disk was applied unchecked. Django's and other apps' history
+  remains their owners' responsibility. See
+  [proposal 0005](docs/proposals/0005-migrate-time-drop-guard.md).
+- Add `django_compose.operations.IntendedRemoveField` and `IntendedDeleteModel` to
+  declare a drop a migration intends; see
   [intended drops](docs/migrations.md#declare-an-intended-drop).
-- Prove dropped storage empty with one EXISTS query; the drop guards count rows only
-  for storage that holds data.
-- **Upgrade impact:** a host whose unapplied history removes a column or table that
-  still holds data is now refused at `migrate` and `provision`, which is the point.
-  Review each named removal: keep the storage, or move its data and write the removal
-  as `IntendedRemoveField(model_name=..., name=...)` or `IntendedDeleteModel(name=...)`
-  in that migration. An unapplied `retire_history --purge` migration is refused the
-  same way while its tables hold rows; apply it with `retire_history <label> --purge`.
+- Report another app's `migrate` or `makemigrations` that shadows this package's with
+  system check `django_compose.E002`; `provision` refuses it before any database work.
+- `retire_history --purge` applies only the retired label's own migrations.
+- The drop guard proves storage empty with one EXISTS query and counts rows only for
+  a refusal. Its shared-table refusal now reads "unsafe table deletion".
+- **Upgrade impact:** a host whose unapplied composed history removes a column or table
+  that still holds data is now refused at `migrate` and `provision`, which is the
+  point. Review each named removal: keep the storage, or move its data and write the
+  removal as `IntendedRemoveField(model_name=..., name=...)` or
+  `IntendedDeleteModel(name=...)` in that migration. A pending purge migration is
+  refused the same way; apply it on each deployment with
+  `retire_history <label> --purge`. A project app that ships its own `migrate` or
+  `makemigrations` must subclass this package's command.
 
 ## 0.1.0.dev13
 

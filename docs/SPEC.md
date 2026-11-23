@@ -457,7 +457,7 @@ All package migration comparisons use this state calculation.
 autodetector. Django owns `--check`, `--dry-run`, `--empty`, `--merge`, `--update`,
 serialization and file destinations. There is no custom multi-phase authoring or
 whole-command rollback journal; native command semantics apply. Authoring may
-read routed databases for destructive-change safety, but does not write migration
+read routed databases for the [drop guard](#drop-guard), but does not write migration
 recorder rows. Native `migrate` owns application and recording.
 
 `migrations.check_native_history(apps, *, labels)` compares native graph state
@@ -465,31 +465,6 @@ with effective composed state without database access. `migrations.history_label
 reads retained labels from the build record. Compiler revision is 2; the receipt
 schema is unchanged. For the prerelease cutoff and retained historical files,
 see [upgrade guidance](migrations.md#upgrade-from-the-removed-prerelease-protocol).
-
-`DropGuardAutodetector`, shared by native `makemigrations` and `migrate`, requires
-relevant rows or columns to be empty on every database eligible for the native
-operation before automatic destructive changes. Eligibility includes native
-model options and routers. Shared-table protection is per alias and includes
-implicit many-to-many storage deleted with its owning model or field. Quoted identifiers
-are resolved through backend semantics; unsupported or uncertain storage identity
-and unavailable eligible databases cannot prove safety. Explicit integration-owned
-row exemptions use `MigrationPolicy`. See the [storage proof's supported cases
-and limits](migrations.md#advanced-destructive-changes-and-history-cutoffs).
-
-Native `migrate` applies the same storage proof to its plan from `pre_migrate`,
-before the syncdb phase and the first operation, regardless of `--skip-checks`.
-`migrations.check_plan_drops(plan, *, using, apps)` judges every forward
-`RemoveField` and `DeleteModel`, including nested `SeparateDatabaseAndState`
-database operations, on the alias being migrated. Each operation is routed with
-the model of the plan's state at that operation; the probed storage is the one its
-model or field had before the plan, followed through native `RenameModel` and
-`RenameField`. Storage introduced by the plan needs no proof and absent storage is
-skipped. One EXISTS query proves present storage empty. Any refusal raises one
-`CommandError` naming every refused migration, operation, model, column or table
-and row count, before anything is migrated. `django_compose.operations` provides
-`IntendedRemoveField` and `IntendedDeleteModel`, native subclasses declaring a drop
-their migration intends; only that operation is exempt. Faked and backwards plans
-are not judged. See [proposal 0005](proposals/0005-migrate-time-drop-guard.md).
 
 Retirement requires consistent fully applied history across all configured
 migration-relevant aliases and refuses retained incoming cross-app dependencies.
@@ -512,6 +487,63 @@ ordinary migration modules, but the audit issues no database queries and applies
 no migration operations. `--imports --removing DIST...` refuses enabled providers,
 retained imports, unresolved/unsupported entries and loader failures; it does not
 uninstall anything. See [migration workflows](migrations.md).
+
+### Drop guard
+
+The drop guard refuses a native removal that would destroy stored data. A removal is
+a `RemoveField` or `DeleteModel`, also one among the database operations of a
+`SeparateDatabaseAndState`. It drops a concrete field's column, a field's implicit
+many-to-many table, or a model's table; explicit through models and generated columns
+own no storage of their own. Storage is empty when no row holds data in it: a nullable
+column is empty at NULL and a non-null column at its native default, while a database
+default cannot prove emptiness. A deleted table may still hold rows that
+`MigrationPolicy.retired_primary_keys(model, alias)` explicitly retires. Eligibility
+follows native model options and routers. Quoted identifiers resolve through backend
+semantics; uncertain storage identity and an unavailable eligible database cannot
+prove a drop safe ([supported cases](migrations.md#storage-identity)). A table that an
+active model still owns is never deleted, even when empty. One EXISTS query proves
+present storage empty, so an unindexed column scans its table; rows are counted only
+for a refusal.
+
+It runs at two points on these rules:
+
+- **Authoring:** `DropGuardAutodetector`, shared by native `makemigrations` and
+  `migrate`, refuses an autodetected removal unless every eligible configured database
+  proves it safe, and refuses deleting a table that the target state still owns.
+- **Applying:** the package's `migrate` judges the plan it is about to run from
+  `pre_migrate`, before the syncdb phase and the first operation, also under
+  `--skip-checks`, through `migrations.check_plan_drops(plan, *, using)`. It judges a
+  forward plan on the alias being migrated, and only history that the composition owns:
+  the build record's `HISTORY_LABELS`. Django's and other apps' history belongs to its
+  owners. Each removal is routed with its model as the plan's state has it at that
+  operation and drops what that state defines. Its data is looked up as the database
+  holds it before the plan: in the storage its model or field had then, followed
+  through native `RenameModel` and `RenameField`, and otherwise in the storage the plan
+  names. Storage absent before the plan is skipped, as is storage that an earlier
+  removal of the same plan ended. A table owned at the end of the plan is not deleted.
+  One `CommandError` names every refused migration, operation, model, column or table
+  and row count, and nothing is migrated.
+
+A migration declares a drop it intends with `IntendedRemoveField` or
+`IntendedDeleteModel` from `django_compose.operations`: native subclasses applied and
+serialized exactly like `RemoveField` and `DeleteModel`, so squashing keeps them.
+Squashing folds a declared field removal into a following native `DeleteModel`, which
+stays guarded. Only the declaring operation is exempt. A purge migration authored by
+`retire_history --purge` declares nothing: purging retired data is a per-deployment
+decision that `retire_history <label> --purge` applies, and a refusal names that
+command. The purge itself applies only the retired label's migrations.
+
+Faked and backwards plans are not judged, nor is `RunSQL` or other custom database
+code. Two native drops predate the guard and are not judged: `AlterOrderWithRespectTo`
+to `None` removes the `_order` column, and a model deletion drops its implicit
+many-to-many tables unprobed, which can lose rows only when the field sets
+`db_constraint=False`.
+
+Native dispatch must resolve this package's `makemigrations` and `migrate`, or a
+subclass of each. `ComposeConfig` is last in `INSTALLED_APPS`, so a same-named command
+of any other app wins and would switch the guard off. System check
+`django_compose.E002` reports it, and `provision` refuses it before any database work.
+[Proposal 0005](proposals/0005-migrate-time-drop-guard.md) records these decisions.
 
 ## Database preparation and readiness
 
