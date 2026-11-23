@@ -12,8 +12,9 @@ import tempfile
 from typing import Any
 
 from django.conf import settings
+from django.core import checks
 from django.core.exceptions import ImproperlyConfigured
-from django.core.management import ManagementUtility
+from django.core.management import ManagementUtility, get_commands, load_command_class
 from django.core.management.base import CommandError, handle_default_options
 from django.utils import autoreload
 
@@ -42,12 +43,12 @@ def unguarded_commands() -> tuple[str, ...]:
 
     ComposeConfig must be last in INSTALLED_APPS, so a same-named command of any
     other app wins native dispatch and its drop guard is silently off. A subclass
-    of this package's command keeps the guard.
+    of this package's command keeps the guard unless it overrides ``execute``.
     """
-    from django.core.management import get_commands, load_command_class
-
     shadowed = []
     for name in ("makemigrations", "migrate"):
+        # Imported here: the command modules load migration state and models, while
+        # this module loads before settings, for the launcher.
         guarded = importlib.import_module(f"django_compose.management.commands.{name}").Command
         app = get_commands()[name]
         if not isinstance(load_command_class(app, name), guarded):
@@ -55,10 +56,8 @@ def unguarded_commands() -> tuple[str, ...]:
     return tuple(shadowed)
 
 
-def check_guarded_commands(app_configs: Any = None, **kwargs: Any) -> list[Any]:
+def check_guarded_commands(app_configs: Any = None, **kwargs: Any) -> list[checks.CheckMessage]:
     """System check: native dispatch resolves the drop-guarded migration commands."""
-    from django.core import checks
-
     return [
         checks.Error(
             problem,
