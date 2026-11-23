@@ -526,10 +526,12 @@ It runs at two points on these rules:
 At `migrate`:
 
 - **Nothing stored:** an alias whose only tables are Django's migration recorder and
-  `provision`'s record, such as a fresh or test database, holds no data to lose, so
-  the guard probes nothing and follows no rename there. Only a complete inventory
-  shows that: PostgreSQL's catalog across every schema, or SQLite's main database
-  with nothing attached; on other backends the guard always probes. `--fake-initial`
+  `provision`'s record, such as a fresh or test database on PostgreSQL or SQLite,
+  holds no data to lose, so the guard probes nothing and follows no rename there.
+  Only a complete inventory shows that: PostgreSQL's catalog across every schema, in
+  which a relation an extension owns, such as PostGIS's `spatial_ref_sys`, does not
+  count, or SQLite's main database with nothing attached; on other backends the guard
+  always probes. `--fake-initial`
   adoption finds tables, so it is probed. The shared-table rule needs no data and
   still applies, from names alone, as authoring's offline check does: names only a
   catalog could tell apart are refused.

@@ -82,6 +82,18 @@ def _drive(environment: Path) -> None:
         assert not _stores_nothing(connection)
         with connection.cursor() as cursor:
             cursor.execute('DROP SCHEMA "hidden" CASCADE')
+        # A relation an extension owns, such as PostGIS's spatial_ref_sys, holds the
+        # extension's data, not Django's: the alias still stores nothing.
+        with connection.cursor() as cursor:
+            cursor.execute('CREATE TABLE "extension_owned" (id integer PRIMARY KEY)')
+            cursor.execute('INSERT INTO "extension_owned" VALUES (1)')
+            cursor.execute('ALTER EXTENSION plpgsql ADD TABLE "extension_owned"')
+        assert _stores_nothing(connection)
+        with connection.cursor() as cursor:
+            cursor.execute('ALTER EXTENSION plpgsql DROP TABLE "extension_owned"')
+        assert not _stores_nothing(connection)
+        with connection.cursor() as cursor:
+            cursor.execute('DROP TABLE "extension_owned"')
         with connection.cursor() as cursor:
             cursor.execute('CREATE SCHEMA "left"')
             cursor.execute('CREATE SCHEMA "right"')

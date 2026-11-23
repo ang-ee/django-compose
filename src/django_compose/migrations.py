@@ -767,7 +767,9 @@ def _stores_nothing(connection: BaseDatabaseWrapper) -> bool:
 
     Such an alias stores nothing a plan could destroy. Only a complete inventory can
     show that: PostgreSQL's catalog across every schema, and SQLite's main database
-    without attachments. Other backends never qualify.
+    without attachments. Other backends never qualify. On PostgreSQL a relation an
+    extension owns, such as PostGIS's ``spatial_ref_sys``, holds the extension's data
+    and does not count.
     """
     recorders = [MigrationRecorder.Migration._meta.db_table, PROVISION_TABLE]
     with connection.cursor() as cursor:
@@ -777,7 +779,10 @@ def _stores_nothing(connection: BaseDatabaseWrapper) -> bool:
                 "SELECT NOT EXISTS (SELECT FROM pg_catalog.pg_class c "
                 "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
                 "WHERE c.relkind IN ('r', 'p', 'f', 'm') AND n.nspname !~ '^pg_' "
-                "AND n.nspname <> 'information_schema' AND c.relname <> ALL(%s))",
+                "AND n.nspname <> 'information_schema' AND c.relname <> ALL(%s) "
+                "AND NOT EXISTS (SELECT FROM pg_catalog.pg_depend d "
+                "WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid "
+                "AND d.deptype = 'e'))",
                 [recorders],
             )
             return bool(cursor.fetchone()[0])

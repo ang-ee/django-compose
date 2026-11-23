@@ -179,8 +179,10 @@ The [drop guard](SPEC.md#drop-guard) refuses a migration that would remove a col
 or table still holding data. `makemigrations` applies it to what it autodetects, on
 every eligible configured database. `migrate`, and therefore `provision`, applies it
 to the plan it is about to run, before any operation and also under `--skip-checks`.
-On a database that stores nothing yet, such as a fresh or test database, it has no
-data to prove, but still refuses deleting a table another model owns.
+On a database that stores nothing yet, such as a fresh or test database on
+PostgreSQL or SQLite, where tables an extension owns do not count, it has no data to
+prove, but still refuses deleting a table another model owns. On other backends it
+always probes.
 At `migrate` it judges the history the project owns, its composed history and its
 own apps' migrations; Django's migrations and those of installed apps are their
 owners' responsibility. A refusal names each
