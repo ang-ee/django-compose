@@ -499,7 +499,14 @@ class DropGuardAutodetector(MigrationAutodetector):
 
 
 _INTENDED = (IntendedRemoveField, IntendedDeleteModel)
+# retire_history --purge names its migration with this suffix. The guard reads the
+# suffix only to choose the remedy text; it judges a purge like any other migration.
 _PURGE = "compose_purge"
+_DECLARE = (
+    "keep the storage, or move its data and declare the drop in that migration of the "
+    "project's history with django_compose.operations.IntendedRemoveField or IntendedDeleteModel"
+)
+_KEEP_SHARED = "keep a table another model may still own, or first change that owner"
 
 
 class _Storage:
@@ -716,13 +723,18 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
     policies = _policies()
     storage = _Storage()
     removals: list[tuple[Migration, _Removal]] = []
-    refusals: list[tuple[str | None, str]] = []
+    refusals: list[tuple[str, str]] = []
 
-    def refuse(migration: Migration, operation: Operation, refusal: str) -> None:
-        purge = migration.app_label if migration.name.endswith(f"_{_PURGE}") else None
-        refusals.append(
-            (purge, f"{migration.app_label}.{migration.name} ({operation.describe()}): {refusal}")
-        )
+    def refuse(migration: Migration, operation: Operation, refusal: str, *, shared: bool = False) -> None:
+        label = migration.app_label
+        if shared:
+            # Declaring the drop cannot help: the table is not the removed model's alone.
+            remedy = _KEEP_SHARED
+        elif migration.name.endswith(f"_{_PURGE}"):
+            remedy = f"apply the {label!r} purge on this deployment with retire_history {label} --purge"
+        else:
+            remedy = _DECLARE
+        refusals.append((remedy, f"{label}.{migration.name} ({operation.describe()}): {refusal}"))
 
     def judge(
         migration: Migration, operations: Iterable[Operation], state: ProjectState, *, database: bool = True
@@ -778,18 +790,11 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         [removal for _, removal in removals], state, (using,), database=True
     ):
         migration, (operation, _, _) = removals[index]
-        refuse(migration, operation, refusal)
+        refuse(migration, operation, refusal, shared=True)
     if refusals:
-        remedies = [
-            f"apply the {label!r} purge on this deployment with retire_history {label} --purge"
-            for label in sorted({purge for purge, _ in refusals if purge is not None})
-        ]
-        if any(purge is None for purge, _ in refusals):
-            remedies.insert(
-                0,
-                "keep the storage, or move its data and declare the drop in that migration of the "
-                "project's history with django_compose.operations.IntendedRemoveField or IntendedDeleteModel",
-            )
+        given = {remedy for remedy, _ in refusals}
+        remedies = [remedy for remedy in (_DECLARE, _KEEP_SHARED) if remedy in given]
+        remedies.extend(sorted(given - {_DECLARE, _KEEP_SHARED}))
         raise CommandError(
             "unsafe migration drop: "
             + "; ".join(refusal for _, refusal in refusals)

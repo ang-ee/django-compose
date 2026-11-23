@@ -693,15 +693,26 @@ assert "alpha_record" not in tables()
     )
 
 
-def test_table_owned_at_the_end_of_the_plan_is_not_deleted(host):
+@pytest.mark.parametrize("declared", [False, True])
+def test_table_owned_at_the_end_of_the_plan_is_not_deleted(host, declared):
     root, run = host
     migration(root, "0002_twin", [adopt("Twin")])
-    migration(root, "0003_drop", [DELETE_RECORD], after="0002_twin")
+    removal = 'IntendedDeleteModel(name="Record")' if declared else DELETE_RECORD
+    migration(root, "0003_drop", [removal], after="0002_twin")
     run(
         PRELUDE
         + """
 seed()
-expect(CommandError, "table 'alpha_record' is still owned by alpha.twin on 'default'", migrate)
+try:
+    migrate()
+except CommandError as error:
+    message = str(error)
+else:
+    raise AssertionError("a table still owned was deleted")
+assert "table 'alpha_record' is still owned by alpha.twin on 'default'" in message, message
+# Declaring the drop cannot help a table another model owns; the remedy says so.
+assert "keep a table another model may still own, or first change that owner" in message, message
+assert "IntendedDeleteModel" not in message, message
 assert "alpha_record" in tables()
 """
     )
@@ -992,6 +1003,8 @@ executor.loader.project_state(("alpha", "0002_twin")).apps.get_model("alpha", "O
 for refusal in (
     "alpha.0003_drop (Remove field note from other): alpha.other: alpha_other.note holds data in 1 rows",
     "alpha.0004_drop (Delete model Record): table 'alpha_record' is still owned by alpha.twin on 'default'",
+    "To proceed, keep the storage, or move its data and declare the drop",
+    "IntendedRemoveField or IntendedDeleteModel; keep a table another model may still own, or first change",
 ):
     expect(CommandError, refusal, migrate)
 """

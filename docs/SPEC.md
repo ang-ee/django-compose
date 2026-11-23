@@ -530,7 +530,9 @@ It runs at two points on these rules:
   app: one whose migration package no installed distribution owns, as the
   retained-import audit's resolver classifies it. Django's and installed third-party
   apps' history belongs to their owners. A project installed as a distribution keeps
-  its composed history judged, but its other apps then classify as installed.
+  its composed history judged, but its other apps then classify as installed. That
+  includes an editable install, such as `uv sync` or `pip install -e` makes, which
+  records the project directory as PEP 610 `dir_info`.
 - **Probe at `migrate`:** each removal is routed and defined by the plan's state at
   that operation, and its storage is probed under the name it had before the plan.
   The walk follows every rename the plan's database operations make, whoever owns
@@ -539,9 +541,10 @@ It runs at two points on these rules:
   produces, so a swapped model or one routed elsewhere renames nothing. Storage
   absent before the plan is skipped. So is storage under a name that an earlier rename
   or removal of the same plan vacated, which the plan itself creates. A table owned at
-  the end of the plan is not deleted. One `CommandError` names every refused migration,
-  operation, model, column or table and row count, shared tables included, and nothing
-  is migrated.
+  the end of the plan is not deleted, even by a declared drop. One `CommandError` names
+  every refused migration, operation, model, column or table and row count, shared
+  tables included, and nothing is migrated. Its remedy for a shared table is to keep it
+  or change that owner first, since declaring the drop cannot help.
 
 A migration declares a drop it intends with `IntendedRemoveField` or
 `IntendedDeleteModel` from `django_compose.operations`: native subclasses applied and
