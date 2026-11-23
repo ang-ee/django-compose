@@ -1285,6 +1285,92 @@ with override_settings(INSTALLED_APPS=installed, AUTH_USER_MODEL="beta.User"):
     )
 
 
+SWAPPABLE_MEMBER = """
+from django.db import models
+class Tag(models.Model):
+    pass
+class Member(models.Model):
+    name = models.CharField(max_length=40, default="")
+    tags = models.ManyToManyField(Tag)
+    class Meta:
+        swappable = "BETA_MEMBER_MODEL"
+"""
+
+
+@pytest.mark.parametrize("rename", ["field", "column"])
+def test_a_storage_rename_on_a_swapped_model_renames_nothing(host, rename):
+    root, run = host
+    write(root, "beta/models.py", SWAPPABLE_MEMBER)
+    write(
+        root,
+        "history/beta/0001_member.py",
+        """
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    operations = [
+        migrations.CreateModel(name="Tag", fields=[("id", models.AutoField(primary_key=True))]),
+        migrations.CreateModel(name="Member", fields=[
+            ("id", models.AutoField(primary_key=True)),
+            ("name", models.CharField(max_length=40, default="")),
+            ("tags", models.ManyToManyField("beta.Tag")),
+        ], options={"swappable": "BETA_MEMBER_MODEL"}),
+    ]
+""",
+    )
+    # Unlike auth's pending AlterFields, this operation changes a storage name.
+    if rename == "field":
+        operation = 'migrations.RenameField(model_name="member", old_name="name", new_name="title")'
+    else:
+        field = 'models.CharField(max_length=40, default="", db_column="legacy")'
+        operation = f'migrations.AlterField(model_name="member", name="name", field={field})'
+    write(
+        root,
+        "history/beta/0002_rename.py",
+        f"""
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    dependencies = [("beta", "0001_member")]
+    operations = [{operation}]
+""",
+    )
+    migration(root, "0002_drop", [REMOVE_OLD])
+    run(
+        PRELUDE
+        + """
+from django.test import override_settings
+with override_settings(BETA_MEMBER_MODEL="alpha.Record"):
+    Record = seed(old="kept")
+    expect(CommandError, "alpha.0002_drop (Remove field old from record)", migrate)
+    assert columns() == ["id", "old"]
+    Record._base_manager.update(old="")
+    migrate()
+    assert columns() == ["id"]
+    assert ("beta", "0002_rename") in applied()
+"""
+    )
+
+
+def test_a_rename_of_an_unmanaged_mirror_leaves_the_table_it_maps_protected(host):
+    root, run = host
+    options = '{"db_table": "alpha_record", "managed": False}'
+    migration(
+        root, "0002_mirror", [f'migrations.CreateModel(name="Mirror", fields={FIELDS}, options={options})']
+    )
+    # Django renames no table for an unmanaged model, so alpha_record keeps Record's rows.
+    retable = 'migrations.AlterModelTable(name="mirror", table="alpha_ledger")'
+    migration(root, "0003_retable", [retable], after="0002_mirror")
+    migration(root, "0004_drop", [DELETE_RECORD], after="0003_retable")
+    run(
+        PRELUDE
+        + """
+seed(old="kept")
+refusal = "alpha.0004_drop (Delete model Record): alpha.record: alpha_record.* holds data in 1 rows"
+expect(CommandError, refusal, migrate)
+assert "alpha_record" in tables()
+"""
+    )
+
+
 def test_a_rename_on_another_database_leaves_this_ones_storage_protected(host):
     root, run = host
     table = '{"db_table": "alpha_record"}'
