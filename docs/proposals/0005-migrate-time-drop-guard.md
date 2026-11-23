@@ -20,9 +20,10 @@ choices behind it.
   emptiness rules, row retirement and shared-table protection of the authoring guard.
   The pre-plan state comes from the executor's private `_create_project_state`, the
   same call native `migrate` makes; it is re-checked on each Django upgrade.
-- **Scope.** `migrate` guards the same apps whose history authoring guards: those
-  the project owns, the build record's `HISTORY_LABELS` and its project-source apps,
-  classified by the retained-import audit's resolver rather than a new classifier.
+- **Scope.** `migrate` guards the history the project owns: the build record's
+  `HISTORY_LABELS` and its project-source apps, classified by the retained-import
+  audit's resolver rather than a new classifier. Authoring has no scope of its own; it
+  judges what `makemigrations` autodetects for the apps it is given.
   Django's own history, such as `contenttypes`' removal of its legacy `name` column,
   and an installed app's history cannot be edited by a host, and those apps cannot
   declare an intended drop without depending on this package. Their history is their
