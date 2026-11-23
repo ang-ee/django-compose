@@ -479,7 +479,10 @@ active = apps.get_model("beta", "Adopted")
 active._base_manager.create(old="active data")
 before = files()
 records = set(MigrationRecorder(connection).applied_migrations())
-expect(CommandError, "still owned by beta.adopted", lambda: retire_history("alpha", purge=True))
+purge = lambda: retire_history("alpha", purge=True)
+expect(CommandError, "unsafe autodetected drop: table ", purge)
+expect(CommandError, "is still owned by beta.adopted on 'default'. To proceed, keep a table another model "
+       "may still own, or first change that owner.", purge)
 assert files() == before
 assert records == set(MigrationRecorder(connection).applied_migrations())
 assert list(active._base_manager.values_list("old", flat=True)) == ["active data"]

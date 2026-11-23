@@ -47,6 +47,14 @@ after.remove_model("alpha", "record")
 after.add_model(ModelState("beta", "Adopted", fields=[("id", models.AutoField(primary_key=True))],
                            options={"db_table": "alpha_record"}))
 expect(CommandError, "still owned", lambda: DropGuardAutodetector(before, after).changes(loader.graph))
+try:
+    DropGuardAutodetector(before, after).changes(loader.graph)
+except CommandError as error:
+    message = str(error)
+assert message == (
+    "unsafe autodetected drop: table 'alpha_record' is still owned by beta.adopted on 'default'. "
+    "To proceed, keep a table another model may still own, or first change that owner."
+), message
 """)
 
 
@@ -453,7 +461,7 @@ with patch.object(connection, "cursor", side_effect=AssertionError("offline bind
     changes = {{"alpha": [migrations.Migration("drop", "alpha")]}}
     changes["alpha"][0].operations = [migrations.DeleteModel("Record")]
     removals = list(_changed_removals(before, changes))
-    [(index, refusal)] = _shared_table_drops(removals, after, sorted(connections))
+    [(index, _, refusal)] = _shared_table_drops(removals, after, sorted(connections))
     assert index == 0 and expected in refusal, refusal
 assert model._base_manager.count() == 0
 """)

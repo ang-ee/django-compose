@@ -498,16 +498,17 @@ a `RemoveField` or `DeleteModel`, also one among the database operations of a
 many-to-many table, or a model's table; explicit through models and generated columns
 own no storage of their own. Storage is empty when no row holds data in it, read
 without the model's managers: a nullable column is empty at NULL and a non-null
-column at its native default, while a database default cannot prove emptiness. A deleted table may still hold rows that
-`MigrationPolicy.retired_primary_keys(model, alias)` explicitly retires. Eligibility
-follows native model options and routers. Quoted identifiers resolve through backend
-semantics; uncertain storage identity and an unavailable eligible database cannot
-prove a drop safe ([supported cases](migrations.md#storage-identity)). A table that an
-active model still owns is never deleted, even when empty. An unmanaged, proxy or
-swapped model owns no table, since Django neither creates nor deletes one for it, so
-it keeps no table from deletion; the rows of that table remain protected. One EXISTS
-query proves present storage empty, so an
-unindexed column scans its table; rows are counted only for a refusal.
+column at its native default, while a database default cannot prove emptiness. A
+deleted table may still hold rows that `MigrationPolicy.retired_primary_keys(model,
+alias)` explicitly retires. Eligibility follows native model options and routers.
+Quoted identifiers resolve through backend semantics; uncertain storage identity and
+an unavailable eligible database cannot prove a drop safe
+([supported cases](migrations.md#storage-identity)). A table that an active model
+still owns is never deleted, even when empty. An unmanaged, proxy or swapped model
+owns no table, since Django neither creates nor deletes one for it, so it keeps no
+table from deletion; the rows of that table remain protected. One EXISTS query proves
+present storage empty, so an unindexed column scans its table; rows are counted only
+for a refusal.
 
 It runs at two points on these rules:
 
@@ -531,10 +532,9 @@ At `migrate`:
   Only a complete inventory shows that: PostgreSQL's catalog across every schema, in
   which a relation an extension owns, such as PostGIS's `spatial_ref_sys`, does not
   count, or SQLite's main database with nothing attached; on other backends the guard
-  always probes. `--fake-initial`
-  adoption finds tables, so it is probed. The shared-table rule needs no data and
-  still applies, from names alone, as authoring's offline check does: names only a
-  catalog could tell apart are refused.
+  always probes. `--fake-initial` adoption finds tables, so it is probed. The
+  shared-table rule needs no data and still applies, from names alone, as authoring's
+  offline check does: names only a catalog could tell apart are refused.
 - **Scope:** the history the project owns: the build record's `HISTORY_LABELS` and
   every project-source app, one whose migration package no installed distribution
   owns, as the retained-import audit's resolver classifies it. Django's and installed
@@ -563,9 +563,11 @@ At `migrate`:
   Rows the plan itself writes, such as a `RunPython` that fills storage a later
   operation of the plan drops, are not protected.
 - **Refusal:** one `CommandError` names every refused migration, operation, model,
-  column or table and row count, shared tables included, and nothing is migrated. Its
-  remedy for a shared table is to keep it or change that owner first, since declaring
-  the drop cannot help.
+  column or table and row count, shared tables included, and nothing is migrated, then
+  each remedy once. The remedy for a shared table is to keep it or change that owner
+  first, since declaring the drop cannot help; authoring and `retire_history --purge`
+  refuse it in the same words. Shared storage whose identity cannot be resolved needs
+  a name that can be.
 
 A migration declares a drop it intends with `IntendedRemoveField` or
 `IntendedDeleteModel` from `django_compose.operations`: native subclasses applied and
@@ -581,10 +583,10 @@ since a full `migrate` would reach the purge.
 Faked and backwards plans are not judged. `RunSQL` and other custom database code are
 not parsed: a drop they make is not judged, and storage they rename or create is
 absent before the plan under a name no native operation creates, so a later native
-removal of it is refused rather than skipped. Two native drops predate the
-guard and are not judged: `AlterOrderWithRespectTo` to `None` removes the `_order`
-column, and a model deletion drops its implicit many-to-many tables unprobed, which can
-lose rows only when the field sets `db_constraint=False`.
+removal of it is refused rather than skipped. Two native drops predate the guard and
+are not judged: `AlterOrderWithRespectTo` to `None` removes the `_order` column, and a
+model deletion drops its implicit many-to-many tables unprobed, which can lose rows
+only when the field sets `db_constraint=False`.
 
 Native dispatch must resolve this package's `makemigrations` and `migrate`, or a
 subclass of each. `ComposeConfig` is last in `INSTALLED_APPS`, so a same-named command

@@ -904,6 +904,29 @@ assert "alpha_record" in tables()
     )
 
 
+def test_shared_storage_the_guard_cannot_resolve_has_its_own_remedy(host):
+    root, run = host
+    # On a database that stores nothing, names alone cannot tell SQLite's
+    # case-insensitive alpha_record and ALPHA_RECORD apart.
+    upper = f'migrations.CreateModel(name="Twin", fields={FIELDS}, options={{"db_table": "ALPHA_RECORD"}})'
+    migration(root, "0002_twin", [state_only(upper)])
+    migration(root, "0003_drop", [DELETE_RECORD], after="0002_twin")
+    run(
+        PRELUDE
+        + """
+try:
+    migrate()
+except CommandError as error:
+    message = str(error)
+else:
+    raise AssertionError("an unresolvable shared table was deleted")
+assert "alpha.0003_drop (Delete model Record): cannot prove shared storage safe on 'default'" in message
+assert "To proceed, give the table a name the guard can resolve" in message, message
+assert "keep a table another model may still own" not in message, message
+"""
+    )
+
+
 def test_receiver_is_disconnected_after_refused_runs(host):
     root, run = host
     migration(root, "0002_drop", [REMOVE_OLD])

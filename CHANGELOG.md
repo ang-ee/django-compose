@@ -24,7 +24,10 @@
   system check `django_compose.E002`; `provision` refuses it before any database work.
 - `retire_history --purge` applies only the retired label's own migrations.
 - The drop guard proves storage empty with one EXISTS query and counts rows only for
-  a refusal. Its shared-table refusal now reads "unsafe table deletion".
+  a refusal. Deleting a table another model still owns is refused in the same words,
+  with the same remedy, at `makemigrations`, `migrate` and `retire_history --purge`:
+  keep the table, or first change that owner. A table whose identity the guard cannot
+  resolve gets its own remedy.
 - **Upgrade impact:** a host whose unapplied history removes a column or table
   that still holds data is now refused at `migrate` and `provision`, which is the
   point. Review each named removal: keep the storage, or move its data and write the

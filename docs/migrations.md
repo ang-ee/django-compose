@@ -248,8 +248,9 @@ Ordinary and double-quoted identifiers use Django's backend interpretation.
 PostgreSQL checks account for quoted case, explicit schemas and `search_path`;
 SQLite checks use its native case and temporary-table visibility rules. Attached
 SQLite databases, unsupported quoting or namespaces, excessive identifier lengths
-and otherwise unprovable identity cannot prove a drop safe. Use reviewed
-explicit migrations for these cases. Other backends retain native introspection
+and otherwise unprovable identity cannot prove a drop safe, and the refusal names
+the remedy: declare a drop whose rows are in question, or give a table that others
+may share a name the guard can resolve. Other backends retain native introspection
 with conservative refusal of uncertain identity; the real-backend regression
 coverage is SQLite and PostgreSQL.
 

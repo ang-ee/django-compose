@@ -188,8 +188,8 @@ def _storage_identifier(connection: BaseDatabaseWrapper, identifier: str) -> tup
         )
     ):
         raise ImproperlyConfigured(
-            f"cannot resolve storage identifier {identifier!r} on {connection.alias!r}; "
-            "use a reviewed explicit migration for unsupported identifier syntax, length or namespace"
+            f"cannot resolve storage identifier {identifier!r} on {connection.alias!r}: "
+            "unsupported identifier syntax, length or namespace"
         )
     return convert(namespace), convert(name)
 
@@ -291,17 +291,41 @@ def _changed_removals(state: ProjectState, changes: Mapping[str, list[Migration]
                     yield operation, state.apps.get_model(label, removed[0]), removed[1]
 
 
+_KEEP_SHARED = "keep a table another model may still own, or first change that owner"
+_RESOLVE = (
+    "give the table a name the guard can resolve and tell apart from every other table on that database"
+)
+
+
+def _unsafe(prefix: str, refusals: Iterable[tuple[str, str]], outcome: str = "") -> CommandError:
+    """One error naming every ``(remedy, refusal)``, then each distinct remedy once, in order."""
+    refusals = tuple(refusals)
+    remedies = dict.fromkeys(remedy for remedy, _ in refusals)
+    return CommandError(
+        f"{prefix}: "
+        + "; ".join(refusal for _, refusal in refusals)
+        + f".{outcome} To proceed, "
+        + "; ".join(remedies)
+        + "."
+    )
+
+
 def _shared_table_drops(
     removals: Sequence[_Removal], after: ProjectState, aliases: Iterable[str], *, database: bool = False
-) -> list[tuple[int, str]]:
-    """Each removal, by position, that would drop a table a model of ``after`` still owns."""
+) -> list[tuple[int, str, str]]:
+    """Each removal, by position, that would drop a table a model of ``after`` still owns.
+
+    Each comes with its remedy: declaring the drop cannot help a table that is not the
+    removed model's alone, and storage whose identity cannot be resolved needs a name
+    that can be.
+    """
     owners = tuple(
         (owner, storage)
         for owner in after.apps.get_models(include_swapped=True)
         for storage in _model_storage(owner)
     )
     aliases = tuple(aliases)
-    refusals: list[tuple[int, str]] = []
+    refusals: list[tuple[int, str, str]] = []
     for index, (operation, model, field) in enumerate(removals):
         dropped = tuple(_model_storage(model, removed_field=field))
         if not dropped:
@@ -330,8 +354,7 @@ def _shared_table_drops(
                         ):
                             if not database:
                                 raise ImproperlyConfigured(
-                                    f"cannot resolve shared storage {table!r} and "
-                                    f"{active_table!r} offline; use a reviewed explicit migration"
+                                    f"cannot resolve shared storage {table!r} and {active_table!r} offline"
                                 )
                             with connection.cursor() as cursor:
                                 physical = _storage_identity(connection, table, cursor)
@@ -340,15 +363,16 @@ def _shared_table_drops(
                                 ):
                                     remaining.add(active_storage._meta.label_lower)
                     if remaining:
+                        owners_text = ", ".join(sorted(remaining))
                         refusals.append(
                             (
                                 index,
-                                f"table {table!r} is still owned by "
-                                f"{', '.join(sorted(remaining))} on {alias!r}",
+                                _KEEP_SHARED,
+                                f"table {table!r} is still owned by {owners_text} on {alias!r}",
                             )
                         )
             except (DatabaseError, ImproperlyConfigured) as error:
-                refusals.append((index, f"cannot prove shared storage safe on {alias!r}: {error}"))
+                refusals.append((index, _RESOLVE, f"cannot prove shared storage safe on {alias!r}: {error}"))
     return refusals
 
 
@@ -489,6 +513,9 @@ def _proofs(
             yield alias, None
 
 
+_AUTHOR = "declare a reviewed cutover migration before native makemigrations"
+
+
 class DropGuardAutodetector(MigrationAutodetector):
     """Drop guard for authoring: every routed database proves autodetected drops empty.
 
@@ -510,23 +537,20 @@ class DropGuardAutodetector(MigrationAutodetector):
         changes = super().changes(graph, trim_to_apps, convert_apps, migration_name)
         removals = tuple(_changed_removals(self.from_state, changes))
         aliases = sorted(connections)
-        refusals = [
-            refusal for _, refusal in _shared_table_drops(removals, self.to_state, aliases, database=True)
-        ]
         policies = _policies()
-        refusals.extend(
-            refusal
+        refusals = [
+            (_AUTHOR, refusal)
             for operation, model, field in removals
             if (dropped := _dropped(model, field, policies)) is not None
             for _, refusal in _proofs(operation, model, model, dropped, aliases)
             if refusal is not None
+        ]
+        refusals.extend(
+            (remedy, refusal)
+            for _, remedy, refusal in _shared_table_drops(removals, self.to_state, aliases, database=True)
         )
         if refusals:
-            raise CommandError(
-                "unsafe autodetected drop: "
-                + "; ".join(refusals)
-                + ". Declare a reviewed cutover migration before native makemigrations."
-            )
+            raise _unsafe("unsafe autodetected drop", refusals)
         return changes
 
 
@@ -538,7 +562,6 @@ _DECLARE = (
     "keep the storage, or move its data and declare the drop in that migration of the "
     "project's history with django_compose.operations.IntendedRemoveField or IntendedDeleteModel"
 )
-_KEEP_SHARED = "keep a table another model may still own, or first change that owner"
 
 
 class _Storage:
@@ -834,16 +857,11 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
     removals: list[tuple[Migration, _Removal]] = []
     refusals: list[tuple[str, str]] = []
 
-    def refuse(migration: Migration, operation: Operation, refusal: str, *, shared: bool = False) -> None:
+    def refuse(migration: Migration, operation: Operation, refusal: str, remedy: str | None = None) -> None:
         label = migration.app_label
-        if shared:
-            # Declaring the drop cannot help: the table is not the removed model's alone.
-            remedy = _KEEP_SHARED
-        elif migration.name.endswith(f"_{_PURGE}"):
+        if remedy is None and migration.name.endswith(f"_{_PURGE}"):
             remedy = f"apply the {label!r} purge on this deployment with retire_history {label} --purge"
-        else:
-            remedy = _DECLARE
-        refusals.append((remedy, f"{label}.{migration.name} ({operation.describe()}): {refusal}"))
+        refusals.append((remedy or _DECLARE, f"{label}.{migration.name} ({operation.describe()}): {refusal}"))
 
     def rendered(state: ProjectState, label: str, name: str) -> Any:
         apps = _rendered(state)
@@ -918,22 +936,13 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             + ", ".join(f"{label}.{name}" for label, name in unwalked)
             + "; nothing was migrated"
         )
-    for index, refusal in _shared_table_drops(
+    for index, remedy, refusal in _shared_table_drops(
         [removal for _, removal in removals], state, (using,), database=probe
     ):
         migration, (operation, _, _) = removals[index]
-        refuse(migration, operation, refusal, shared=True)
+        refuse(migration, operation, refusal, remedy)
     if refusals:
-        given = {remedy for remedy, _ in refusals}
-        remedies = [remedy for remedy in (_DECLARE, _KEEP_SHARED) if remedy in given]
-        remedies.extend(sorted(given - {_DECLARE, _KEEP_SHARED}))
-        raise CommandError(
-            "unsafe migration drop: "
-            + "; ".join(refusal for _, refusal in refusals)
-            + ". Nothing was migrated. To proceed, "
-            + "; ".join(remedies)
-            + "."
-        )
+        raise _unsafe("unsafe migration drop", refusals, " Nothing was migrated.")
 
 
 def _forget_history(labels: Iterable[str], *, packages: Mapping[str, Path] | None = None) -> None:
@@ -1147,7 +1156,9 @@ def retire_history(label: str, *, purge: bool = False) -> None:
             )
             removals = tuple(_changed_removals(before, changes))
             if shared := _shared_table_drops(removals, after, sorted(connections), database=True):
-                raise CommandError("unsafe table deletion: " + "; ".join(refusal for _, refusal in shared))
+                raise _unsafe(
+                    "unsafe autodetected drop", ((remedy, refusal) for _, remedy, refusal in shared)
+                )
             for migration in changes.get(label, ()):
                 writer = MigrationWriter(migration, include_header=False)
                 path = Path(writer.path)

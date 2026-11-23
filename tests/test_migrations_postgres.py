@@ -135,7 +135,7 @@ def _drive(environment: Path) -> None:
         changes["alpha"][0].operations = [migrations.DeleteModel("Record")]
         with patch.object(connection, "cursor", side_effect=AssertionError("offline DB query")):
             offline = _shared_table_drops(list(_changed_removals(before, changes)), after, connections)
-            assert offline and all("offline" in refusal for _, refusal in offline), offline
+            assert offline and all("offline" in refusal for _, _, refusal in offline), offline
         with connection.cursor() as cursor:
             cursor.execute('SET search_path TO "right", "left", public')
         assert DropGuardAutodetector(before, after).changes(graph)["alpha"]
@@ -165,7 +165,7 @@ def _drive(environment: Path) -> None:
         assert active._base_manager.count() == 0
         with patch.object(connection, "cursor", side_effect=AssertionError("offline namespace query")):
             offline = _shared_table_drops(list(_changed_removals(before, changes)), after, connections)
-            assert offline and all("offline" in refusal for _, refusal in offline), offline
+            assert offline and all("offline" in refusal for _, _, refusal in offline), offline
         # Identical names on disjoint aliases protect only their own storage.
         before, graph = state("alias_records", '"alias_records"')
         model = before.apps.get_model("alpha", "Record")
