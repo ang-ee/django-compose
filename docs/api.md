@@ -23,11 +23,11 @@ The launcher exposes these Django management commands:
 | Command | Purpose | Guide |
 | --- | --- | --- |
 | `compose` | Generate output; `--check` verifies output/history without writes; `--if-stale` skips a current build | [Lifecycle](SPEC.md#setup-lifecycle) |
-| `makemigrations`, `migrate` | Author and apply ordinary Django migrations | [Migrations](migrations.md) |
+| `makemigrations`, `migrate` | Author and apply ordinary Django migrations; both refuse undeclared drops of stored data | [Migrations](migrations.md) |
 | `runserver` | Compose before Django's development-server reloads | [Development](configuration.md#serve-the-project) |
 | `provision` | Apply migrations and app preparation hooks; `--check` verifies readiness | [Provisioning](provisioning.md) |
 | `check_migrations` | Compare models/history; `--imports` audits retained Python dependencies | [History checks](migrations.md#disable-delete-or-uninstall) |
-| `retire_history`, `reset_migration_history` | Explicit, guarded history maintenance | [Advanced migrations](migrations.md#advanced-destructive-changes-and-history-cutoffs) |
+| `retire_history`, `reset_migration_history` | Explicit, guarded history maintenance | [History cutoffs](migrations.md#history-cutoffs) |
 
 Build before serving; the serving process verifies output rather than rebuilding.
 `DJANGO_COMPOSE_MODE` is `write`, `check`, or absent for serving. Use the launcher
@@ -138,5 +138,10 @@ project startup normally delegates verification to `configure`.
 - `migrations.check_native_history(apps, *, labels)` compares effective native
   state without database access; `migrations.history_labels()` reads retained
   receipt labels. Projects author schema/data work through Django's native history.
+- `operations.IntendedRemoveField` and `operations.IntendedDeleteModel` declare a
+  drop of stored data that a migration intends, such as after a `RunPython` move;
+  see [intended drops](migrations.md#declare-an-intended-drop).
+  `migrations.check_plan_drops(plan, *, using, apps)` is the proof `migrate` runs
+  from `pre_migrate`.
 - The optional `django_compose.typing` mypy plugin analyzes composed models through
   django-stubs. See [installation, configuration and limitations](dependencies.md#advanced-typing).

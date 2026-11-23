@@ -199,6 +199,70 @@ explicit migrations for these cases. Other backends retain native introspection
 with conservative refusal of uncertain identity; the real-backend regression
 coverage is SQLite and PostgreSQL.
 
+### Drops at migrate
+
+`migrate` applies the same proof to the plan it is about to run, so a removal
+migration authored against another database, copied in or written by hand cannot
+drop stored data unnoticed. Before any operation runs, also under `--skip-checks`
+and therefore in `provision`, every forward `RemoveField` and `DeleteModel` in the
+plan, including `SeparateDatabaseAndState` database operations, must find its
+storage empty on the database being migrated. The same emptiness rules and
+retirement exemptions apply, and Django's routing decides as it would at that point
+of the plan. The storage checked is the column or table the model or field had
+before the plan, followed through `RenameModel` and `RenameField`. Storage the plan
+itself creates needs no proof, and storage that is already absent is skipped. One
+error names every refused migration, operation, model, column or table and row
+count, and nothing is migrated. `migrate --fake` runs no operations and is not
+checked; neither is unapplying migrations to an explicit target. `RunSQL` and other
+custom database code are not inspected.
+
+### Declare an intended drop
+
+A migration may first move data elsewhere and then remove the old storage, which
+still holds that data when `migrate` starts. Declare that drop by writing the
+removal with `IntendedRemoveField` or `IntendedDeleteModel` from
+`django_compose.operations` instead of the native operation:
+
+```python
+from django.db import migrations
+from django_compose.operations import IntendedRemoveField
+
+
+def move_prices(apps, schema_editor):
+    Item = apps.get_model("catalog", "Item")
+    Price = apps.get_model("catalog", "Price")
+    alias = schema_editor.connection.alias
+    Price._base_manager.using(alias).bulk_create(
+        Price(item_id=pk, amount=amount)
+        for pk, amount in Item._base_manager.using(alias).values_list("pk", "price")
+    )
+
+
+class Migration(migrations.Migration):
+    dependencies = [("catalog", "0007_price")]
+    operations = [
+        migrations.RunPython(move_prices, migrations.RunPython.noop),
+        IntendedRemoveField(model_name="item", name="price"),
+    ]
+```
+
+Both are native subclasses: Django applies and serializes them exactly like
+`RemoveField` and `DeleteModel`, and squashing keeps them. A declaration covers
+only its own operation. Other removals in the same migration, or the same storage
+removed by another migration, remain guarded. Operations that drop no stored data,
+such as `RemoveConstraint`, stay native and are not judged. A `RunPython` that copies
+data may leave the source holding it; the declaration is what allows the drop. The
+import becomes part of retained history; the module imports only Django.
+
+`makemigrations` keeps refusing to autodetect a drop while an eligible database
+still holds the data. Author the cutover migration first, for example from
+`makemigrations --empty`, so the models and history agree. On upgrade, a host whose
+unapplied history removes storage that still holds data is refused at `migrate` and
+`provision` until each removal is reviewed: keep the storage, or move the data and
+declare the drop.
+
+### History cutoffs
+
 `retire_history <label>` is an explicit cutoff for a history-only app. It requires
 consistent, fully applied history across the configured databases selected by
 Django's native model eligibility and routers, and no retained migrations in
@@ -213,10 +277,12 @@ Its optional `--purge` authors and applies a final native deletion migration
 across the same database scope before retirement. It refuses deletion of tables
 still owned by active models before authoring or applying changes. A failed
 application retains that migration for retry and does not mark retirement
-complete. Successful retirement updates the build record under the normal writer
-lock; the next compose removes the history-only configuration. Removing the
-retired migration package from version control is a separate coordinated cutoff
-decision.
+complete. The purge is the explicit decision to drop that data: `migrate` and
+`provision` refuse an unapplied purge migration while its tables hold rows, so
+apply it on each deployment with `retire_history <label> --purge`. Successful
+retirement updates the build record under the normal writer lock; the next
+compose removes the history-only configuration. Removing the retired migration
+package from version control is a separate coordinated cutoff decision.
 
 `reset_migration_history` replaces an explicitly selected, fully applied,
 model-clean history with fresh initial migrations. It refuses unsafe cross-app

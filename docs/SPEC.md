@@ -476,6 +476,21 @@ and unavailable eligible databases cannot prove safety. Explicit integration-own
 row exemptions use `MigrationPolicy`. See the [storage proof's supported cases
 and limits](migrations.md#advanced-destructive-changes-and-history-cutoffs).
 
+Native `migrate` applies the same storage proof to its plan from `pre_migrate`,
+before the syncdb phase and the first operation, regardless of `--skip-checks`.
+`migrations.check_plan_drops(plan, *, using, apps)` judges every forward
+`RemoveField` and `DeleteModel`, including nested `SeparateDatabaseAndState`
+database operations, on the alias being migrated. Each operation is routed with
+the model of the plan's state at that operation; the probed storage is the one its
+model or field had before the plan, followed through native `RenameModel` and
+`RenameField`. Storage introduced by the plan needs no proof and absent storage is
+skipped. One EXISTS query proves present storage empty. Any refusal raises one
+`CommandError` naming every refused migration, operation, model, column or table
+and row count, before anything is migrated. `django_compose.operations` provides
+`IntendedRemoveField` and `IntendedDeleteModel`, native subclasses declaring a drop
+their migration intends; only that operation is exempt. Faked and backwards plans
+are not judged. See [proposal 0005](proposals/0005-migrate-time-drop-guard.md).
+
 Retirement requires consistent fully applied history across all configured
 migration-relevant aliases and refuses retained incoming cross-app dependencies.
 The alias scope includes native data-operation routing hints; custom database

@@ -18,6 +18,10 @@ agreement and retained imports, checks consistent native migration history, runs
 and runs Django's database checks before committing `complete`. All commands and
 hooks share the same process and command IO. Native command system-check policies
 are preserved, with migration checks deliberately deferred to the final check.
+Skipping system checks does not skip the
+[migrate-time drop guard](migrations.md#drops-at-migrate):
+a plan that would drop stored data without a declared intent fails the migrate step
+before any operation runs, and provision stays `in_progress`.
 PostgreSQL refreshes statistics for existing managed tables (including implicit
 many-to-many tables) belonging to apps migrated forward.
 
