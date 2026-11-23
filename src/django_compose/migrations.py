@@ -558,12 +558,14 @@ class _Storage:
         state: ProjectState,
         label: str,
         removed: tuple[str, str | None],
+        routed: Any,
         dropped: _Dropped,
         policies: tuple[MigrationPolicy, ...],
     ) -> tuple[Any, _Dropped] | None:
-        """The model of ``state`` naming ``dropped`` as stored before the plan, and its proof.
+        """The model naming ``dropped`` as stored before the plan, and its proof.
 
-        ``None`` means the plan itself creates that storage.
+        ``routed`` is the removed model as ``state`` defines it. ``None`` means the
+        plan itself creates that storage.
         """
         table = self.table(dropped.table)
         column = None if dropped.column is None else self.column(dropped.table, dropped.column)
@@ -571,7 +573,7 @@ class _Storage:
             return None
         name, field = removed
         if (table, column) == (dropped.table, dropped.column):
-            return state.apps.get_model(label, name), dropped
+            return routed, dropped
         # Re-render the model under the names its storage had before the plan.
         renamed = state.clone()
         model_state = renamed.models[label, name.lower()]
@@ -590,8 +592,21 @@ class _Storage:
         return model, cast(_Dropped, _dropped(model, field, policies))
 
 
-def _renamed(operation: Operation) -> tuple[str, str, dict[str, str]] | None:
-    """The model whose storage a native operation may rename: before, after, renamed fields."""
+def _rendered(state: ProjectState, label: str, name: str) -> Any:
+    """The model ``name`` of ``state``, rendered from a clone so ``state`` stays unrendered.
+
+    Django keeps a rendered state current by re-rendering related models at every
+    later operation, which on a densely related history costs more than a fresh render.
+    """
+    return state.clone().apps.get_model(label, name)
+
+
+def _renamed(operation: Operation, state: ProjectState, label: str) -> tuple[str, str, dict[str, str]] | None:
+    """The model whose storage a native operation may rename: before, after, renamed fields.
+
+    An ``AlterField`` keeps its model's table, and its field's column or many-to-many
+    table unless what names it changes, which ``state`` shows without rendering.
+    """
     if isinstance(operation, RenameModel):
         return operation.old_name, operation.new_name, {}
     if isinstance(operation, AlterModelTable):
@@ -599,6 +614,16 @@ def _renamed(operation: Operation) -> tuple[str, str, dict[str, str]] | None:
     if isinstance(operation, RenameField):
         return operation.model_name, operation.model_name, {operation.old_name: operation.new_name}
     if isinstance(operation, AlterField):
+        model = state.models.get((label, operation.model_name_lower))
+        if model is not None and operation.name in model.fields:
+            names = []
+            for definition in (model.fields[operation.name], operation.field):
+                field: Any = definition.clone()
+                field.set_attributes_from_name(operation.name)
+                through = (field.db_table, field.remote_field.through) if field.many_to_many else None
+                names.append((field.column, through))
+            if names[0] == names[1]:
+                return None
         return operation.model_name, operation.model_name, {}
     return None
 
@@ -666,9 +691,12 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
     ``migrate`` calls this from ``pre_migrate`` with the plan and alias it is about
     to apply, before any operation runs. The specification's "Drop guard" section
     defines the rule. On an alias that stores nothing it returns at once, before
-    classifying apps or walking the plan. The pre-plan state is the one native
-    ``migrate`` builds, through the private ``MigrationExecutor._create_project_state``,
-    on the graph native ``migrate`` planned with: re-check both on each Django upgrade.
+    classifying apps or walking the plan. The walk keeps its state unrendered and
+    renders a clone only where it needs a model: at a guarded removal, at a rename
+    that can change a storage name, and once at the end. The pre-plan state is the
+    one native ``migrate`` builds, through the private
+    ``MigrationExecutor._create_project_state``, on the graph native ``migrate``
+    planned with: re-check both on each Django upgrade.
     """
     forwards = {
         (migration.app_label, migration.name): migration for migration, backwards in plan if not backwards
@@ -709,21 +737,25 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                 continue
             removed = _removal(operation)
             if database and removed is not None and label in guarded:
-                routed = state.apps.get_model(label, removed[0])
+                routed = _rendered(state, label, removed[0])
                 removals.append((migration, (operation, routed, removed[1])))
                 dropped = _dropped(routed, removed[1], policies)
-                stored = None if dropped is None else storage.stored(state, label, removed, dropped, policies)
+                stored = (
+                    None
+                    if dropped is None
+                    else storage.stored(state, label, removed, routed, dropped, policies)
+                )
                 if dropped is not None and stored is not None:
                     declared = isinstance(operation, _INTENDED)
                     for _, refusal in _proofs(operation, routed, *stored, (using,), declared=declared):
                         if refusal is not None:
                             refuse(migration, operation, refusal)
                         storage.end(dropped)
-            renamed = _renamed(operation) if database else None
-            before_model = state.apps.get_model(label, renamed[0]) if renamed else None
+            renamed = _renamed(operation, state, label) if database else None
+            before_model = _rendered(state, label, renamed[0]) if renamed else None
             operation.state_forwards(label, state)
             if renamed:
-                after_model = state.apps.get_model(label, renamed[1])
+                after_model = _rendered(state, label, renamed[1])
                 # Django renames storage only where the operation migrates the model
                 # it produces: never for a swapped model, nor on an alias routed away.
                 if operation.allow_migrate_model(using, after_model):

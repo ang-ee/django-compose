@@ -1120,3 +1120,27 @@ with override_settings(DATABASE_ROUTERS=[Disjoint()]):
     assert "alpha_record" in tables("other")
 """
     )
+
+
+def test_the_walk_renders_a_model_only_where_it_needs_one(host):
+    root, run = host
+
+    def alter(**options):
+        extra = "".join(f", {key}={value!r}" for key, value in options.items())
+        field = f'models.CharField(max_length=80, default=""{extra})'
+        return f'migrations.AlterField(model_name="record", name="old", field={field})'
+
+    migration(root, "0002_alter", [alter(), alter(db_column="legacy"), add_field("spare")])
+    migration(root, "0003_drop", [remove_field("spare")], after="0002_alter")
+    run(
+        PRELUDE
+        + """
+from django_compose import migrations as guard
+seed(old="kept")
+with patch.object(guard, "_rendered", wraps=guard._rendered) as rendered:
+    migrate()
+# Widening renames nothing; the column move renders before and after it; the removal once.
+assert rendered.call_count == 3, rendered.call_args_list
+assert columns() == ["id", "legacy"]
+"""
+    )
