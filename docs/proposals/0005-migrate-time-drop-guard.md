@@ -20,18 +20,23 @@ choices behind it.
   emptiness rules, row retirement and shared-table protection of the authoring guard.
   The pre-plan state comes from the executor's private `_create_project_state`, the
   same call native `migrate` makes; it is re-checked on each Django upgrade.
-- **Scope.** Only history that the composition owns, the build record's
-  `HISTORY_LABELS`, is judged. Django's own history, such as `contenttypes`' removal of
-  its legacy `name` column, and a third-party app's history cannot be edited by a host,
-  and those apps cannot declare an intended drop without depending on this package.
-  Their history is their owners' responsibility, so the remedy text only ever asks for
-  changes to the project's own history.
-- **Storage without an origin is probed.** A state-only `CreateModel`, as Django
-  documents for moving a model between apps or putting an M2M behind an explicit
-  through, and `--fake-initial` adoption both give existing data a model that the plan
-  introduces. The guard probes that storage as the plan names it; storage absent
-  before the plan is skipped, and storage an earlier removal of the plan ended is
-  exempt.
+- **Scope.** `migrate` guards the same apps whose history authoring guards: those
+  the project owns, the build record's `HISTORY_LABELS` and its project-source apps,
+  classified by the retained-import audit's resolver rather than a new classifier.
+  Django's own history, such as `contenttypes`' removal of its legacy `name` column,
+  and an installed app's history cannot be edited by a host, and those apps cannot
+  declare an intended drop without depending on this package. Their history is their
+  owners' responsibility, so the remedy text only ever asks for changes to the
+  project's own history.
+- **Storage is followed by name.** A state-only `CreateModel`, as Django documents
+  for moving a model between apps or putting an M2M behind an explicit through, and
+  `--fake-initial` adoption both give existing data a model that the plan introduces,
+  and a later database rename can move it. Tracking model identities followed
+  neither, so the walk maps each storage name the plan's database operations change
+  back to its name before the plan and probes that. A name vacated by an earlier
+  rename or removal of the plan names storage the plan creates.
+- **Fail closed.** The walk uses the graph native `migrate` planned with, including
+  for a squash-replaced target; a planned migration it cannot follow is refused.
 - **Declaration.** `django_compose.operations` provides `IntendedRemoveField` and
   `IntendedDeleteModel`. A `Migration` attribute naming `(model, field)` pairs was
   rejected: it states each fact twice, and the operation and the list must then be
@@ -46,14 +51,15 @@ choices behind it.
   migrations, leaving other apps' pending history to `migrate`.
 - **Fail fast.** `ComposeConfig` must be last in `INSTALLED_APPS`, so another app's
   `migrate` would silently switch the guard off. System check `django_compose.E002`
-  and the provision preflight refuse it.
+  and the provision preflight refuse it. The receiver wraps `execute`, not `handle`,
+  so a subclass that replaces `handle` keeps the guard.
 - **Out of scope.** Backwards plans name an explicit target, and the authoring guard
   never covered them. `--fake` runs no operations. `RunSQL` and custom database code
   are not parsed. The specification lists the native drops that predate the guard.
 
 ## Compatibility
 
-Hosts whose unapplied composed history removes storage that still holds data are now
+Hosts whose unapplied history removes storage that still holds data are now
 refused at `migrate` and `provision`; that is the point. The
 [changelog](../../CHANGELOG.md) states the upgrade steps.
 

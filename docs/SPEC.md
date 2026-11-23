@@ -349,8 +349,10 @@ the same rule for native dispatch.
 
 ## Integration protocols
 
-Ordered `COMPOSE_INTEGRATIONS` classes are instantiated once during build and
-implement one or more independent protocols from `django_compose.declarations`:
+Ordered `COMPOSE_INTEGRATIONS` classes are instantiated once during build, and the
+[drop guard](#drop-guard) instantiates them once per run for their `MigrationPolicy`
+exemptions. They implement one or more independent protocols from
+`django_compose.declarations`:
 
 - `ModelDeclarationHook.model_declaration(composition, source) -> ModelDeclaration`.
 - `ArtifactHook.external_root`, `phase` (`"models"` or `"ready"`) and
@@ -513,16 +515,24 @@ It runs at two points on these rules:
 - **Applying:** the package's `migrate` judges the plan it is about to run from
   `pre_migrate`, before the syncdb phase and the first operation, also under
   `--skip-checks`, through `migrations.check_plan_drops(plan, *, using)`. It judges a
-  forward plan on the alias being migrated, and only history that the composition owns:
-  the build record's `HISTORY_LABELS`. Django's and other apps' history belongs to its
-  owners. Each removal is routed with its model as the plan's state has it at that
-  operation and drops what that state defines. Its data is looked up as the database
-  holds it before the plan: in the storage its model or field had then, followed
-  through native `RenameModel` and `RenameField`, and otherwise in the storage the plan
-  names. Storage absent before the plan is skipped, as is storage that an earlier
-  removal of the same plan ended. A table owned at the end of the plan is not deleted.
-  One `CommandError` names every refused migration, operation, model, column or table
-  and row count, and nothing is migrated.
+  forward plan on the alias being migrated, on the graph native `migrate` planned with,
+  including for a squash-replaced target, in the order the executor applies it. A
+  planned migration the walk cannot follow is refused by name.
+- **Scope at `migrate`:** the same apps whose history authoring guards, those the
+  project owns. That is the build record's `HISTORY_LABELS` and every project-source
+  app: one whose migration package no installed distribution owns, as the
+  retained-import audit's resolver classifies it. Django's and installed third-party
+  apps' history belongs to their owners. A project installed as a distribution keeps
+  its composed history judged, but its other apps then classify as installed.
+- **Probe at `migrate`:** each removal is routed and defined by the plan's state at
+  that operation, and its storage is probed under the name it had before the plan.
+  The walk follows every rename the plan's database operations make, whoever owns
+  them: `AlterModelTable`, `RenameModel`, `RenameField` and `AlterField`. Storage
+  absent before the plan is skipped. So is storage under a name that an earlier rename
+  or removal of the same plan vacated, which the plan itself creates. A table owned at
+  the end of the plan is not deleted. One `CommandError` names every refused migration,
+  operation, model, column or table and row count, shared tables included, and nothing
+  is migrated.
 
 A migration declares a drop it intends with `IntendedRemoveField` or
 `IntendedDeleteModel` from `django_compose.operations`: native subclasses applied and
@@ -531,18 +541,22 @@ Squashing folds a declared field removal into a following native `DeleteModel`, 
 stays guarded. Only the declaring operation is exempt. A purge migration authored by
 `retire_history --purge` declares nothing: purging retired data is a per-deployment
 decision that `retire_history <label> --purge` applies, and a refusal names that
-command. The purge itself applies only the retired label's migrations.
+command. The purge itself applies only the retired label's migrations, and names a
+targeted `migrate <app> <name>` for any other app's pending migration in its chain,
+since a full `migrate` would reach the purge.
 
 Faked and backwards plans are not judged, nor is `RunSQL` or other custom database
-code. Two native drops predate the guard and are not judged: `AlterOrderWithRespectTo`
-to `None` removes the `_order` column, and a model deletion drops its implicit
-many-to-many tables unprobed, which can lose rows only when the field sets
-`db_constraint=False`.
+code, and a rename that `RunSQL` makes is not followed. Two native drops predate the
+guard and are not judged: `AlterOrderWithRespectTo` to `None` removes the `_order`
+column, and a model deletion drops its implicit many-to-many tables unprobed, which can
+lose rows only when the field sets `db_constraint=False`.
 
 Native dispatch must resolve this package's `makemigrations` and `migrate`, or a
 subclass of each. `ComposeConfig` is last in `INSTALLED_APPS`, so a same-named command
 of any other app wins and would switch the guard off. System check
 `django_compose.E002` reports it, and `provision` refuses it before any database work.
+The guard wraps the command's `execute`, so a subclass that replaces `handle` keeps it;
+a subclass that overrides `execute` without calling it passes E002 but has no guard.
 [Proposal 0005](proposals/0005-migrate-time-drop-guard.md) records these decisions.
 
 ## Database preparation and readiness

@@ -179,14 +179,15 @@ The [drop guard](SPEC.md#drop-guard) refuses a migration that would remove a col
 or table still holding data. `makemigrations` applies it to what it autodetects, on
 every eligible configured database. `migrate`, and therefore `provision`, applies it
 to the plan it is about to run, before any operation and also under `--skip-checks`.
-At `migrate` it judges the project's composed history only; Django's own migrations
-and those of other apps are their owners' responsibility. A refusal names each
+At `migrate` it judges the history the project owns, its composed history and its
+own apps' migrations; Django's migrations and those of installed apps are their
+owners' responsibility. A refusal names each
 migration, operation, model, column or table and row count, and nothing is migrated.
 Integration-owned row exemptions use `MigrationPolicy`. Implement required data
 cutovers as reviewed migrations. Proving an unindexed column empty scans its table.
 The specification lists what the guard does not judge.
 
-On upgrade, a host whose unapplied composed history removes storage that still holds
+On upgrade, a host whose unapplied history removes storage that still holds
 data is refused at `migrate` and `provision` until each named removal is reviewed:
 keep the storage, or move the data and declare the drop.
 

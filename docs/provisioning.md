@@ -19,7 +19,7 @@ and runs Django's database checks before committing `complete`. All commands and
 hooks share the same process and command IO. Native command system-check policies
 are preserved, with migration checks deliberately deferred to the final check.
 Skipping system checks does not skip the [drop guard](SPEC.md#drop-guard): a plan
-whose composed history would drop stored data without a declared intent fails the
+whose project-owned history would drop stored data without a declared intent fails the
 migrate step before any operation runs, and provision stays `in_progress`. Before any
 database work, provision also refuses when another app's `migrate` or `makemigrations`
 command shadows this package's, which would switch the guard off; system check
