@@ -8,7 +8,7 @@ import stat
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from django.apps import apps as global_apps
 from django.apps.registry import Apps
@@ -307,13 +307,126 @@ def _shared_table_drops(
                         ) from error
 
 
-class DropGuardAutodetector(MigrationAutodetector):
-    """Require every routed database to prove autodetected dropped storage empty.
+def _removal(operation: Operation) -> tuple[str, str | None] | None:
+    """The model and field a native removal drops; a deleted model drops no single field."""
+    if isinstance(operation, RemoveField):
+        return operation.model_name, operation.name
+    if isinstance(operation, DeleteModel):
+        return operation.name, None
+    return None
+
+
+class _Dropped(NamedTuple):
+    """Storage a native removal drops, and its rows that still hold data."""
+
+    table: str
+    column: str | None
+    rows: Callable[[str], Any]
+
+
+def _dropped(model: Any, field: str | None) -> _Dropped | None:
+    """Apply the shared emptiness rules to a deleted model or one removed field.
 
     Null columns are empty at NULL; non-null columns use their native default.
     A database default cannot prove emptiness. Explicit through models and
     generated columns own no independently dropped storage. Integrations may
     explicitly retire rows of a deleted table; other rows remain protected.
+    """
+    if field is None:
+        integrations = tuple(
+            integration
+            for integration in resolve_integrations(getattr(settings, "COMPOSE_INTEGRATIONS", ()))
+            if isinstance(integration, MigrationPolicy)
+        )
+
+        def remaining_rows(alias: str) -> Any:
+            retired = {
+                pk for integration in integrations for pk in integration.retired_primary_keys(model, alias)
+            }
+            return model._base_manager.exclude(pk__in=retired)
+
+        return _Dropped(model._meta.db_table, None, remaining_rows)
+    removed = model._meta.get_field(field)
+    if removed.many_to_many:
+        through = next(_model_storage(model, removed_field=field), None)
+        if through is None:
+            return None
+        return _Dropped(through._meta.db_table, None, lambda alias: through._base_manager.all())
+    if not removed.concrete or removed.generated:
+        return None
+    empty = None if removed.null else removed.get_default()
+    query = model._base_manager.all()
+    if empty is None:
+        query = query.exclude(**{f"{removed.attname}__isnull": True})
+    elif not isinstance(empty, DatabaseDefault):
+        query = query.exclude(**{removed.attname: empty})
+    return _Dropped(model._meta.db_table, removed.column, lambda alias: query)
+
+
+def _holding(
+    operation: Operation, routed: type[Any], model: type[Any], dropped: _Dropped, aliases: Iterable[str]
+) -> Iterator[str]:
+    """Report dropped storage that holds data on each alias the operation routes to.
+
+    Django routes the operation with ``routed``; ``model`` describes the storage
+    as the database holds it now. Absent storage holds nothing. One EXISTS query
+    proves present storage empty; only storage holding data is counted.
+    """
+    table, column, rows = dropped
+    for alias in aliases:
+        connection = connections[alias]
+        try:
+            if not operation.allow_migrate_model(alias, routed):
+                continue
+            with connection.cursor() as cursor:
+                present = _storage_identity(connection, table, cursor) is not None
+                if present and column is not None:
+                    namespace, name = _storage_identifier(connection, column)
+                    if namespace:
+                        raise ImproperlyConfigured(f"column {column!r} cannot have a namespace")
+                    if connection.vendor == "sqlite":
+                        cursor.execute(
+                            "SELECT name FROM pragma_table_xinfo(%s) WHERE name = %s COLLATE NOCASE",
+                            [split_identifier(table)[1], name],
+                        )
+                        present = cursor.fetchone() is not None
+                    else:
+                        convert = connection.introspection.identifier_converter
+                        if connection.vendor == "postgresql":
+                            # Native PostgreSQL introspection only describes
+                            # visible unqualified tables; the cursor owns the
+                            # actual columns of this fully quoted relation.
+                            cursor.execute(f"SELECT * FROM {connection.ops.quote_name(table)} LIMIT 0")
+                            columns = {convert(field[0]) for field in cursor.description}
+                        else:
+                            columns = {
+                                convert(field.name)
+                                for field in connection.introspection.get_table_description(
+                                    cursor, split_identifier(table)[1]
+                                )
+                            }
+                        present = name in columns
+                        if not present and connection.vendor == "mysql":
+                            raise ImproperlyConfigured(f"cannot prove column identity for {column!r}")
+            held = rows(alias).using(alias) if present else None
+            count = held.count() if held is not None and held.exists() else 0
+        except (DatabaseError, ImproperlyConfigured) as error:
+            yield (
+                f"{model._meta.label_lower}: cannot prove {table}.{column or '*'} "
+                f"empty on {alias!r} ({error})"
+            )
+            continue
+        if count:
+            yield (
+                f"{model._meta.label_lower}: {table}.{column or '*'} holds data in {count} rows on {alias!r}"
+            )
+
+
+class DropGuardAutodetector(MigrationAutodetector):
+    """Require every routed database to prove autodetected dropped storage empty.
+
+    The shared emptiness rules apply; see ``_dropped``. ``migrate`` applies the
+    same rules to the plan it is about to run; see ``check_plan_drops``.
     """
 
     def __init__(self, from_state: ProjectState, to_state: ProjectState, questioner: Any = None) -> None:
@@ -330,64 +443,16 @@ class DropGuardAutodetector(MigrationAutodetector):
         changes = super().changes(graph, trim_to_apps, convert_apps, migration_name)
         _shared_table_drops(self.from_state, self.to_state, changes, database=True)
         refusals: list[str] = []
-        rows: Callable[[str], Any]
         for label, migrations in sorted(changes.items()):
             for migration in migrations:
                 for operation in migration.operations:
-                    if isinstance(operation, RemoveField):
-                        model = self.from_state.apps.get_model(label, operation.model_name)
-                        field = model._meta.get_field(operation.name)
-                        if field.many_to_many:
-                            through = next(_model_storage(model, removed_field=operation.name), None)
-                            if through is None:
-                                continue
-                            table, column = through._meta.db_table, None
-
-                            def through_rows(alias: str, through: Any = through) -> Any:
-                                return through._base_manager.all()
-
-                            rows = through_rows
-                        elif field.concrete and not field.generated:
-                            table, column = model._meta.db_table, field.column
-                            empty = None if field.null else field.get_default()
-                            query = model._base_manager.all()
-                            if empty is None:
-                                query = query.exclude(**{f"{field.attname}__isnull": True})
-                            elif not isinstance(empty, DatabaseDefault):
-                                query = query.exclude(**{field.attname: empty})
-
-                            def column_rows(alias: str, query: Any = query) -> Any:
-                                return query
-
-                            rows = column_rows
-                        else:
-                            continue
-                        refusals.extend(self._holding(operation, model, rows, table, column))
-                    elif isinstance(operation, DeleteModel):
-                        model = self.from_state.apps.get_model(label, operation.name)
-                        integrations = tuple(
-                            integration
-                            for integration in resolve_integrations(
-                                getattr(settings, "COMPOSE_INTEGRATIONS", ())
-                            )
-                            if isinstance(integration, MigrationPolicy)
-                        )
-
-                        def remaining_rows(
-                            alias: str,
-                            model: Any = model,
-                            integrations: tuple[MigrationPolicy, ...] = integrations,
-                        ) -> Any:
-                            retired = {
-                                pk
-                                for integration in integrations
-                                for pk in integration.retired_primary_keys(model, alias)
-                            }
-                            return model._base_manager.exclude(pk__in=retired)
-
-                        refusals.extend(
-                            self._holding(operation, model, remaining_rows, model._meta.db_table, None)
-                        )
+                    removed = _removal(operation)
+                    if removed is None:
+                        continue
+                    model = self.from_state.apps.get_model(label, removed[0])
+                    dropped = _dropped(model, removed[1])
+                    if dropped is not None:
+                        refusals.extend(_holding(operation, model, model, dropped, sorted(connections)))
         if refusals:
             raise CommandError(
                 "unsafe autodetected drop: "
@@ -395,62 +460,6 @@ class DropGuardAutodetector(MigrationAutodetector):
                 + ". Declare a reviewed cutover migration before native makemigrations."
             )
         return changes
-
-    @staticmethod
-    def _holding(
-        operation: Operation,
-        model: type[Any],
-        rows: Callable[[str], Any],
-        table: str,
-        column: str | None,
-    ) -> Iterator[str]:
-        for alias in sorted(connections):
-            connection = connections[alias]
-            try:
-                if not operation.allow_migrate_model(alias, model):
-                    continue
-                with connection.cursor() as cursor:
-                    present = _storage_identity(connection, table, cursor) is not None
-                    if present and column is not None:
-                        namespace, name = _storage_identifier(connection, column)
-                        if namespace:
-                            raise ImproperlyConfigured(f"column {column!r} cannot have a namespace")
-                        if connection.vendor == "sqlite":
-                            cursor.execute(
-                                "SELECT name FROM pragma_table_xinfo(%s) WHERE name = %s COLLATE NOCASE",
-                                [split_identifier(table)[1], name],
-                            )
-                            present = cursor.fetchone() is not None
-                        else:
-                            convert = connection.introspection.identifier_converter
-                            if connection.vendor == "postgresql":
-                                # Native PostgreSQL introspection only describes
-                                # visible unqualified tables; the cursor owns the
-                                # actual columns of this fully quoted relation.
-                                cursor.execute(f"SELECT * FROM {connection.ops.quote_name(table)} LIMIT 0")
-                                columns = {convert(field[0]) for field in cursor.description}
-                            else:
-                                columns = {
-                                    convert(field.name)
-                                    for field in connection.introspection.get_table_description(
-                                        cursor, split_identifier(table)[1]
-                                    )
-                                }
-                            present = name in columns
-                            if not present and connection.vendor == "mysql":
-                                raise ImproperlyConfigured(f"cannot prove column identity for {column!r}")
-                count = rows(alias).using(alias).count() if present else 0
-            except (DatabaseError, ImproperlyConfigured) as error:
-                yield (
-                    f"{model._meta.label_lower}: cannot prove {table}.{column or '*'} "
-                    f"empty on {alias!r} ({error})"
-                )
-                continue
-            if count:
-                yield (
-                    f"{model._meta.label_lower}: {table}.{column or '*'} "
-                    f"holds data in {count} rows on {alias!r}"
-                )
 
 
 def _forget_history(labels: Iterable[str], *, packages: Mapping[str, Path] | None = None) -> None:
