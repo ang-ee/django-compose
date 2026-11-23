@@ -297,6 +297,7 @@ def main() -> None:
             "conf.py",
             "provision.py",
             "migration_imports.py",
+            "operations.py",
             "serving.py",
             "build.py",
             "typing.py",
