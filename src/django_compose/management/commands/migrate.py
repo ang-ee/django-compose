@@ -14,11 +14,12 @@ class Command(NativeCommand):
 
     autodetector = DropGuardAutodetector
 
-    def handle(self, *args: Any, **options: Any) -> Any:
-        require_serving_mode()
-        if options["fake"]:
+    def execute(self, *args: Any, **options: Any) -> Any:
+        # The guard wraps execute rather than handle, so a subclass that replaces
+        # handle with the native one keeps it.
+        if options.get("fake"):
             # A faked plan records migrations without running their operations.
-            return super().handle(*args, **options)
+            return super().execute(*args, **options)
         judged: set[int] = set()
 
         def guard(sender: Any, *, plan: Any, using: str, **kwargs: Any) -> None:
@@ -30,6 +31,10 @@ class Command(NativeCommand):
 
         pre_migrate.connect(guard, weak=False)
         try:
-            return super().handle(*args, **options)
+            return super().execute(*args, **options)
         finally:
             pre_migrate.disconnect(guard)
+
+    def handle(self, *args: Any, **options: Any) -> Any:
+        require_serving_mode()
+        return super().handle(*args, **options)

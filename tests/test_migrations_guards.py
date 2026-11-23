@@ -453,7 +453,8 @@ with patch.object(connection, "cursor", side_effect=AssertionError("offline bind
     changes = {{"alpha": [migrations.Migration("drop", "alpha")]}}
     changes["alpha"][0].operations = [migrations.DeleteModel("Record")]
     removals = list(_changed_removals(before, changes))
-    expect(CommandError, expected, lambda: _shared_table_drops(removals, after, sorted(connections)))
+    [(index, refusal)] = _shared_table_drops(removals, after, sorted(connections))
+    assert index == 0 and expected in refusal, refusal
 assert model._base_manager.count() == 0
 """)
 

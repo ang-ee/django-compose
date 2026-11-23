@@ -408,7 +408,7 @@ def test_renamed_storage_stays_protected_through_the_plan(host, rename):
     else:
         renamed = 'migrations.RenameModel(old_name="Record", new_name="Ledger")'
         removal = 'migrations.DeleteModel(name="Ledger")'
-        detail = "(Delete model Ledger): alpha.record: alpha_record.* holds data"
+        detail = "(Delete model Ledger): alpha.ledger: alpha_record.* holds data"
     migration(root, "0002_rename", [renamed])
     migration(root, "0003_drop", [removal], after="0002_rename")
     run(
@@ -824,5 +824,206 @@ report = MigrationImportReport()
 report.collect()
 refusals = list(report.removal_refusals(["django-compose"]))
 assert any("retained import django_compose.operations requires django-compose" in item for item in refusals)
+"""
+    )
+
+
+@pytest.mark.parametrize("target", [("alpha", "0002_drop"), ()])
+def test_squash_replaced_target_is_judged(host, target):
+    root, run = host
+    spare = add_field("spare", 'models.CharField(max_length=4, default="")')
+    migration(root, "0002_drop", [REMOVE_OLD])
+    migration(root, "0003_more", [spare], after="0002_drop")
+    migration(
+        root,
+        "0002_squashed_0003",
+        [REMOVE_OLD, spare],
+        attributes='replaces = [("alpha", "0002_drop"), ("alpha", "0003_more")]',
+    )
+    run(
+        PRELUDE
+        + f"""
+seed(old="kept")
+expect(CommandError, "holds data in 1 rows", lambda: migrate(*{target!r}))
+assert columns() == ["id", "old"]
+"""
+    )
+
+
+def test_a_planned_migration_the_guard_cannot_walk_is_refused(host):
+    _, run = host
+    run(
+        PRELUDE
+        + """
+seed(old="kept")
+ghost = migrations.Migration("0099_ghost", "alpha")
+ghost.operations = [migrations.RemoveField("record", "old")]
+expect(CommandError, "cannot follow migrate's plan through alpha.0099_ghost",
+       lambda: check_plan_drops([(ghost, False)], using="default"))
+"""
+    )
+
+
+def test_table_renamed_after_a_state_only_adoption_keeps_its_rows_protected(host):
+    root, run = host
+    migration(root, "0002_adopt", [adopt("Ledger", delete_record=True)])
+    migration(
+        root,
+        "0003_rename",
+        ['migrations.AlterModelTable(name="ledger", table="alpha_ledger")'],
+        after="0002_adopt",
+    )
+    migration(root, "0004_drop", ['migrations.DeleteModel(name="Ledger")'], after="0003_rename")
+    run(
+        PRELUDE
+        + """
+seed(old="kept")
+expect(CommandError, "alpha.0004_drop (Delete model Ledger): alpha.ledger: alpha_record.* holds", migrate)
+assert "alpha_record" in tables() and "alpha_ledger" not in tables()
+"""
+    )
+
+
+def test_model_moved_between_apps_keeps_its_rows_protected(host):
+    root, run = host
+    migration(
+        root,
+        "0002_move",
+        [
+            "migrations.SeparateDatabaseAndState("
+            'database_operations=[migrations.AlterModelTable(name="record", table="beta_record")], '
+            'state_operations=[migrations.DeleteModel(name="Record")])'
+        ],
+    )
+    write(
+        root,
+        "history/beta/0001_move.py",
+        f"""
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    dependencies = [("alpha", "0002_move")]
+    operations = [migrations.SeparateDatabaseAndState(state_operations=[
+        migrations.CreateModel(name="Record", fields={FIELDS})])]
+""",
+    )
+    write(
+        root,
+        "history/beta/0002_drop.py",
+        """
+from django.db import migrations
+class Migration(migrations.Migration):
+    dependencies = [("beta", "0001_move")]
+    operations = [migrations.DeleteModel(name="Record")]
+""",
+    )
+    run(
+        PRELUDE
+        + """
+seed(old="kept")
+expect(CommandError, "beta.0002_drop (Delete model Record): beta.record: alpha_record.* holds data", migrate)
+assert "alpha_record" in tables()
+"""
+    )
+
+
+def test_fake_initial_adoption_renamed_then_deleted_is_judged(host):
+    root, run = host
+    migration(root, "0002_rename", ['migrations.RenameModel(old_name="Record", new_name="Ledger")'])
+    migration(root, "0003_drop", ['migrations.DeleteModel(name="Ledger")'], after="0002_rename")
+    run(
+        PRELUDE
+        + """
+seed(old="legacy")
+MigrationRecorder(connection).migration_qs.filter(app="alpha").delete()
+expect(CommandError, "alpha.0003_drop (Delete model Ledger): alpha.ledger: alpha_record.* holds data",
+       lambda: migrate(fake_initial=True))
+assert "alpha_record" in tables()
+"""
+    )
+
+
+def test_project_source_history_is_judged_without_a_build_record(host):
+    root, run = host
+    migration(root, "0002_drop", [REMOVE_OLD])
+    write(root, "output/__init__.py", Receipt((), (), "plan-guard", {}, "compiler").source())
+    run(
+        PRELUDE
+        + """
+seed(old="kept")
+expect(CommandError, "alpha.0002_drop (Remove field old from record)", migrate)
+assert columns() == ["id", "old"]
+"""
+    )
+
+
+def test_one_error_names_row_and_shared_table_refusals(host):
+    root, run = host
+    other = (
+        'migrations.CreateModel(name="Other", fields=['
+        '("id", models.AutoField(primary_key=True, serialize=False)), '
+        '("note", models.CharField(max_length=40, default=""))])'
+    )
+    migration(root, "0002_twin", [adopt("Twin"), other])
+    migration(
+        root, "0003_drop", ['migrations.RemoveField(model_name="other", name="note")'], after="0002_twin"
+    )
+    migration(root, "0004_drop", [DELETE_RECORD], after="0003_drop")
+    run(
+        PRELUDE
+        + """
+seed()
+executor = MigrationExecutor(connection)
+executor.migrate([("alpha", "0002_twin")])
+executor.loader.project_state(("alpha", "0002_twin")).apps.get_model("alpha", "Other")._base_manager.create(
+    note="kept"
+)
+for refusal in (
+    "alpha.0003_drop (Remove field note from other): alpha.other: alpha_other.note holds data in 1 rows",
+    "alpha.0004_drop (Delete model Record): table 'alpha_record' is still owned by alpha.twin on 'default'",
+):
+    expect(CommandError, refusal, migrate)
+"""
+    )
+
+
+def test_a_subclass_replacing_handle_keeps_the_guard(host):
+    root, run = host
+    migration(root, "0002_drop", [REMOVE_OLD])
+    run(
+        PRELUDE
+        + """
+from django.core.management.commands.migrate import Command as Native
+from django_compose.management.commands.migrate import Command as Guarded
+class Replacing(Guarded):
+    def handle(self, *args, **options):
+        return Native.handle(self, *args, **options)
+seed(old="kept")
+expect(CommandError, "alpha.0002_drop", lambda: call_command(Replacing(), interactive=False, verbosity=0))
+assert columns() == ["id", "old"]
+"""
+    )
+
+
+def test_row_retirement_policies_are_instantiated_once_per_run(host):
+    root, run = host
+    migration(
+        root, "0002_drop", [DELETE_RECORD, 'migrations.DeleteModel(name="Scratch")'], after="0002_scratch"
+    )
+    migration(
+        root,
+        "0002_scratch",
+        [
+            'migrations.CreateModel(name="Scratch", fields=['
+            '("id", models.AutoField(primary_key=True, serialize=False))])'
+        ],
+    )
+    run(
+        PRELUDE
+        + """
+seed()
+with patch("django_compose.migrations.resolve_integrations", return_value=()) as resolve:
+    migrate()
+assert resolve.call_count == 1, resolve.call_count
+assert "alpha_record" not in tables()
 """
     )
