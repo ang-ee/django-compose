@@ -6,7 +6,7 @@ import importlib
 import importlib.util
 import stat
 import sys
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -26,8 +26,8 @@ from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.operations import fields as field_operations
 from django.db.migrations.operations import models as model_operations
 from django.db.migrations.operations.base import Operation
-from django.db.migrations.operations.fields import RemoveField
-from django.db.migrations.operations.models import DeleteModel
+from django.db.migrations.operations.fields import RemoveField, RenameField
+from django.db.migrations.operations.models import DeleteModel, RenameModel
 from django.db.migrations.operations.special import RunPython, RunSQL, SeparateDatabaseAndState
 from django.db.migrations.recorder import MigrationRecorder
 from django.db.migrations.state import ProjectState
@@ -40,6 +40,7 @@ from django_compose.declarations import MigrationPolicy, resolve_integrations
 from django_compose.management import require_serving_mode as require_serving_mode
 from django_compose.migration_imports import HistoricalImport as HistoricalImport
 from django_compose.migration_imports import historical_imports as historical_imports
+from django_compose.operations import IntendedDeleteModel, IntendedRemoveField
 from django_compose.serving import read_receipt
 
 
@@ -460,6 +461,124 @@ class DropGuardAutodetector(MigrationAutodetector):
                 + ". Declare a reviewed cutover migration before native makemigrations."
             )
         return changes
+
+
+_INTENDED = (IntendedRemoveField, IntendedDeleteModel)
+
+
+class _Origins:
+    """Each current model's and field's identity at the start of a migrate plan.
+
+    Native renames carry an identity forward and removals end it. Models and
+    fields that the plan introduces have no origin: their storage holds no data yet.
+    """
+
+    def __init__(self, models: dict[tuple[str, str], tuple[tuple[str, str], dict[str, str]]]) -> None:
+        self.models = models
+
+    @classmethod
+    def of(cls, state: ProjectState) -> _Origins:
+        return cls({key: (key, {name: name for name in model.fields}) for key, model in state.models.items()})
+
+    def copy(self) -> _Origins:
+        return _Origins({key: (origin, dict(fields)) for key, (origin, fields) in self.models.items()})
+
+    def find(self, label: str, model: str, field: str | None) -> tuple[tuple[str, str], str | None] | None:
+        origin, fields = self.models.get((label, model.lower()), (None, {}))
+        if origin is None or (field is not None and field not in fields):
+            return None
+        return origin, None if field is None else fields[field]
+
+    def forwards(self, label: str, operation: Operation) -> None:
+        if isinstance(operation, RenameModel):
+            if (entry := self.models.pop((label, operation.old_name_lower), None)) is not None:
+                self.models[label, operation.new_name_lower] = entry
+        elif isinstance(operation, RenameField):
+            fields = self.models.get((label, operation.model_name_lower), (None, {}))[1]
+            if operation.old_name in fields:
+                fields[operation.new_name] = fields.pop(operation.old_name)
+        elif isinstance(operation, DeleteModel):
+            self.models.pop((label, operation.name_lower), None)
+        elif isinstance(operation, RemoveField):
+            self.models.get((label, operation.model_name_lower), (None, {}))[1].pop(operation.name, None)
+
+
+def _undeclared(operations: Iterable[Operation]) -> bool:
+    """Whether native removals, including nested database operations, await a proof."""
+    return any(
+        _undeclared(operation.database_operations)
+        if isinstance(operation, SeparateDatabaseAndState)
+        else _removal(operation) is not None and not isinstance(operation, _INTENDED)
+        for operation in operations
+    )
+
+
+def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str, apps: Apps) -> None:
+    """Refuse a migrate plan whose undeclared native removals would drop stored data.
+
+    ``migrate`` calls this from ``pre_migrate``, with the plan, database alias and
+    pre-plan registry it is about to apply, before any operation runs. Each forward
+    ``RemoveField`` and ``DeleteModel``, including nested database operations, is
+    routed as Django routes it at that point of the plan and judged on ``using``
+    under the shared emptiness rules (see ``_dropped``), against the storage its
+    model or field had before the plan, followed through native renames. Storage
+    the plan introduces holds no data yet; storage already absent is skipped.
+    ``IntendedRemoveField`` and ``IntendedDeleteModel`` declare the drops their
+    migration intends. Backwards plans are not judged.
+    """
+    forwards = [migration for migration, backwards in plan if not backwards]
+    pending = [migration for migration in forwards if _undeclared(migration.operations)]
+    if not pending:
+        return
+    state = MigrationExecutor(connections[using])._create_project_state(  # type: ignore[attr-defined]
+        with_applied_migrations=True
+    )
+    if not state.models:
+        return
+    refusals: list[str] = []
+
+    def judge(
+        migration: Migration,
+        operations: Iterable[Operation],
+        state: ProjectState,
+        origins: _Origins,
+        *,
+        database: bool = True,
+    ) -> None:
+        label = migration.app_label
+        for operation in operations:
+            if isinstance(operation, SeparateDatabaseAndState):
+                # Database operations progress their own state, as Django applies them.
+                if database and _undeclared(operation.database_operations):
+                    judge(migration, operation.database_operations, state.clone(), origins.copy())
+                judge(migration, operation.state_operations, state, origins, database=False)
+                continue
+            removed = _removal(operation)
+            origin = None
+            if database and removed is not None and not isinstance(operation, _INTENDED):
+                origin = origins.find(label, *removed)
+            if removed is not None and origin is not None:
+                stored = apps.get_model(*origin[0])
+                dropped = _dropped(stored, origin[1])
+                if dropped is not None:
+                    routed = state.apps.get_model(label, removed[0])
+                    refusals.extend(
+                        f"{label}.{migration.name} ({operation.describe()}): {refusal}"
+                        for refusal in _holding(operation, routed, stored, dropped, (using,))
+                    )
+            origins.forwards(label, operation)
+            operation.state_forwards(label, state)
+
+    origins = _Origins.of(state)
+    for migration in forwards[: forwards.index(pending[-1]) + 1]:
+        judge(migration, migration.operations, state, origins)
+    if refusals:
+        raise CommandError(
+            "unsafe migration drop: "
+            + "; ".join(refusals)
+            + ". Nothing was migrated. Keep the storage, or move its data and declare the drop "
+            "with django_compose.operations.IntendedRemoveField or IntendedDeleteModel in that migration."
+        )
 
 
 def _forget_history(labels: Iterable[str], *, packages: Mapping[str, Path] | None = None) -> None:
