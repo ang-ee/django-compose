@@ -26,6 +26,7 @@ from django.db.models.signals import post_migrate
 from django.utils.functional import classproperty
 from django.utils.timezone import now
 
+from django_compose.management import unguarded_commands
 from django_compose.serving import receipt_lease, verified_receipt
 
 PROVISION_LOCK = 0x416E676565507276
@@ -262,6 +263,8 @@ def run(command: BaseCommand, options: dict[str, Any]) -> None:
         command.stdout.write(command.style.SUCCESS("provision: ready"))
         return
     verified_receipt()
+    if shadowed := unguarded_commands():
+        raise CommandError("provision: " + "; ".join(shadowed))
     connection = connections[using]
     if connection.in_atomic_block or (connection.connection is not None and not connection.get_autocommit()):
         raise CommandError("Provision requires an independent autocommit connection")

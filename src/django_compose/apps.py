@@ -23,6 +23,11 @@ class ComposeConfig(AppConfig):
             if mode() is not None:
                 raise ImproperlyConfigured("Compose mode requires BuildComposeConfig last in INSTALLED_APPS")
             _finish_startup_verification(required=True)
+            from django.core import checks
+
+            from django_compose.management import check_guarded_commands
+
+            checks.register(check_guarded_commands)
         finally:
             _close_startup_verification()
 

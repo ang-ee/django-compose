@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import signal
@@ -34,6 +35,38 @@ def require_serving_mode() -> None:
     """Migration commands require a process populated from verified serving apps."""
     if "DJANGO_COMPOSE_MODE" in os.environ:
         raise CommandError("Migration commands require serving mode; unset DJANGO_COMPOSE_MODE")
+
+
+def unguarded_commands() -> tuple[str, ...]:
+    """Describe each drop-guarded command that native dispatch resolves elsewhere.
+
+    ComposeConfig must be last in INSTALLED_APPS, so a same-named command of any
+    other app wins native dispatch and its drop guard is silently off. A subclass
+    of this package's command keeps the guard.
+    """
+    from django.core.management import get_commands, load_command_class
+
+    shadowed = []
+    for name in ("makemigrations", "migrate"):
+        guarded = importlib.import_module(f"django_compose.management.commands.{name}").Command
+        app = get_commands()[name]
+        if not isinstance(load_command_class(app, name), guarded):
+            shadowed.append(f"{name} resolves to {app}'s command, which bypasses the drop guard")
+    return tuple(shadowed)
+
+
+def check_guarded_commands(app_configs: Any = None, **kwargs: Any) -> list[Any]:
+    """System check: native dispatch resolves the drop-guarded migration commands."""
+    from django.core import checks
+
+    return [
+        checks.Error(
+            problem,
+            hint="Remove that command, or subclass django-compose's command of the same name.",
+            id="django_compose.E002",
+        )
+        for problem in unguarded_commands()
+    ]
 
 
 def _default_options(arguments: list[str]) -> Any:

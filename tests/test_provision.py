@@ -8,6 +8,9 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -218,6 +221,8 @@ with (
     patch.object(provision,'advisory_lock',lock),
     patch.object(provision,'run_step',step),
     patch.object(provision,'migrate_and_analyze',lambda *args,**kwargs:events.append('migrate')),
+    # Native steps are stubbed above, so command resolution is outside this owner test.
+    patch.object(provision,'unguarded_commands',return_value=()),
 ):
     try:
         run(command,options)
@@ -455,6 +460,116 @@ def test_provision_runs_native_steps_and_app_hooks_in_one_process(tmp_path: Path
     assert "provision: ready" in result.stdout
     assert database.read_bytes() == before
     assert len((tmp_path / "events.jsonl").read_text().splitlines()) == len(events)
+
+
+def _item_models(*fields: str) -> str:
+    body = "".join(f"    {field}\n" for field in fields)
+    return (
+        "from django.db import models\nfrom django_compose.models import Composable\n\n\n"
+        f"class Item(Composable, concrete=True):\n{body}\n    class Meta:\n        abstract = True\n"
+    )
+
+
+def _composed_host(root: Path, models: str, *, database: str | None = None) -> Any:
+    """A composed host whose probe history the composition owns, provisioned once.
+
+    ``database`` replaces SQLite with JSON settings read from the environment, so
+    no credentials are written into the host.
+    """
+    manage_py = _write_topology_host(root)
+    (root / "probe/models.py").write_text(models)
+    environment = _environment(root)
+    if database is not None:
+        settings = root / "probe/settings.py"
+        source = settings.read_text()
+        start = source.index("DATABASES=")
+        end = source.index("\n", start)
+        settings.write_text(
+            "import json\nimport os\n"
+            + source[:start]
+            + "DATABASES={'default': json.loads(os.environ['COMPOSE_PROBE_DATABASE'])}"
+            + source[end:]
+        )
+        environment["COMPOSE_PROBE_DATABASE"] = database
+
+    def manage(*arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(manage_py), *arguments],
+            cwd=root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+
+    for arguments in (("compose",), ("makemigrations",), ("provision", "--wait-db", "1")):
+        result = manage(*arguments)
+        assert result.returncode == 0, result.stdout + result.stderr
+    return manage
+
+
+def _history(root: Path, name: str, operations: str) -> None:
+    (root / f"runtime/probe/migrations/{name}.py").write_text(
+        "from django.db import migrations, models\n"
+        "from django_compose.operations import IntendedRemoveField\n\n"
+        "def copy(apps, editor):\n"
+        "    rows = apps.get_model('probe', 'Item')._base_manager.using(editor.connection.alias)\n"
+        "    rows.update(new=models.F('old'))\n\n"
+        "class Migration(migrations.Migration):\n"
+        "    dependencies = [('probe', '0001_initial')]\n"
+        f"    operations = [{operations}]\n"
+    )
+
+
+def test_provision_refuses_an_undeclared_drop_and_stays_in_progress(tmp_path: Path) -> None:
+    manage = _composed_host(tmp_path, _item_models("old = models.CharField(max_length=40, default='')"))
+    database = tmp_path / "probe.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO probe_item (old) VALUES ('kept')")
+    _history(tmp_path, "0002_drop", "migrations.RemoveField(model_name='item', name='old')")
+    (tmp_path / "probe/models.py").write_text(_item_models())
+    assert manage("compose").returncode == 0
+    result = manage("provision", "--wait-db", "1")
+    assert result.returncode != 0
+    assert (
+        "unsafe migration drop: probe.0002_drop (Remove field old from item)" in result.stdout + result.stderr
+    )
+    with sqlite3.connect(database) as connection:
+        assert [row[1] for row in connection.execute("PRAGMA table_info(probe_item)")] == ["id", "old"]
+        assert connection.execute("SELECT state FROM django_compose_provision").fetchall() == [
+            ("in_progress",)
+        ]
+        assert not connection.execute("SELECT 1 FROM django_migrations WHERE name = '0002_drop'").fetchall()
+    _history(tmp_path, "0002_drop", "IntendedRemoveField(model_name='item', name='old')")
+    result = manage("provision", "--wait-db", "1")
+    assert result.returncode == 0, result.stdout + result.stderr
+    with sqlite3.connect(database) as connection:
+        assert [row[1] for row in connection.execute("PRAGMA table_info(probe_item)")] == ["id"]
+        assert connection.execute("SELECT state FROM django_compose_provision").fetchall() == [("complete",)]
+
+
+@pytest.mark.parametrize("command", ["migrate", "makemigrations"])
+def test_provision_and_checks_refuse_a_shadowed_guarded_command(tmp_path: Path, command: str) -> None:
+    manage = _composed_host(tmp_path, _item_models("old = models.CharField(max_length=40, default='')"))
+    database = tmp_path / "probe.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO probe_item (old) VALUES ('kept')")
+    _history(tmp_path, "0002_drop", "migrations.RemoveField(model_name='item', name='old')")
+    (tmp_path / "probe/models.py").write_text(_item_models())
+    (tmp_path / f"probe/management/commands/{command}.py").write_text(
+        f"from django.core.management.commands.{command} import Command as Command\n"
+    )
+    assert manage("compose").returncode == 0
+    result = manage("provision", "--wait-db", "1")
+    assert result.returncode != 0
+    assert f"provision: {command} resolves to probe's command, which bypasses the drop guard" in result.stderr
+    with sqlite3.connect(database) as connection:
+        assert [row[1] for row in connection.execute("PRAGMA table_info(probe_item)")] == ["id", "old"]
+        assert connection.execute("SELECT state FROM django_compose_provision").fetchall() == [("complete",)]
+    result = manage("check")
+    assert result.returncode != 0
+    assert "django_compose.E002" in result.stderr, result.stdout + result.stderr
 
 
 def test_native_makemigrations_then_migrate_sees_new_file_in_same_process(tmp_path: Path) -> None:
