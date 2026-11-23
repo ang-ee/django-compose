@@ -518,6 +518,13 @@ It runs at two points on these rules:
   forward plan on the alias being migrated, on the graph native `migrate` planned with,
   including for a squash-replaced target, in the order the executor applies it. A
   planned migration the walk cannot follow is refused by name.
+- **Nothing stored at `migrate`:** an alias whose only tables are Django's migration
+  recorder and `provision`'s record, such as a fresh or test database, holds no data
+  to lose. The guard returns at once there, before classifying apps or walking the
+  plan, so it does not apply the shared-table rule either. Only a complete inventory
+  shows it: PostgreSQL's catalog across every schema, or SQLite's main database with
+  nothing attached; on other backends the guard always walks. `--fake-initial`
+  adoption finds tables, so it is judged.
 - **Scope at `migrate`:** the same apps whose history authoring guards, those the
   project owns. That is the build record's `HISTORY_LABELS` and every project-source
   app: one whose migration package no installed distribution owns, as the

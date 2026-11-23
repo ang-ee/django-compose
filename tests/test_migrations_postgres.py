@@ -23,7 +23,13 @@ def _drive(environment: Path) -> None:
     from django.db.migrations.graph import MigrationGraph
     from django.db.migrations.state import ModelState, ProjectState
 
-    from django_compose.migrations import DropGuardAutodetector, _changed_removals, _shared_table_drops
+    from django_compose.migrations import (
+        DropGuardAutodetector,
+        _changed_removals,
+        _shared_table_drops,
+        _stores_nothing,
+    )
+    from django_compose.provision import ProvisionRecorder
 
     connection = connections["default"]
     observer = connections["observer"]
@@ -63,6 +69,19 @@ def _drive(environment: Path) -> None:
         for alias in connections:
             connections[alias].creation.create_test_db(verbosity=0, autoclobber=False)
             created.append(alias)
+        # The guard skips an alias that stores nothing but the migration and
+        # provision recorders. Storage in a schema off the search path, which
+        # native table introspection does not list, still keeps it on.
+        assert _stores_nothing(connection)
+        ProvisionRecorder(connection).ensure_schema()
+        assert _stores_nothing(connection)
+        with connection.cursor() as cursor:
+            cursor.execute('CREATE SCHEMA "hidden"')
+            cursor.execute('CREATE TABLE "hidden"."records" (id integer PRIMARY KEY)')
+        assert "records" not in connection.introspection.table_names()
+        assert not _stores_nothing(connection)
+        with connection.cursor() as cursor:
+            cursor.execute('DROP SCHEMA "hidden" CASCADE')
         with connection.cursor() as cursor:
             cursor.execute('CREATE SCHEMA "left"')
             cursor.execute('CREATE SCHEMA "right"')

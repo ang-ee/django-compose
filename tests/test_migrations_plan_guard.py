@@ -593,17 +593,29 @@ assert columns() == ["id", "old"]
     )
 
 
-def test_fake_initial_adoption_is_judged(host):
+@pytest.mark.parametrize("database", ["fresh", "provisioning", "adopted"])
+def test_an_alias_that_stores_nothing_is_not_walked_and_fake_initial_adoption_is(host, database):
     root, run = host
     migration(root, "0002_drop", [REMOVE_OLD])
     run(
         PRELUDE
-        + """
-seed(old="legacy data")
-MigrationRecorder(connection).migration_qs.filter(app="alpha").delete()
-expect(CommandError, "alpha.0002_drop", lambda: migrate(fake_initial=True))
-assert columns() == ["id", "old"]
-assert not {key for key in applied() if key[0] == "alpha"}
+        + f"""
+from django_compose.provision import ProvisionRecorder
+database = {database!r}
+if database == "provisioning":
+    # provision records its run in its own table before it migrates.
+    ProvisionRecorder(connection).ensure_schema()
+if database == "adopted":
+    seed(old="legacy data")
+    MigrationRecorder(connection).migration_qs.filter(app="alpha").delete()
+    expect(CommandError, "alpha.0002_drop", lambda: migrate(fake_initial=True))
+    assert columns() == ["id", "old"]
+    assert not {{key for key in applied() if key[0] == "alpha"}}
+else:
+    with patch("django_compose.migrations._guarded", side_effect=AssertionError("walked")):
+        migrate()
+    assert columns() == ["id"]
+    assert ("alpha", "0002_drop") in applied()
 """
     )
 

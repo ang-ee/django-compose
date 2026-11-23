@@ -41,6 +41,7 @@ from django_compose.management import require_serving_mode as require_serving_mo
 from django_compose.migration_imports import HistoricalImport as HistoricalImport
 from django_compose.migration_imports import historical_imports as historical_imports
 from django_compose.operations import IntendedDeleteModel, IntendedRemoveField
+from django_compose.provision import TABLE as PROVISION_TABLE
 from django_compose.serving import Receipt, read_receipt, verified_receipt
 from django_compose.sources import SourceResolver
 
@@ -632,21 +633,50 @@ def _guarded(labels: Iterable[str]) -> frozenset[str]:
     return frozenset(guarded)
 
 
+def _stores_nothing(connection: BaseDatabaseWrapper) -> bool:
+    """Whether the alias holds no table but Django's migration and provision recorders.
+
+    Such an alias stores nothing a plan could destroy. Only a complete inventory can
+    show that: PostgreSQL's catalog across every schema, and SQLite's main database
+    without attachments. Other backends never qualify.
+    """
+    recorders = [MigrationRecorder.Migration._meta.db_table, PROVISION_TABLE]
+    with connection.cursor() as cursor:
+        if connection.vendor == "postgresql":
+            # Schema-qualified storage is invisible to native table introspection.
+            cursor.execute(
+                "SELECT NOT EXISTS (SELECT FROM pg_catalog.pg_class c "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE c.relkind IN ('r', 'p', 'f', 'm') AND n.nspname !~ '^pg_' "
+                "AND n.nspname <> 'information_schema' AND c.relname <> ALL(%s))",
+                [recorders],
+            )
+            return bool(cursor.fetchone()[0])
+        if connection.vendor == "sqlite":
+            cursor.execute("PRAGMA database_list")
+            if any(row[1] not in {"main", "temp"} for row in cursor.fetchall()):
+                return False
+            return not set(connection.introspection.table_names(cursor)) - set(recorders)
+    return False
+
+
 def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> None:
     """Drop guard for ``migrate``: refuse a plan whose undeclared drops lose stored data.
 
     ``migrate`` calls this from ``pre_migrate`` with the plan and alias it is about
     to apply, before any operation runs. The specification's "Drop guard" section
-    defines the rule. The pre-plan state is the one native ``migrate`` builds,
-    through the private ``MigrationExecutor._create_project_state``, on the graph
-    native ``migrate`` planned with: re-check both on each Django upgrade.
+    defines the rule. On an alias that stores nothing it returns at once, before
+    classifying apps or walking the plan. The pre-plan state is the one native
+    ``migrate`` builds, through the private ``MigrationExecutor._create_project_state``,
+    on the graph native ``migrate`` planned with: re-check both on each Django upgrade.
     """
     forwards = {
         (migration.app_label, migration.name): migration for migration, backwards in plan if not backwards
     }
-    guarded = _guarded(
-        {key[0] for key, migration in forwards.items() if _database_removals(migration.operations)}
-    )
+    labels = {key[0] for key, migration in forwards.items() if _database_removals(migration.operations)}
+    if not labels or _stores_nothing(connections[using]):
+        return
+    guarded = _guarded(labels)
     if not guarded:
         return
     executor = MigrationExecutor(connections[using])

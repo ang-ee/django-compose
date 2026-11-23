@@ -37,6 +37,12 @@ choices behind it.
   rename or removal of the plan names storage the plan creates.
 - **Fail closed.** The walk uses the graph native `migrate` planned with, including
   for a squash-replaced target; a planned migration it cannot follow is refused.
+- **Nothing stored, nothing walked.** The walk repeats the state rendering native
+  `migrate` does, which dominates a fresh migrate of a long history. An alias with no
+  table but the recorders is skipped. An empty pre-plan state was rejected as the
+  test, because `--fake-initial` and state-only adoption give existing tables a model
+  the plan introduces. Native table introspection was rejected as the inventory,
+  because on PostgreSQL it lists only the search path's tables.
 - **Declaration.** `django_compose.operations` provides `IntendedRemoveField` and
   `IntendedDeleteModel`. A `Migration` attribute naming `(model, field)` pairs was
   rejected: it states each fact twice, and the operation and the list must then be

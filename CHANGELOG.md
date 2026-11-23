@@ -7,7 +7,9 @@
   owns that would destroy stored data is refused before any operation runs.
   Previously only autodetected removals were judged, at `makemigrations`, so a removal
   migration already on disk was applied unchecked. Django's and other apps' history
-  remains their owners' responsibility. See
+  remains their owners' responsibility. On an alias that holds no table but the
+  migration and provision recorders, such as a fresh or test database, nothing is
+  stored and the guard returns at once. See
   [proposal 0005](docs/proposals/0005-migrate-time-drop-guard.md).
 - Add `django_compose.operations.IntendedRemoveField` and `IntendedDeleteModel` to
   declare a drop a migration intends; see
