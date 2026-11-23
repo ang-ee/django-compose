@@ -178,9 +178,9 @@ removing providers, using `check_migrations --imports --removing`.
 The [drop guard](SPEC.md#drop-guard) refuses a migration that would remove a column
 or table still holding data. `makemigrations` applies it to what it autodetects, on
 every eligible configured database. `migrate`, and therefore `provision`, applies it
-to the plan it is about to run, before any operation and also under `--skip-checks`;
-on a database that stores nothing yet, such as a fresh or test database, it returns
-at once.
+to the plan it is about to run, before any operation and also under `--skip-checks`.
+On a database that stores nothing yet, such as a fresh or test database, it has no
+data to prove, but still refuses deleting a table another model owns.
 At `migrate` it judges the history the project owns, its composed history and its
 own apps' migrations; Django's migrations and those of installed apps are their
 owners' responsibility. A refusal names each
@@ -236,9 +236,10 @@ holds the data. Author the cutover migration first, for example from
 ### Storage identity
 
 The drop guard compares storage on each eligible alias. A table still owned by an
-active model cannot be deleted, even when empty or reached through differently
-quoted names. This includes Django's implicit many-to-many tables deleted with
-their owning model or field. Identical table names on disjoint database aliases do not
+active model cannot be deleted, even when empty, on a database that stores nothing
+yet, or reached through differently quoted names. This includes Django's implicit
+many-to-many tables deleted with their owning model or field. An unmanaged, proxy
+or swapped model owns no table, so it does not keep one from deletion. Identical table names on disjoint database aliases do not
 establish shared ownership.
 
 Ordinary and double-quoted identifiers use Django's backend interpretation.

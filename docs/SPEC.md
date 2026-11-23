@@ -503,8 +503,10 @@ column at its native default, while a database default cannot prove emptiness. A
 follows native model options and routers. Quoted identifiers resolve through backend
 semantics; uncertain storage identity and an unavailable eligible database cannot
 prove a drop safe ([supported cases](migrations.md#storage-identity)). A table that an
-active model still owns is never deleted, even when empty, except where `migrate`
-finds nothing stored (below). One EXISTS query proves present storage empty, so an
+active model still owns is never deleted, even when empty. An unmanaged, proxy or
+swapped model owns no table, since Django neither creates nor deletes one for it, so
+it keeps no table from deletion; the rows of that table remain protected. One EXISTS
+query proves present storage empty, so an
 unindexed column scans its table; rows are counted only for a refusal.
 
 It runs at two points on these rules:
@@ -524,12 +526,13 @@ It runs at two points on these rules:
 At `migrate`:
 
 - **Nothing stored:** an alias whose only tables are Django's migration recorder and
-  `provision`'s record, such as a fresh or test database, holds no data to lose. The
-  guard returns at once there, before classifying apps or walking the plan, so it
-  does not apply the shared-table rule either. Only a complete inventory shows it:
-  PostgreSQL's catalog across every schema, or SQLite's main database with nothing
-  attached; on other backends the guard always walks. `--fake-initial` adoption finds
-  tables, so it is judged.
+  `provision`'s record, such as a fresh or test database, holds no data to lose, so
+  the guard probes nothing and follows no rename there. Only a complete inventory
+  shows that: PostgreSQL's catalog across every schema, or SQLite's main database
+  with nothing attached; on other backends the guard always probes. `--fake-initial`
+  adoption finds tables, so it is probed. The shared-table rule needs no data and
+  still applies, from names alone, as authoring's offline check does: names only a
+  catalog could tell apart are refused.
 - **Scope:** the history the project owns: the build record's `HISTORY_LABELS` and
   every project-source app, one whose migration package no installed distribution
   owns, as the retained-import audit's resolver classifies it. Django's and installed

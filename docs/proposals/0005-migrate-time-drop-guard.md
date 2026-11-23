@@ -51,8 +51,11 @@ choices behind it.
   one it changes, which where models share a hub is nearly the whole state at nearly
   every operation. The cost is two full renders per storage rename, so a plan of many
   renames renders more than native `migrate`.
-- **Nothing stored, nothing walked.** An alias with no table but the recorders is
-  skipped. An empty pre-plan state was rejected as the test, because `--fake-initial`
+- **Nothing stored, nothing probed.** An alias with no table but the recorders holds
+  no data, so it is not probed; the shared-table rule needs no data and applies there
+  from names alone. Skipping the whole walk was rejected: a plan refused on every
+  populated database then deleted a table another model still owns on a fresh one.
+  An empty pre-plan state was rejected as the test, because `--fake-initial`
   and state-only adoption give existing tables a model the plan introduces. Native
   table introspection was rejected as the inventory, because on PostgreSQL it lists
   only the search path's tables.

@@ -731,7 +731,7 @@ assert columns() == ["id", "old"]
 
 
 @pytest.mark.parametrize("database", ["fresh", "provisioning", "adopted"])
-def test_an_alias_that_stores_nothing_is_not_walked_and_fake_initial_adoption_is(host, database):
+def test_an_alias_that_stores_nothing_is_not_probed_and_fake_initial_adoption_is(host, database):
     root, run = host
     migration(root, "0002_drop", [REMOVE_OLD])
     run(
@@ -749,10 +749,59 @@ if database == "adopted":
     assert columns() == ["id", "old"]
     assert not {{key for key in applied() if key[0] == "alpha"}}
 else:
-    with patch("django_compose.migrations._guarded", side_effect=AssertionError("walked")):
+    with patch("django_compose.migrations._proofs", side_effect=AssertionError("probed")):
         migrate()
     assert columns() == ["id"]
     assert ("alpha", "0002_drop") in applied()
+"""
+    )
+
+
+@pytest.mark.parametrize("database", ["fresh", "populated"])
+def test_a_table_owned_at_the_end_of_the_plan_is_kept_on_a_fresh_database_too(host, database):
+    root, run = host
+    migration(root, "0002_twin", [adopt("Twin")])
+    migration(root, "0003_drop", [DELETE_RECORD], after="0002_twin")
+    run(
+        PRELUDE
+        + f"""
+if {database!r} == "populated":
+    seed()
+# The rule needs no data, so a database that stores nothing applies it too.
+expect(CommandError, "table 'alpha_record' is still owned by alpha.twin on 'default'", migrate)
+assert ("alpha", "0003_drop") not in applied()
+"""
+    )
+
+
+@pytest.mark.parametrize("rows", [1, 0])
+def test_an_unmanaged_model_owns_no_table_it_maps(host, rows):
+    root, run = host
+    # An unmanaged mirror maps alpha_record, but Django neither creates nor deletes it.
+    options = '{"db_table": "alpha_record", "managed": False}'
+    mirror = f'migrations.CreateModel(name="Mirror", fields={FIELDS}, options={options})'
+    migration(root, "0002_mirror", [mirror])
+    migration(root, "0003_drop", [DELETE_RECORD], after="0002_mirror")
+    run(
+        PRELUDE
+        + f"""
+Record = seed()
+for _ in range({rows}):
+    Record._base_manager.create(old="kept")
+if {rows}:
+    try:
+        migrate()
+    except CommandError as error:
+        message = str(error)
+    else:
+        raise AssertionError("the mirrored table's rows were dropped")
+    # The rows protect the table; the mirror does not own it.
+    assert "alpha.record: alpha_record.* holds data in 1 rows" in message, message
+    assert "still owned" not in message, message
+    assert "alpha_record" in tables()
+else:
+    migrate()
+    assert "alpha_record" not in tables()
 """
     )
 

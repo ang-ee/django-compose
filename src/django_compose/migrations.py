@@ -794,8 +794,9 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
 
     ``migrate`` calls this from ``pre_migrate`` with the plan and alias it is about
     to apply, before any operation runs. The specification's "Drop guard" section
-    defines the rule. On an alias that stores nothing it returns at once, before
-    classifying apps or walking the plan.
+    defines the rule. An alias that stores nothing holds no data to prove: there the
+    walk probes nothing and follows no rename, and only the shared-table rule, which
+    needs no data, applies, offline.
 
     The walk keeps its state unrendered and renders a full copy of it where it needs
     a model: at each guarded removal, before and after each rename that can change a
@@ -812,19 +813,19 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         (migration.app_label, migration.name): migration for migration, backwards in plan if not backwards
     }
     labels = {key[0] for key, migration in forwards.items() if _database_removals(migration.operations)}
-    if not labels or _stores_nothing(connections[using]):
-        return
-    guarded = _guarded(labels)
+    guarded = _guarded(labels) if labels else frozenset()
     if not guarded:
         return
-    executor = MigrationExecutor(connections[using])
+    connection = connections[using]
+    probe = not _stores_nothing(connection)
+    executor = MigrationExecutor(connection)
     if not forwards.keys() <= executor.loader.graph.nodes.keys():
         # Native migrate planned a replaced target on a graph without replacements.
         executor.loader.replace_migrations = False  # type: ignore[attr-defined]
         executor.loader.build_graph()
     state: ProjectState = executor._create_project_state(with_applied_migrations=True)  # type: ignore[attr-defined]
-    policies = _policies()
-    storage = _Storage(connections[using])
+    policies = _policies() if probe else ()
+    storage = _Storage(connection)
     removals: list[tuple[Migration, _Removal]] = []
     refusals: list[tuple[str, str]] = []
 
@@ -862,7 +863,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             if database and removed is not None and label in guarded:
                 routed = rendered(state, label, removed[0])
                 removals.append((migration, (operation, routed, removed[1])))
-                dropped = _dropped(routed, removed[1], policies)
+                dropped = _dropped(routed, removed[1], policies) if probe else None
                 stored = (
                     None
                     if dropped is None
@@ -880,7 +881,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             # Custom database code, such as RunSQL or a subclass replacing Django's
             # database_forwards, is not followed: storage it renames or creates is absent
             # before the plan under a name no native operation accounts for.
-            native = database and _native(operation)
+            native = probe and database and _native(operation)
             renamed = _renamed(operation, state, label) if native else None
             adds = _created(operation) if native else None
             if storage.pending and not native and not _leaves_state(operation):
@@ -913,7 +914,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             + "; nothing was migrated"
         )
     for index, refusal in _shared_table_drops(
-        [removal for _, removal in removals], state, (using,), database=True
+        [removal for _, removal in removals], state, (using,), database=probe
     ):
         migration, (operation, _, _) = removals[index]
         refuse(migration, operation, refusal, shared=True)
