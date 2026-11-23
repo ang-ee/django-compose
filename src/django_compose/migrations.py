@@ -526,7 +526,11 @@ class _Storage:
             self.tables[old] = None
 
     def follow(self, before: Any, after: Any, renamed: Mapping[str, str]) -> None:
-        """Record what a database operation renamed, from the model before and after it."""
+        """Record what a database operation renamed, from the model before and after it.
+
+        The caller follows only an operation that migrates ``after`` on the alias,
+        as Django's ``database_forwards`` does, so a swapped model never arrives here.
+        """
         self._rename_table(before._meta.db_table, after._meta.db_table)
         table = self.table(after._meta.db_table)
         for field in (*before._meta.local_fields, *before._meta.local_many_to_many):
@@ -689,7 +693,11 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             before_model = state.apps.get_model(label, renamed[0]) if renamed else None
             operation.state_forwards(label, state)
             if renamed:
-                storage.follow(before_model, state.apps.get_model(label, renamed[1]), renamed[2])
+                after_model = state.apps.get_model(label, renamed[1])
+                # Django renames storage only where the operation migrates the model
+                # it produces: never for a swapped model, nor on an alias routed away.
+                if operation.allow_migrate_model(using, after_model):
+                    storage.follow(before_model, after_model, renamed[2])
 
     walked: set[tuple[str, str]] = set()
     # Native migrate applies its plan in the order of the full clean plan.

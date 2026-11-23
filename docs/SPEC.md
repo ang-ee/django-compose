@@ -527,7 +527,9 @@ It runs at two points on these rules:
 - **Probe at `migrate`:** each removal is routed and defined by the plan's state at
   that operation, and its storage is probed under the name it had before the plan.
   The walk follows every rename the plan's database operations make, whoever owns
-  them: `AlterModelTable`, `RenameModel`, `RenameField` and `AlterField`. Storage
+  them: `AlterModelTable`, `RenameModel`, `RenameField` and `AlterField`. It follows
+  each where Django applies it, on an alias that migrates the model the operation
+  produces, so a swapped model or one routed elsewhere renames nothing. Storage
   absent before the plan is skipped. So is storage under a name that an earlier rename
   or removal of the same plan vacated, which the plan itself creates. A table owned at
   the end of the plan is not deleted. One `CommandError` names every refused migration,

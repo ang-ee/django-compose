@@ -1027,3 +1027,84 @@ assert resolve.call_count == 1, resolve.call_count
 assert "alpha_record" not in tables()
 """
     )
+
+
+SWAPPED_USER = """
+from django.contrib.auth.base_user import AbstractBaseUser
+from django.db import models
+class User(AbstractBaseUser):
+    email = models.EmailField(unique=True)
+    USERNAME_FIELD = "email"
+"""
+
+
+def test_a_swapped_model_renames_no_storage(host):
+    root, run = host
+    write(root, "beta/models.py", SWAPPED_USER)
+    write(
+        root,
+        "history/beta/0001_user.py",
+        """
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    operations = [migrations.CreateModel(name="User", fields=[
+        ("id", models.AutoField(primary_key=True, serialize=False)),
+        ("password", models.CharField(max_length=128)),
+        ("last_login", models.DateTimeField(blank=True, null=True)),
+        ("email", models.EmailField(max_length=254, unique=True)),
+    ])]
+""",
+    )
+    migration(root, "0002_drop", [REMOVE_OLD])
+    run(
+        PRELUDE
+        + """
+from django.test import override_settings
+installed = [commands, "django.contrib.contenttypes", "django.contrib.auth", "alpha", "beta", "author"]
+with override_settings(INSTALLED_APPS=installed, AUTH_USER_MODEL="beta.User"):
+    Record = seed(old="kept")
+    # auth's pending history alters fields of auth.User, which beta.User swaps out.
+    expect(CommandError, "alpha.0002_drop (Remove field old from record)", migrate)
+    assert columns() == ["id", "old"]
+    Record._base_manager.update(old="")
+    migrate()
+    assert columns() == ["id"]
+    assert ("auth", "0003_alter_user_email_max_length") in applied()
+"""
+    )
+
+
+def test_a_rename_on_another_database_leaves_this_ones_storage_protected(host):
+    root, run = host
+    table = '{"db_table": "alpha_record"}'
+    archive = f'migrations.CreateModel(name="Archive", fields={FIELDS}, options={table})'
+    migration(root, "0002_archive", [archive])
+    migration(
+        root,
+        "0003_rename",
+        ['migrations.AlterModelTable(name="record", table="alpha_ledger")'],
+        after="0002_archive",
+    )
+    migration(root, "0004_drop", ['migrations.DeleteModel(name="Archive")'], after="0003_rename")
+    run(
+        PRELUDE
+        + """
+from django.test import override_settings
+class Disjoint:
+    # Record lives on default and Archive on other, each in its own alpha_record table.
+    def allow_migrate(self, db, app_label, model_name=None, **hints):
+        return {"record": db == "default", "archive": db == "other"}.get(model_name)
+connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
+with override_settings(DATABASE_ROUTERS=[Disjoint()]):
+    seed("0002_archive")
+    executor = MigrationExecutor(connections["other"])
+    executor.migrate([("alpha", "0002_archive")])
+    Archive = executor.loader.project_state(("alpha", "0002_archive")).apps.get_model("alpha", "Archive")
+    Archive._base_manager.using("other").create(old="kept")
+    migrate()
+    assert "alpha_ledger" in tables() and "alpha_record" not in tables()
+    refusal = "alpha.0004_drop (Delete model Archive): alpha.archive: alpha_record.* holds data in 1 rows"
+    expect(CommandError, refusal + " on 'other'", lambda: migrate(database="other"))
+    assert "alpha_record" in tables("other")
+"""
+    )
