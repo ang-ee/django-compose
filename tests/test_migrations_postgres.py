@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from test_migrations import host as host
-from test_migrations_plan_guard import DELETE_RECORD, PRELUDE, REMOVE_OLD, add_field, migration
+from test_provision import _composed_host, _history, _item_models
 from test_provision_postgres import ROOT, _configure, _database
 
 
@@ -23,7 +23,7 @@ def _drive(environment: Path) -> None:
     from django.db.migrations.graph import MigrationGraph
     from django.db.migrations.state import ModelState, ProjectState
 
-    from django_compose.migrations import DropGuardAutodetector, _shared_table_drops
+    from django_compose.migrations import DropGuardAutodetector, _changed_removals, _shared_table_drops
 
     connection = connections["default"]
     observer = connections["observer"]
@@ -103,7 +103,9 @@ def _drive(environment: Path) -> None:
         changes = {"alpha": [migrations.Migration("drop", "alpha")]}
         changes["alpha"][0].operations = [migrations.DeleteModel("Record")]
         with patch.object(connection, "cursor", side_effect=AssertionError("offline DB query")):
-            refusal(lambda: _shared_table_drops(before, after, changes), "offline")
+            refusal(
+                lambda: _shared_table_drops(_changed_removals(before, changes), after, connections), "offline"
+            )
         with connection.cursor() as cursor:
             cursor.execute('SET search_path TO "right", "left", public')
         assert DropGuardAutodetector(before, after).changes(graph)["alpha"]
@@ -132,7 +134,9 @@ def _drive(environment: Path) -> None:
         refusal(lambda: DropGuardAutodetector(before, after).changes(graph), "still owned")
         assert active._base_manager.count() == 0
         with patch.object(connection, "cursor", side_effect=AssertionError("offline namespace query")):
-            refusal(lambda: _shared_table_drops(before, after, changes), "offline")
+            refusal(
+                lambda: _shared_table_drops(_changed_removals(before, changes), after, connections), "offline"
+            )
         # Identical names on disjoint aliases protect only their own storage.
         before, graph = state("alias_records", '"alias_records"')
         model = before.apps.get_model("alpha", "Record")
@@ -196,73 +200,83 @@ def test_postgres_migration_storage_identity(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("scenario", ["column", "table", "declared"])
-def test_postgres_migrate_refuses_undeclared_drops_before_any_ddl(
-    host, tmp_path: Path, scenario: str
-) -> None:
+def test_postgres_provision_refuses_undeclared_drops_before_any_ddl(tmp_path: Path, scenario: str) -> None:
     environment = os.environ.get("DJANGO_COMPOSE_PROVISION_POSTGRES_ENV")
     if not environment:
         pytest.skip("requires an explicit private PostgreSQL test environment")
-    root, run = host
-    if scenario == "declared":
-        operations = [
-            add_field("new"),
-            "migrations.RunPython(move, migrations.RunPython.noop)",
-            'IntendedRemoveField(model_name="record", name="old")',
+    import psycopg
+
+    database = _database(Path(environment), prefix="compose_plan_guard")
+    server = {
+        "host": database["HOST"],
+        "port": database["PORT"],
+        "user": database["USER"],
+        "password": database["PASSWORD"],
+        **database["OPTIONS"],
+    }
+    with psycopg.connect(dbname="postgres", autocommit=True, **server) as admin:
+        admin.execute(f'CREATE DATABASE "{database["NAME"]}"')
+    try:
+        _prove_provision(tmp_path, scenario, json.dumps(database), server, str(database["NAME"]))
+    finally:
+        with psycopg.connect(dbname="postgres", autocommit=True, **server) as admin:
+            admin.execute(f'DROP DATABASE IF EXISTS "{database["NAME"]}" WITH (FORCE)')
+
+
+def _prove_provision(root: Path, scenario: str, settings: str, server: dict[str, object], name: str) -> None:
+    import psycopg
+
+    note = "class Note(Composable, concrete=True):\n    text = models.CharField(max_length=40, default='')\n"
+    note += "    class Meta:\n        abstract = True\n"
+    old = "old = models.CharField(max_length=40, default='')"
+    manage = _composed_host(root, _item_models(old) + note, database=settings)
+
+    def query(sql: str) -> list[tuple[object, ...]]:
+        with psycopg.connect(dbname=name, autocommit=True, **server) as connection:
+            cursor = connection.execute(sql)
+            return cursor.fetchall() if cursor.description else []
+
+    def columns(table: str) -> list[object]:
+        return [
+            row[0]
+            for row in query(
+                "SELECT column_name FROM information_schema.columns "
+                f"WHERE table_name = '{table}' ORDER BY ordinal_position"
+            )
         ]
-        preamble = """
-def move(apps, editor):
-    Record = apps.get_model("alpha", "Record")
-    Record._base_manager.using(editor.connection.alias).update(new=models.F("old"))
-"""
+
+    query("INSERT INTO probe_item (old) VALUES ('kept')")
+    query("INSERT INTO probe_note (text) VALUES ('kept')")
+    if scenario == "declared":
+        operations = (
+            "migrations.AddField(model_name='item', name='new', "
+            "field=models.CharField(max_length=40, default='')), "
+            "migrations.RunPython(copy, migrations.RunPython.noop), "
+            "IntendedRemoveField(model_name='item', name='old')"
+        )
+        models_source = _item_models("new = models.CharField(max_length=40, default='')") + note
+    elif scenario == "column":
+        operations = "migrations.RemoveField(model_name='item', name='old')"
+        models_source = _item_models() + note
     else:
-        operations = [add_field("new"), REMOVE_OLD if scenario == "column" else DELETE_RECORD]
-        preamble = ""
-    migration(root, "0002_drop", operations, preamble=preamble)
-    # Only the private environment file's path enters the probe; it reads the credentials.
-    result = run(
-        PRELUDE
-        + f"""
-import sys
-sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})
-from test_provision_postgres import _database
-database = _database(Path({environment!r}), prefix="compose_plan_guard")
-connections.settings["default"] = connections.configure_settings({{"default": database}})["default"]
-# Model population already created the configured default wrapper; replace it.
-del connections["default"]
-original = connection.settings_dict["NAME"]
-# Create an empty database without running the host's migrations into it.
-test_name = connection.creation._create_test_db(verbosity=0, autoclobber=False, keepdb=False)
-connection.close()
-connection.settings_dict["NAME"] = test_name
-try:
-    assert connection.vendor == "postgresql"
-    Record = seed(old="kept")
-    if {scenario!r} == "declared":
-        migrate(skip_checks=True)
-        assert columns() == ["id", "new"]
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT new FROM alpha_record")
-            assert cursor.fetchall() == [("kept",)]
-    else:
-        detail = "alpha_record.old" if {scenario!r} == "column" else "alpha_record.*"
-        expect(CommandError, f"alpha.record: {{detail}} holds data in 1 rows on 'default'", migrate)
-        assert columns() == ["id", "old"]
-        assert list(Record._base_manager.values_list("old", flat=True)) == ["kept"]
-        assert ("alpha", "0002_drop") not in applied()
-finally:
-    connections.close_all()
-    connection.creation.destroy_test_db(old_database_name=original, verbosity=0)
-print("PostgreSQL migrate drop guard verified")
-""",
-        success=False,
-    )
-    if result.returncode:
-        diagnostic = tmp_path / "plan-guard-postgres-private.stderr"
-        descriptor = os.open(diagnostic, os.O_CREAT | os.O_WRONLY, 0o600)
-        with os.fdopen(descriptor, "w") as stream:
-            stream.write(result.stderr)
-        pytest.fail(f"PostgreSQL migrate drop guard proof failed; private diagnostic: {diagnostic}")
-    assert "PostgreSQL migrate drop guard verified" in result.stdout
+        operations = "migrations.DeleteModel(name='Note')"
+        models_source = _item_models(old)
+    _history(root, "0002_drop", operations)
+    (root / "probe/models.py").write_text(models_source)
+    assert manage("compose").returncode == 0
+    result = manage("provision", "--wait-db", "1")
+    if scenario == "declared":
+        assert result.returncode == 0, "declared drop failed to provision"
+        assert columns("probe_item") == ["id", "new"]
+        assert query("SELECT new FROM probe_item") == [("kept",)]
+        assert query("SELECT state FROM django_compose_provision") == [("complete",)]
+        return
+    assert result.returncode != 0
+    assert "unsafe migration drop: probe.0002_drop" in result.stdout + result.stderr
+    assert columns("probe_item") == ["id", "old"]
+    assert columns("probe_note") == ["id", "text"]
+    assert query("SELECT state FROM django_compose_provision") == [("in_progress",)]
+    assert not query("SELECT 1 FROM django_migrations WHERE name = '0002_drop'")
 
 
 if __name__ == "__main__":

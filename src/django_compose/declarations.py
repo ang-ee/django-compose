@@ -51,7 +51,7 @@ class ModelDeclarationHook(Protocol):
 
 @runtime_checkable
 class MigrationPolicy(Protocol):
-    """Supply capability-owned exemptions to destructive-change checks."""
+    """Supply capability-owned row exemptions to the drop guard."""
 
     def retired_primary_keys(self, model: type[models.Model], alias: str) -> Iterable[Any]: ...
 
@@ -78,7 +78,8 @@ class ArtifactHook(Protocol):
 def resolve_integrations(paths: Iterable[str]) -> tuple[object, ...]:
     """Instantiate explicit dotted classes once, preserving authored order.
 
-    Called only in phase 2; integration modules may freely import source models.
+    Called after phase-2 population: by the build, and by the drop guard while
+    migration commands run. Integration modules may freely import source models.
     A class implements one or more independent protocols without inheritance.
     """
     if isinstance(paths, str) or not isinstance(paths, (list, tuple)):

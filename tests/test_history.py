@@ -18,7 +18,7 @@ settings.COMPOSE_SNAPSHOT = SimpleNamespace(
 receipt = SimpleNamespace(HISTORY_LABELS=("alpha", "beta"), RETIRED_LABELS=())
 stack = ExitStack()
 stack.enter_context(patch("django_compose.migrations.read_receipt", return_value=receipt))
-updated = stack.enter_context(patch("django_compose.artifacts.update_receipt"))
+updated = stack.enter_context(patch("django_compose.migrations.update_receipt"))
 """
 
 
@@ -134,9 +134,46 @@ with patch.object(MigrationExecutor, "migrate", fail_secondary):
     expect(RuntimeError, "secondary unavailable", lambda: retire_history("alpha", purge=True))
 migrate = lambda: call_command("migrate", database="other", interactive=False, verbosity=0)
 expect(CommandError, "compose_purge (Delete model Record): alpha.record: alpha_record.* holds data", migrate)
+expect(CommandError, "apply the 'alpha' purge on this deployment with retire_history alpha --purge.", migrate)
 assert "alpha_record" in connections["other"].introspection.table_names()
 retire_history("alpha", purge=True)
 assert "alpha_record" not in connections["other"].introspection.table_names()
+"""
+    )
+
+
+def test_purge_applies_only_the_retired_label_history(host):
+    root, run = host
+    write(
+        root,
+        "history/beta/0001_pending.py",
+        """
+from django.db import migrations
+class Migration(migrations.Migration):
+    operations = []
+""",
+    )
+    write(
+        root,
+        "history/alpha/0002_after_beta.py",
+        """
+from django.db import migrations
+class Migration(migrations.Migration):
+    dependencies = [("alpha", "0001_origin"), ("beta", "0001_pending")]
+    operations = []
+""",
+    )
+    run(
+        DISABLE
+        + """
+executor = MigrationExecutor(connection)
+executor.migrate([("alpha", "0001_origin")])
+expect(RuntimeError, "purge applies only 'alpha' history; migrate 'default' first: beta.0001_pending",
+       lambda: retire_history("alpha", purge=True))
+assert not updated.called
+applied = MigrationExecutor(connection).loader.applied_migrations
+assert ("beta", "0001_pending") not in applied and ("alpha", "0002_after_beta") not in applied
+assert "alpha_record" in connection.introspection.table_names()
 """
     )
 

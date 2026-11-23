@@ -1,4 +1,4 @@
-"""Share native makemigrations' autodetector and guard the plan's drops before it runs."""
+"""Share native makemigrations' autodetector, as required by commands.E001, and guard planned drops."""
 
 from typing import Any
 
@@ -10,7 +10,7 @@ from django_compose.migrations import DropGuardAutodetector, check_plan_drops
 
 
 class Command(NativeCommand):
-    """Apply native migrations once the shared drop guard has proven their plan safe."""
+    """Apply native migrations once the drop guard has judged their plan."""
 
     autodetector = DropGuardAutodetector
 
@@ -19,13 +19,14 @@ class Command(NativeCommand):
         if options["fake"]:
             # A faked plan records migrations without running their operations.
             return super().handle(*args, **options)
-        judged: list[str] = []
+        judged: set[int] = set()
 
-        def guard(sender: Any, *, plan: Any, using: str, apps: Any, **kwargs: Any) -> None:
-            # Native migrate sends pre_migrate once per app with models; judge its plan once.
-            if not judged:
-                judged.append(using)
-                check_plan_drops(plan, using=using, apps=apps)
+        def guard(sender: Any, *, plan: Any, using: str, **kwargs: Any) -> None:
+            # Native migrate sends one plan to every app with a models module, which
+            # always includes django_compose's own; judge each plan once.
+            if id(plan) not in judged:
+                judged.add(id(plan))
+                check_plan_drops(plan, using=using)
 
         pre_migrate.connect(guard, weak=False)
         try:

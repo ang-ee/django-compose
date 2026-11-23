@@ -98,3 +98,25 @@ def test_distribution_has_no_consumer_vocabulary():
     for path in sorted(root.rglob("*.py")):
         for line in path.read_text().splitlines():
             assert "angee" not in line.lower() and '"web"' not in line and "'web'" not in line, (path, line)
+
+
+def test_history_declarations_import_only_django():
+    """Retained migration history imports ``django_compose.operations``; keep it a Django leaf."""
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "src/django_compose/operations.py"
+    imported = {
+        name
+        for node in ast.walk(ast.parse(source.read_text()))
+        for name in (
+            [alias.name for alias in node.names]
+            if isinstance(node, ast.Import)
+            else [node.module or ""]
+            if isinstance(node, ast.ImportFrom)
+            else []
+        )
+    }
+    assert imported and all(name == "__future__" or name.split(".")[0] == "django" for name in imported), (
+        imported
+    )

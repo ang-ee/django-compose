@@ -434,7 +434,8 @@ assert model._base_manager.get().value == "valuable"
 def test_shared_table_identity_survives_quotes_and_sqlite_case(host, active_table):
     _, run = host
     run(f"""
-from django_compose.migrations import _shared_table_drops
+from django.db import connections
+from django_compose.migrations import _changed_removals, _shared_table_drops
 loader = MigrationLoader(None)
 before = loader.project_state()
 before.models[("alpha", "record")].options["db_table"] = '"alpha_record"'
@@ -451,7 +452,8 @@ with patch.object(connection, "cursor", side_effect=AssertionError("offline bind
     expected = "offline" if {active_table!r} == "ALPHA_RECORD" else "still owned"
     changes = {{"alpha": [migrations.Migration("drop", "alpha")]}}
     changes["alpha"][0].operations = [migrations.DeleteModel("Record")]
-    expect(CommandError, expected, lambda: _shared_table_drops(before, after, changes))
+    removals = list(_changed_removals(before, changes))
+    expect(CommandError, expected, lambda: _shared_table_drops(removals, after, sorted(connections)))
 assert model._base_manager.count() == 0
 """)
 

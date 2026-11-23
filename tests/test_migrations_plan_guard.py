@@ -4,6 +4,16 @@ import pytest
 from test_migrations import host as host
 from test_migrations import write
 
+from django_compose.serving import Receipt
+
+
+@pytest.fixture(autouse=True)
+def owned(host):
+    """The build record makes alpha's and beta's history the composition's own."""
+    root, _ = host
+    write(root, "output/__init__.py", Receipt(("alpha", "beta"), (), "plan-guard", {}, "compiler").source())
+
+
 PRELUDE = """
 from django.db import connections
 from django.db.migrations.recorder import MigrationRecorder
@@ -321,9 +331,7 @@ def test_storage_already_gone_is_skipped(host, kind):
 seed(old="kept")
 def judge():
     executor = MigrationExecutor(connection)
-    plan = executor.migration_plan(executor.loader.graph.leaf_nodes())
-    state = executor.loader.project_state(("alpha", "0001_origin"))
-    check_plan_drops(plan, using="default", apps=state.apps)
+    check_plan_drops(executor.migration_plan(executor.loader.graph.leaf_nodes()), using="default")
 expect(CommandError, "holds data", judge)
 with connection.cursor() as cursor:
     if {kind!r} == "column":
@@ -358,7 +366,7 @@ else:
     )
 
 
-def test_storage_the_plan_introduces_needs_no_proof(host):
+def test_storage_the_plan_creates_is_absent_before_it_and_skipped(host):
     root, run = host
     migration(
         root,
@@ -383,8 +391,7 @@ def test_storage_the_plan_introduces_needs_no_proof(host):
         PRELUDE
         + """
 seed(old="kept")
-with patch("django_compose.migrations._holding", side_effect=AssertionError("probed introduced storage")):
-    migrate()
+migrate()
 assert columns() == ["id", "old"]
 assert "alpha_scratch" not in tables()
 """
@@ -520,3 +527,302 @@ assert [operation.deconstruct()[2] for operation in operations] == [
     {"model_name": "record", "name": "old"}, {"name": "Record"}
 ]
 """)
+
+
+FIELDS = """[("id", models.AutoField(primary_key=True, serialize=False)),
+    ("old", models.CharField(max_length=40, default=""))]"""
+
+
+def adopt(name, *, delete_record=False):
+    """A state-only CreateModel adopting alpha_record, as Django documents for moves."""
+    operations = ['migrations.DeleteModel(name="Record")'] if delete_record else []
+    operations.append(
+        f'migrations.CreateModel(name="{name}", fields={FIELDS}, options={{"db_table": "alpha_record"}})'
+    )
+    return f"migrations.SeparateDatabaseAndState(state_operations=[{', '.join(operations)}])"
+
+
+def test_foreign_history_belongs_to_its_owner(host):
+    root, run = host
+    migration(root, "0002_drop", [REMOVE_OLD])
+    run(
+        PRELUDE
+        + """
+from django.test import override_settings
+with override_settings(INSTALLED_APPS=[commands, "django.contrib.contenttypes", "alpha", "beta", "author"]):
+    executor = MigrationExecutor(connection)
+    nodes = [("contenttypes", "0001_initial"), ("alpha", "0001_origin")]
+    executor.migrate(nodes)
+    state = executor.loader.project_state(nodes)
+    ContentType = state.apps.get_model("contenttypes", "ContentType")
+    ContentType._base_manager.create(name="legacy", app_label="legacy", model="row")
+    state.apps.get_model("alpha", "Record")._base_manager.create(old="kept")
+    # Django's own 0002 drops the legacy name column: its owner's history, not judged.
+    migrate("contenttypes")
+    with connection.cursor() as cursor:
+        described = connection.introspection.get_table_description(cursor, "django_content_type")
+    assert "name" not in [column.name for column in described]
+    expect(CommandError, "alpha.0002_drop (Remove field old from record)", migrate)
+    assert columns() == ["id", "old"]
+"""
+    )
+
+
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize("drop", ["table", "column"])
+def test_state_only_adoption_then_drop_is_judged(host, drop, split):
+    root, run = host
+    migration(root, "0002_adopt", [adopt("Ledger", delete_record=True)])
+    removal = (
+        'migrations.DeleteModel(name="Ledger")'
+        if drop == "table"
+        else remove_field("old").replace('"record"', '"ledger"')
+    )
+    detail = "alpha_record.*" if drop == "table" else "alpha_record.old"
+    migration(root, "0003_drop", [removal], after="0002_adopt")
+    run(
+        PRELUDE
+        + f"""
+seed(old="kept")
+if {split!r}:
+    migrate("alpha", "0002_adopt")
+expect(CommandError, "alpha.0003_drop", migrate)
+expect(CommandError, "alpha.ledger: {detail} holds data in 1 rows", migrate)
+assert columns() == ["id", "old"]
+"""
+    )
+
+
+def test_fake_initial_adoption_is_judged(host):
+    root, run = host
+    migration(root, "0002_drop", [REMOVE_OLD])
+    run(
+        PRELUDE
+        + """
+seed(old="legacy data")
+MigrationRecorder(connection).migration_qs.filter(app="alpha").delete()
+expect(CommandError, "alpha.0002_drop", lambda: migrate(fake_initial=True))
+assert columns() == ["id", "old"]
+assert not {key for key in applied() if key[0] == "alpha"}
+"""
+    )
+
+
+def test_many_to_many_moved_behind_an_explicit_through_keeps_its_rows_protected(host):
+    root, run = host
+    migration(
+        root,
+        "0002_tags",
+        [
+            'migrations.CreateModel(name="Tag", fields=['
+            '("id", models.AutoField(primary_key=True, serialize=False))])',
+            add_field("tags", 'models.ManyToManyField("alpha.Tag")'),
+        ],
+    )
+    through = (
+        'migrations.CreateModel(name="RecordTag", fields=['
+        '("id", models.AutoField(primary_key=True, serialize=False)), '
+        '("record", models.ForeignKey("alpha.Record", models.CASCADE)), '
+        '("tag", models.ForeignKey("alpha.Tag", models.CASCADE))], options={"db_table": "alpha_record_tags"})'
+    )
+    switched = (
+        'migrations.AlterField(model_name="record", name="tags", '
+        'field=models.ManyToManyField("alpha.Tag", through="alpha.RecordTag"))'
+    )
+    migration(
+        root,
+        "0003_through",
+        [f"migrations.SeparateDatabaseAndState(state_operations=[{through}, {switched}])"],
+        after="0002_tags",
+    )
+    migration(
+        root,
+        "0004_drop",
+        [remove_field("tags"), 'migrations.DeleteModel(name="RecordTag")'],
+        after="0003_through",
+    )
+    run(
+        PRELUDE
+        + """
+executor = MigrationExecutor(connection)
+executor.migrate([("alpha", "0002_tags")])
+state = executor.loader.project_state(("alpha", "0002_tags"))
+record = state.apps.get_model("alpha", "Record")._base_manager.create(old="kept")
+record.tags.add(state.apps.get_model("alpha", "Tag")._base_manager.create())
+try:
+    migrate()
+except CommandError as error:
+    message = str(error)
+else:
+    raise AssertionError("the through table's rows were dropped")
+# The field drops no table once an explicit through owns it; the through model's deletion does.
+assert "Remove field tags" not in message, message
+assert "alpha.0004_drop (Delete model RecordTag): alpha.recordtag: alpha_record_tags.* holds data" in message
+assert "alpha_record_tags" in tables()
+"""
+    )
+
+
+def test_storage_an_earlier_drop_ended_is_the_plans_own(host):
+    root, run = host
+    again = f'migrations.CreateModel(name="Again", fields={FIELDS}, options={{"db_table": "alpha_record"}})'
+    migration(
+        root,
+        "0002_replace",
+        ['IntendedDeleteModel(name="Record")', again, 'migrations.DeleteModel(name="Again")'],
+    )
+    run(
+        PRELUDE
+        + """
+seed(old="dropped as declared")
+migrate()
+assert "alpha_record" not in tables()
+"""
+    )
+
+
+def test_table_owned_at_the_end_of_the_plan_is_not_deleted(host):
+    root, run = host
+    migration(root, "0002_twin", [adopt("Twin")])
+    migration(root, "0003_drop", [DELETE_RECORD], after="0002_twin")
+    run(
+        PRELUDE
+        + """
+seed()
+expect(CommandError, "table 'alpha_record' is still owned by alpha.twin on 'default'", migrate)
+assert "alpha_record" in tables()
+"""
+    )
+
+
+def test_receiver_is_disconnected_after_refused_runs(host):
+    root, run = host
+    migration(root, "0002_drop", [REMOVE_OLD])
+    run(
+        PRELUDE
+        + """
+from django.db.models.signals import pre_migrate
+before = list(pre_migrate.receivers)
+seed(old="kept")
+for _ in range(2):
+    expect(CommandError, "holds data", migrate)
+assert pre_migrate.receivers == before
+"""
+    )
+
+
+def test_squashing_keeps_declared_drops_and_folds_them_into_a_native_deletion(host):
+    root, run = host
+    migration(
+        root,
+        "0002_alter",
+        [
+            'migrations.AlterField(model_name="record", name="old", '
+            'field=models.CharField(max_length=50, default=""))'
+        ],
+    )
+    migration(root, "0003_drop", ['IntendedRemoveField(model_name="record", name="old")'], after="0002_alter")
+    run(
+        PRELUDE
+        + """
+from django.db.migrations.optimizer import MigrationOptimizer
+from django_compose.operations import IntendedDeleteModel, IntendedRemoveField
+call_command("squashmigrations", "alpha", "0002_alter", "0003_drop", interactive=False, verbosity=0)
+[squashed] = Path("history/alpha").glob("0002_*squashed*.py")
+assert "django_compose.operations.IntendedRemoveField(" in squashed.read_text()
+# Folding into a following native deletion yields the native, still guarded operation.
+optimized = MigrationOptimizer().optimize(
+    [IntendedRemoveField("record", "old"), migrations.DeleteModel("Record")], "alpha"
+)
+assert [type(operation) for operation in optimized] == [migrations.DeleteModel]
+optimized = MigrationOptimizer().optimize(
+    [migrations.RemoveField("record", "old"), IntendedDeleteModel("Record")], "alpha"
+)
+assert [type(operation) for operation in optimized] == [IntendedDeleteModel]
+"""
+    )
+
+
+def test_cross_app_plans_and_targeted_migrate(host):
+    root, run = host
+    migration(root, "0002_spare", [add_field("spare")])
+    migration(root, "0003_drop", [REMOVE_OLD], after="0002_spare")
+    write(
+        root,
+        "history/beta/0001_note.py",
+        """
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    operations = [migrations.CreateModel(name="Note", fields=[
+        ("id", models.AutoField(primary_key=True, serialize=False)),
+        ("text", models.CharField(max_length=40, default="")),
+    ])]
+""",
+    )
+    write(
+        root,
+        "history/beta/0002_drop.py",
+        """
+from django.db import migrations
+class Migration(migrations.Migration):
+    dependencies = [("beta", "0001_note"), ("alpha", "0003_drop")]
+    operations = [migrations.RemoveField(model_name="note", name="text")]
+""",
+    )
+    run(
+        PRELUDE
+        + """
+seed(old="kept")
+executor = MigrationExecutor(connection)
+executor.migrate([("beta", "0001_note")])
+Note = executor.loader.project_state(("beta", "0001_note")).apps.get_model("beta", "Note")
+Note._base_manager.create(text="t")
+# A targeted plan is judged on its own migrations only.
+migrate("alpha", "0002_spare")
+assert columns() == ["id", "old", "spare"]
+for refusal in (
+    "alpha.0003_drop (Remove field old from record): alpha.record: alpha_record.old holds data",
+    "beta.0002_drop (Remove field text from note): beta.note: beta_note.text holds data",
+):
+    expect(CommandError, refusal, migrate)
+assert columns() == ["id", "old", "spare"]
+assert ("alpha", "0003_drop") not in applied()
+"""
+    )
+
+
+def test_guard_fires_when_only_django_compose_has_a_models_module(host):
+    root, run = host
+    migration(root, "0002_drop", [REMOVE_OLD])
+    run(
+        PRELUDE
+        + """
+seed(old="kept")
+config = apps.get_app_config("alpha")
+config.models_module = None
+config.models.clear()
+apps.clear_cache()
+assert [config.label for config in apps.get_app_configs() if config.models_module] == ["django_compose"]
+expect(CommandError, "alpha.0002_drop", migrate)
+assert columns() == ["id", "old"]
+"""
+    )
+
+
+def test_import_audit_retains_the_declaration_provider(host):
+    root, run = host
+    migration(root, "0002_drop", ['IntendedRemoveField(model_name="record", name="old")'])
+    run(
+        PRELUDE
+        + """
+from io import StringIO
+from django_compose.migration_imports import MigrationImportReport
+out = StringIO()
+call_command("check_migrations", imports=True, stdout=out)
+assert "0002_drop.py: django_compose.operations: distribution: django-compose" in out.getvalue()
+report = MigrationImportReport()
+report.collect()
+refusals = list(report.removal_refusals(["django-compose"]))
+assert any("retained import django_compose.operations requires django-compose" in item for item in refusals)
+"""
+    )
