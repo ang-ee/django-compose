@@ -1157,3 +1157,152 @@ assert rendered.call_count == 3, rendered.call_args_list
 assert columns() == ["id", "legacy"]
 """
     )
+
+
+@pytest.mark.parametrize("removal", ["table", "column"])
+@pytest.mark.parametrize("chain", ["model", "table"])
+def test_storage_renamed_away_and_back_stays_protected(host, chain, removal):
+    root, run = host
+    if chain == "model":
+        away = 'migrations.RenameModel(old_name="Record", new_name="Ledger")'
+        back = 'migrations.RenameModel(old_name="Ledger", new_name="Record")'
+    else:
+        away = 'migrations.AlterModelTable(name="record", table="alpha_ledger")'
+        back = 'migrations.AlterModelTable(name="record", table=None)'
+    migration(root, "0002_away", [away])
+    migration(root, "0003_back", [back], after="0002_away")
+    if removal == "table":
+        migration(root, "0004_drop", [DELETE_RECORD], after="0003_back")
+        detail = "(Delete model Record): alpha.record: alpha_record.* holds data in 1 rows"
+    else:
+        migration(root, "0004_drop", [REMOVE_OLD], after="0003_back")
+        detail = "(Remove field old from record): alpha.record: alpha_record.old holds data in 1 rows"
+    run(
+        PRELUDE
+        + f"""
+seed(old="kept")
+expect(CommandError, "alpha.0004_drop {detail}", migrate)
+assert columns() == ["id", "old"]
+assert "alpha_ledger" not in tables()
+"""
+    )
+
+
+def test_a_name_a_rename_freed_is_new_storage_and_the_renamed_table_stays_protected(host):
+    root, run = host
+    again = f'migrations.CreateModel(name="Record", fields={FIELDS})'
+    migration(root, "0002_reuse", ['migrations.RenameModel(old_name="Record", new_name="Ledger")', again])
+    migration(root, "0003_drop_new", [DELETE_RECORD], after="0002_reuse")
+    migration(root, "0004_drop_old", ['migrations.DeleteModel(name="Ledger")'], after="0003_drop_new")
+    run(
+        PRELUDE
+        + """
+seed(old="kept")
+try:
+    migrate()
+except CommandError as error:
+    message = str(error)
+else:
+    raise AssertionError("the renamed table's rows were dropped")
+assert "alpha.0004_drop_old (Delete model Ledger): alpha.ledger: alpha_record.* holds data" in message
+# The new Record's table is the plan's own, created where the rename freed its name.
+assert "0003_drop_new" not in message, message
+migrate("alpha", "0003_drop_new")
+assert "alpha_ledger" in tables() and "alpha_record" not in tables()
+expect(CommandError, "alpha.ledger: alpha_ledger.* holds data in 1 rows", migrate)
+assert "alpha_ledger" in tables()
+"""
+    )
+
+
+def test_a_column_moved_by_alter_field_stays_protected(host):
+    root, run = host
+    moved = 'models.CharField(max_length=40, default="", db_column="legacy")'
+    migration(root, "0002_move", [f'migrations.AlterField(model_name="record", name="old", field={moved})'])
+    migration(root, "0003_drop", [REMOVE_OLD], after="0002_move")
+    run(
+        PRELUDE
+        + """
+seed(old="kept")
+refusal = "alpha.0003_drop (Remove field old from record): alpha.record: alpha_record.old holds"
+expect(CommandError, refusal, migrate)
+assert columns() == ["id", "old"]
+migrate("alpha", "0002_move")
+assert columns() == ["id", "legacy"]
+expect(CommandError, "alpha.record: alpha_record.legacy holds data in 1 rows", migrate)
+assert columns() == ["id", "legacy"]
+"""
+    )
+
+
+@pytest.mark.parametrize("rotation", [("b", "c"), ("c", "b")])
+def test_columns_swapped_three_ways_keep_their_rows_protected(host, rotation):
+    root, run = host
+    first, second = rotation
+
+    def column(name, db_column):
+        field = f'models.CharField(max_length=40, null=True, db_column="{db_column}")'
+        return f'migrations.AlterField(model_name="record", name="{name}", field={field})'
+
+    nullable = "models.CharField(max_length=40, null=True)"
+    migration(root, "0002_fields", [add_field(name, nullable) for name in "abc"])
+    # a moves aside, the other two each take the column before them, and a takes the last.
+    migration(
+        root,
+        "0003_swap",
+        [column("a", "spare"), column(first, "a"), column(second, first), column("a", second)],
+        after="0002_fields",
+    )
+    migration(root, "0004_drop", [remove_field(name) for name in "abc"], after="0003_swap")
+    run(
+        PRELUDE
+        + f"""
+seed("0002_fields", a="kept")
+try:
+    migrate()
+except CommandError as error:
+    message = str(error)
+else:
+    raise AssertionError("the swapped column's rows were dropped")
+assert "alpha.0004_drop (Remove field a from record): alpha.record: alpha_record.a holds data" in message
+assert "Remove field b" not in message and "Remove field c" not in message, message
+assert columns() == ["id", "old", "a", "b", "c"]
+migrate("alpha", "0003_swap")
+assert sorted(columns()) == ["a", "b", "c", "id", "old"]
+expect(CommandError, "alpha.record: alpha_record.{second} holds data in 1 rows", migrate)
+"""
+    )
+
+
+@pytest.mark.parametrize("rename", ["model", "field"])
+def test_a_many_to_many_table_renamed_with_its_owner_stays_protected(host, rename):
+    root, run = host
+    tag = 'migrations.CreateModel(name="Tag", fields=[("id", models.AutoField(primary_key=True))])'
+    migration(root, "0002_tags", [tag, add_field("tags", 'models.ManyToManyField("alpha.Tag")')])
+    if rename == "model":
+        renamed = 'migrations.RenameModel(old_name="Record", new_name="Ledger")'
+        removal = 'migrations.RemoveField(model_name="ledger", name="tags")'
+        detail = "(Remove field tags from ledger): alpha.ledger: alpha_record_tags.* holds data in 1 rows"
+        table = "alpha_ledger_tags"
+    else:
+        renamed = 'migrations.RenameField(model_name="record", old_name="tags", new_name="labels")'
+        removal = remove_field("labels")
+        detail = "(Remove field labels from record): alpha.record: alpha_record_tags.* holds data in 1 rows"
+        table = "alpha_record_labels"
+    migration(root, "0003_rename", [renamed], after="0002_tags")
+    migration(root, "0004_drop", [removal], after="0003_rename")
+    run(
+        PRELUDE
+        + f"""
+executor = MigrationExecutor(connection)
+executor.migrate([("alpha", "0002_tags")])
+state = executor.loader.project_state(("alpha", "0002_tags"))
+record = state.apps.get_model("alpha", "Record")._base_manager.create(old="kept")
+record.tags.add(state.apps.get_model("alpha", "Tag")._base_manager.create())
+expect(CommandError, "alpha.0004_drop {detail}", migrate)
+assert "alpha_record_tags" in tables() and "{table}" not in tables()
+migrate("alpha", "0003_rename")
+expect(CommandError, "{table}.* holds data in 1 rows", migrate)
+assert "{table}" in tables()
+"""
+    )
