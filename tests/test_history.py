@@ -113,6 +113,34 @@ expect(CommandError, "unset DJANGO_COMPOSE_MODE", lambda: call_command({command!
 """)
 
 
+def test_migrate_leaves_an_unapplied_purge_to_retirement(host):
+    _, run = host
+    run(
+        DISABLE
+        + """
+from django.db import connections
+connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
+for alias in connections:
+    executor = MigrationExecutor(connections[alias])
+    executor.migrate(executor.loader.graph.leaf_nodes())
+    old = executor.loader.project_state().apps.get_model("alpha", "Record")
+    old._base_manager.using(alias).create(old="purged explicitly")
+native_migrate = MigrationExecutor.migrate
+def fail_secondary(executor, *args, **kwargs):
+    if executor.connection.alias == "other":
+        raise RuntimeError("secondary unavailable")
+    return native_migrate(executor, *args, **kwargs)
+with patch.object(MigrationExecutor, "migrate", fail_secondary):
+    expect(RuntimeError, "secondary unavailable", lambda: retire_history("alpha", purge=True))
+migrate = lambda: call_command("migrate", database="other", interactive=False, verbosity=0)
+expect(CommandError, "compose_purge (Delete model Record): alpha.record: alpha_record.* holds data", migrate)
+assert "alpha_record" in connections["other"].introspection.table_names()
+retire_history("alpha", purge=True)
+assert "alpha_record" not in connections["other"].introspection.table_names()
+"""
+    )
+
+
 def test_reset_disabled_history_keeps_historical_models_and_tables(host):
     _, run = host
     run(

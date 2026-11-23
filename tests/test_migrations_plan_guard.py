@@ -33,7 +33,7 @@ def seed(target="0001_origin", alias="default", **values):
 """
 
 
-def migration(root, name, operations, *, after="0001_origin", preamble=""):
+def migration(root, name, operations, *, after="0001_origin", preamble="", attributes=""):
     write(
         root,
         f"history/alpha/{name}.py",
@@ -42,6 +42,7 @@ from django.db import migrations, models
 from django_compose.operations import IntendedDeleteModel, IntendedRemoveField
 {preamble}
 class Migration(migrations.Migration):
+    {attributes}
     dependencies = [("alpha", {after!r})]
     operations = [{", ".join(operations)}]
 """,
@@ -180,6 +181,84 @@ else:
     assert columns() == ["id", "old"]
     assert "alpha_archive" not in tables()
     assert ("alpha", "0002_move") not in applied()
+"""
+    )
+
+
+COPIED = ("form", "endpoint", "secret")
+COPY = """
+def copy(apps, editor):
+    # Copies into new storage and leaves the source columns holding their data.
+    Record = apps.get_model("alpha", "Record")
+    Webform = apps.get_model("alpha", "Webform")
+    alias = editor.connection.alias
+    for row in Record._base_manager.using(alias).all():
+        Webform._base_manager.using(alias).create(
+            record_id=row.pk, form=row.form, endpoint=row.endpoint, secret=row.secret
+        )
+"""
+WEBFORM = """migrations.CreateModel(name="Webform", fields=[
+    ("id", models.AutoField(primary_key=True, serialize=False)),
+    ("record", models.ForeignKey("alpha.Record", models.CASCADE)),
+    ("form", models.CharField(max_length=40, default="")),
+    ("endpoint", models.CharField(max_length=40, default="")),
+    ("secret", models.CharField(max_length=40, default="")),
+])"""
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_copying_move_then_declared_drops_in_one_migration(host, declared):
+    root, run = host
+    migration(
+        root,
+        "0002_webform",
+        [
+            *(add_field(name) for name in COPIED),
+            'migrations.AddConstraint(model_name="record", constraint=models.UniqueConstraint('
+            'fields=["form", "endpoint"], name="record_form_endpoint"))',
+        ],
+    )
+    removal = "IntendedRemoveField" if declared else "migrations.RemoveField"
+    migration(
+        root,
+        "0003_move_webforms",
+        [
+            WEBFORM,
+            "migrations.RunPython(copy, migrations.RunPython.noop)",
+            'migrations.RemoveConstraint(model_name="record", name="record_form_endpoint")',
+            *(f'{removal}(model_name="record", name="{name}")' for name in COPIED),
+        ],
+        after="0002_webform",
+        preamble=COPY,
+        # A consumer's own marker attribute is inert to Django and to the guard.
+        attributes="moves_webform_channels = True",
+    )
+    run(
+        PRELUDE
+        + f"""
+seed("0002_webform", old="kept", form="contact", endpoint="https://example.invalid/hook", secret="s")
+if {declared!r}:
+    migrate()
+    assert columns() == ["id", "old"]
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT record_id, form, endpoint, secret FROM alpha_webform")
+        assert cursor.fetchall() == [(1, "contact", "https://example.invalid/hook", "s")]
+else:
+    try:
+        migrate()
+    except CommandError as error:
+        message = str(error)
+    else:
+        raise AssertionError("an undeclared drop of copied columns applied")
+    for name in {COPIED!r}:
+        refusal = (
+            f"alpha.0003_move_webforms (Remove field {{name}} from record): alpha.record: "
+            f"alpha_record.{{name}} holds data in 1 rows on 'default'"
+        )
+        assert refusal in message, message
+    assert columns() == ["id", "old", "form", "endpoint", "secret"]
+    assert "alpha_webform" not in tables()
+    assert ("alpha", "0003_move_webforms") not in applied()
 """
     )
 
