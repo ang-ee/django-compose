@@ -4,12 +4,14 @@
 
 - Apply the [drop guard](docs/SPEC.md#drop-guard) when `migrate` runs, and so in
   `provision`, also under `--skip-checks`: a pending removal in the history the project
-  owns that would destroy stored data is refused before any operation runs.
+  owns that would destroy stored data is refused before any operation runs, under the
+  name its storage had before the plan, wherever the plan's own renames move it.
   Previously only autodetected removals were judged, at `makemigrations`, so a removal
   migration already on disk was applied unchecked. Django's and other apps' history
   remains their owners' responsibility. On an alias that holds no table but the
   migration and provision recorders, such as a fresh or test database, nothing is
-  stored and the guard returns at once. See
+  stored and the guard returns at once. Elsewhere it renders a model only where it
+  judges one, so it does not repeat the state rendering native `migrate` does. See
   [proposal 0005](docs/proposals/0005-migrate-time-drop-guard.md).
 - Add `django_compose.operations.IntendedRemoveField` and `IntendedDeleteModel` to
   declare a drop a migration intends; see
@@ -23,10 +25,11 @@
   that still holds data is now refused at `migrate` and `provision`, which is the
   point. Review each named removal: keep the storage, or move its data and write the
   removal as `IntendedRemoveField(model_name=..., name=...)` or
-  `IntendedDeleteModel(name=...)` in that migration. A pending purge migration is
-  refused the same way; apply it on each deployment with
-  `retire_history <label> --purge`. A project app that ships its own `migrate` or
-  `makemigrations` must subclass this package's command.
+  `IntendedDeleteModel(name=...)` in that migration. Deleting a table another model
+  still owns is refused even when declared: keep the table, or change that owner
+  first. A pending purge migration is refused the same way; apply it on each
+  deployment with `retire_history <label> --purge`. A project app that ships its own
+  `migrate` or `makemigrations` must subclass this package's command.
 
 ## 0.1.0.dev13
 

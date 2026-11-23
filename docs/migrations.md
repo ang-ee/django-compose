@@ -178,7 +178,9 @@ removing providers, using `check_migrations --imports --removing`.
 The [drop guard](SPEC.md#drop-guard) refuses a migration that would remove a column
 or table still holding data. `makemigrations` applies it to what it autodetects, on
 every eligible configured database. `migrate`, and therefore `provision`, applies it
-to the plan it is about to run, before any operation and also under `--skip-checks`.
+to the plan it is about to run, before any operation and also under `--skip-checks`;
+on a database that stores nothing yet, such as a fresh or test database, it returns
+at once.
 At `migrate` it judges the history the project owns, its composed history and its
 own apps' migrations; Django's migrations and those of installed apps are their
 owners' responsibility. A refusal names each

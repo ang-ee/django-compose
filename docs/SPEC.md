@@ -503,9 +503,9 @@ default cannot prove emptiness. A deleted table may still hold rows that
 follows native model options and routers. Quoted identifiers resolve through backend
 semantics; uncertain storage identity and an unavailable eligible database cannot
 prove a drop safe ([supported cases](migrations.md#storage-identity)). A table that an
-active model still owns is never deleted, even when empty. One EXISTS query proves
-present storage empty, so an unindexed column scans its table; rows are counted only
-for a refusal.
+active model still owns is never deleted, even when empty, except where `migrate`
+finds nothing stored (below). One EXISTS query proves present storage empty, so an
+unindexed column scans its table; rows are counted only for a refusal.
 
 It runs at two points on these rules:
 
