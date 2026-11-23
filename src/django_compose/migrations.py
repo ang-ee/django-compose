@@ -26,8 +26,8 @@ from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.operations import fields as field_operations
 from django.db.migrations.operations import models as model_operations
 from django.db.migrations.operations.base import Operation
-from django.db.migrations.operations.fields import AlterField, RemoveField, RenameField
-from django.db.migrations.operations.models import AlterModelTable, DeleteModel, RenameModel
+from django.db.migrations.operations.fields import AddField, AlterField, RemoveField, RenameField
+from django.db.migrations.operations.models import AlterModelTable, CreateModel, DeleteModel, RenameModel
 from django.db.migrations.operations.special import RunPython, RunSQL, SeparateDatabaseAndState
 from django.db.migrations.recorder import MigrationRecorder
 from django.db.migrations.state import ProjectState
@@ -238,7 +238,7 @@ def _allows_migrate_model(operation: Operation, alias: str, model: Any, *, offli
 
 
 def _model_storage(model: Any, *, removed_field: str | None = None) -> Iterator[Any]:
-    """Tables deleted by native model deletion or implicit M2M field removal."""
+    """Tables a native model deletion or implicit M2M field removal drops, and its creation adds."""
     # Django intentionally creates no implicit through classes for swapped models.
     if model._meta.swapped:
         return
@@ -412,15 +412,24 @@ def _proofs(
     aliases: Iterable[str],
     *,
     declared: bool = False,
+    created: bool = True,
 ) -> Iterator[tuple[str, str | None]]:
     """Yield each alias the operation drops ``dropped`` on, with a refusal if it holds data.
 
     Routing is decided here, once per alias: Django routes the operation with
     ``routed``, while ``model`` describes the storage as the database holds it now.
-    A declared drop is routed but not probed. Absent storage holds nothing. One
-    EXISTS query proves present storage empty; only storage holding data is counted.
+    A declared drop is routed but not probed. Absent storage holds nothing when
+    ``created``; otherwise nothing accounts for its absence, so it cannot be proved
+    empty. One EXISTS query proves present storage empty; only storage holding data
+    is counted.
     """
     table, column, rows = dropped
+
+    def unproved(alias: str, reason: object) -> str:
+        return (
+            f"{model._meta.label_lower}: cannot prove {table}.{column or '*'} empty on {alias!r} ({reason})"
+        )
+
     for alias in aliases:
         connection = connections[alias]
         try:
@@ -462,13 +471,16 @@ def _proofs(
             held = rows(alias).using(alias) if present else None
             count = held.count() if held is not None and held.exists() else 0
         except (DatabaseError, ImproperlyConfigured) as error:
-            refusal = (
-                f"{model._meta.label_lower}: cannot prove {table}.{column or '*'} "
-                f"empty on {alias!r} ({error})"
-            )
-            yield alias, None if declared else refusal
+            yield alias, None if declared else unproved(alias, error)
             continue
-        if count:
+        if not present and not created:
+            yield (
+                alias,
+                unproved(
+                    alias, "it is absent before the plan, and no native operation of the plan creates it"
+                ),
+            )
+        elif count:
             yield (
                 alias,
                 f"{model._meta.label_lower}: {table}.{column or '*'} holds data in {count} rows on {alias!r}",
@@ -530,11 +542,13 @@ _KEEP_SHARED = "keep a table another model may still own, or first change that o
 
 
 class _Storage:
-    """Table and column names that the plan's database operations change.
+    """Table and column names that the plan's database operations change or create.
 
     Each current name maps back to its name before the plan. A rename moves the
     storage to its new name and a drop ends it. A name either of them vacates maps
-    to ``None``: storage under it is storage the plan itself creates. Where the
+    to ``None``: storage under it is storage the plan itself creates. ``created``
+    holds the names before the plan of storage a native creation adds: storage
+    absent before the plan is the plan's own only under one of them. Where the
     backend ignores the case of table names, a rename that changes only the case of
     a table or column name moves no storage.
     """
@@ -542,6 +556,9 @@ class _Storage:
     def __init__(self, connection: BaseDatabaseWrapper) -> None:
         self.tables: dict[str, str | None] = {}
         self.columns: dict[tuple[str, str], str | None] = {}
+        self.created: set[tuple[str, str | None]] = set()
+        self.pending: list[tuple[Operation, str, str, str | None]] = []
+        self.alias = connection.alias
         self.ignores_case = connection.features.ignores_table_name_case
 
     def _moves(self, old: str, new: str) -> bool:
@@ -585,6 +602,33 @@ class _Storage:
                 self.columns[table, now.column] = self.columns.get((table, field.column), field.column)
                 self.columns[table, field.column] = None
 
+    def resolve(self, apps: Apps) -> None:
+        """Name the storage each pending native creation added, from ``apps`` rendered since.
+
+        Django creates storage only where the operation migrates the model. A model or
+        field removed in between is left unnamed, so its absent storage stays refused.
+        """
+        for operation, label, name, field in self.pending:
+            try:
+                model = apps.get_model(label, name)
+                if operation.allow_migrate_model(self.alias, model):
+                    self.create(model, field)
+            except LookupError, FieldDoesNotExist:
+                continue
+        self.pending.clear()
+
+    def create(self, model: Any, field: str | None) -> None:
+        """Record the storage a native creation adds: a model's tables, or a field's table or column."""
+        added: list[tuple[str, str | None]] = [
+            (storage._meta.db_table, None) for storage in _model_storage(model, removed_field=field)
+        ]
+        if field is not None and (definition := model._meta.get_field(field)).concrete:
+            added.append((model._meta.db_table, definition.column))
+        for table, column in added:
+            before = self.table(table)
+            if before is not None and (column is None or (column := self.column(table, column)) is not None):
+                self.created.add((before, column))
+
     def end(self, dropped: _Dropped) -> None:
         if dropped.column is None:
             self.tables[dropped.table] = None
@@ -599,8 +643,9 @@ class _Storage:
         routed: Any,
         dropped: _Dropped,
         policies: tuple[MigrationPolicy, ...],
-    ) -> tuple[Any, _Dropped] | None:
-        """The model naming ``dropped`` as stored before the plan, and its proof.
+    ) -> tuple[Any, _Dropped, bool] | None:
+        """The model naming ``dropped`` as stored before the plan, its proof, and whether
+        a native creation of the plan adds that storage, should it be absent before it.
 
         ``routed`` is the removed model as ``state`` defines it. ``None`` means the
         plan itself creates that storage.
@@ -609,9 +654,10 @@ class _Storage:
         column = None if dropped.column is None else self.column(dropped.table, dropped.column)
         if table is None or (dropped.column is not None and column is None):
             return None
+        created = (table, None) in self.created or (table, column) in self.created
         name, field = removed
         if (table, column) == (dropped.table, dropped.column):
-            return routed, dropped
+            return routed, dropped, created
         # Re-render the model under the names its storage had before the plan.
         renamed = state.clone()
         model_state = renamed.models[label, name.lower()]
@@ -627,29 +673,26 @@ class _Storage:
         renamed.reload_model(label, name.lower(), delay=True)
         model = renamed.apps.get_model(label, name)
         # Only names changed, never the field's kind, so the same storage is dropped.
-        return model, cast(_Dropped, _dropped(model, field, policies))
+        return model, cast(_Dropped, _dropped(model, field, policies)), created
 
 
-def _rendered(state: ProjectState, label: str, name: str) -> Any:
-    """The model ``name`` of ``state``, from a full render of a clone, so ``state`` stays unrendered.
+def _rendered(state: ProjectState) -> Apps:
+    """The models of ``state``, from a full render of a clone, so ``state`` stays unrendered.
 
     A rendered state stays current through Django's incremental reload, which at each
     operation that changes a relation re-renders every model related to the one it
     changes: where models share a hub, nearly the whole state at nearly every
     operation. Each call here costs one full render instead.
     """
-    return state.clone().apps.get_model(label, name)
+    return state.clone().apps
 
 
 def _renamed(operation: Operation, state: ProjectState, label: str) -> tuple[str, str, dict[str, str]] | None:
     """The model whose storage a native operation may rename: before, after, renamed fields.
 
-    A rename whose database code is custom is not followed. An ``AlterField`` keeps
-    its model's table, and its field's column or many-to-many table unless what names
-    it changes, which ``state`` shows without rendering.
+    An ``AlterField`` keeps its model's table, and its field's column or many-to-many
+    table unless what names it changes, which ``state`` shows without rendering.
     """
-    if not _native(operation):
-        return None
     if isinstance(operation, RenameModel):
         return operation.old_name, operation.new_name, {}
     if isinstance(operation, AlterModelTable):
@@ -669,6 +712,24 @@ def _renamed(operation: Operation, state: ProjectState, label: str) -> tuple[str
                 return None
         return operation.model_name, operation.model_name, {}
     return None
+
+
+def _created(operation: Operation) -> tuple[str, str | None] | None:
+    """The model and field whose storage a native operation creates; a new model adds its tables."""
+    if isinstance(operation, CreateModel):
+        return operation.name, None
+    if isinstance(operation, AddField):
+        return operation.model_name, operation.name
+    return None
+
+
+def _leaves_state(operation: Operation) -> bool:
+    """Whether a special operation leaves migration state as it is: ``RunPython``, or ``RunSQL``
+    without state operations."""
+    forwards = type(operation).state_forwards
+    return forwards is RunPython.state_forwards or (
+        forwards is RunSQL.state_forwards and not cast(RunSQL, operation).state_operations
+    )
 
 
 def _database_removals(operations: Iterable[Operation]) -> list[Operation]:
@@ -739,8 +800,10 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
     The walk keeps its state unrendered and renders a full copy of it where it needs
     a model: at each guarded removal, before and after each rename that can change a
     storage name, and once at the end. An ``AlterField`` that changes no column or
-    many-to-many table name is read from the unrendered state. A plan of many
-    storage renames therefore renders more than native ``migrate`` does. The
+    many-to-many table name is read from the unrendered state. Storage a native
+    creation adds is named at the next of those renders, or at one made before an
+    operation the walk does not follow. A plan of many storage renames therefore
+    renders more than native ``migrate`` does. The
     pre-plan state is the one native ``migrate`` builds, through the private
     ``MigrationExecutor._create_project_state``, on the graph native ``migrate``
     planned with: re-check both on each Django upgrade.
@@ -776,6 +839,11 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             remedy = _DECLARE
         refusals.append((remedy, f"{label}.{migration.name} ({operation.describe()}): {refusal}"))
 
+    def rendered(state: ProjectState, label: str, name: str) -> Any:
+        apps = _rendered(state)
+        storage.resolve(apps)
+        return apps.get_model(label, name)
+
     def judge(
         migration: Migration, operations: Iterable[Operation], state: ProjectState, *, database: bool = True
     ) -> None:
@@ -784,12 +852,15 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             if isinstance(operation, SeparateDatabaseAndState):
                 if database and operation.database_operations:
                     # Database operations progress their own state, as Django applies them.
-                    judge(migration, operation.database_operations, state.clone())
+                    progressed = state.clone()
+                    judge(migration, operation.database_operations, progressed)
+                    if storage.pending:
+                        storage.resolve(_rendered(progressed))
                 judge(migration, operation.state_operations, state, database=False)
                 continue
             removed = _removal(operation)
             if database and removed is not None and label in guarded:
-                routed = _rendered(state, label, removed[0])
+                routed = rendered(state, label, removed[0])
                 removals.append((migration, (operation, routed, removed[1])))
                 dropped = _dropped(routed, removed[1], policies)
                 stored = (
@@ -798,20 +869,35 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                     else storage.stored(state, label, removed, routed, dropped, policies)
                 )
                 if dropped is not None and stored is not None:
+                    model, proof, created = stored
                     declared = isinstance(operation, _INTENDED)
-                    for _, refusal in _proofs(operation, routed, *stored, (using,), declared=declared):
+                    for _, refusal in _proofs(
+                        operation, routed, model, proof, (using,), declared=declared, created=created
+                    ):
                         if refusal is not None:
                             refuse(migration, operation, refusal)
                         storage.end(dropped)
-            renamed = _renamed(operation, state, label) if database else None
-            before_model = _rendered(state, label, renamed[0]) if renamed else None
+            # Custom database code, such as RunSQL or a subclass replacing Django's
+            # database_forwards, is not followed: storage it renames or creates is absent
+            # before the plan under a name no native operation accounts for.
+            native = database and _native(operation)
+            renamed = _renamed(operation, state, label) if native else None
+            adds = _created(operation) if native else None
+            if storage.pending and not native and not _leaves_state(operation):
+                # Name what earlier creations added before an operation the walk does
+                # not follow can rename it.
+                storage.resolve(_rendered(state))
+            before_model = rendered(state, label, renamed[0]) if renamed else None
             operation.state_forwards(label, state)
+            # Django changes storage only where the operation migrates the model it
+            # produces: never for a swapped model, nor on an alias routed away.
             if renamed:
-                after_model = _rendered(state, label, renamed[1])
-                # Django renames storage only where the operation migrates the model
-                # it produces: never for a swapped model, nor on an alias routed away.
+                after_model = rendered(state, label, renamed[1])
                 if operation.allow_migrate_model(using, after_model):
                     storage.follow(before_model, after_model, renamed[2])
+            if adds:
+                # Named at the walk's next render, before anything can rename it.
+                storage.pending.append((operation, label, *adds))
 
     walked: set[tuple[str, str]] = set()
     # Native migrate applies its plan in the order of the full clean plan.

@@ -6,6 +6,9 @@
   `provision`, also under `--skip-checks`: a pending removal in the history the project
   owns that would destroy stored data is refused before any operation runs, under the
   name its storage had before the plan, wherever the plan's own renames move it.
+  Storage absent before the plan counts as the plan's own only where a native
+  operation of the plan creates it; a removal of other absent storage, such as a
+  table a `RunSQL` renamed, cannot be proved and is refused.
   Previously only autodetected removals were judged, at `makemigrations`, so a removal
   migration already on disk was applied unchecked. Django's and other apps' history
   remains their owners' responsibility. On an alias that holds no table but the

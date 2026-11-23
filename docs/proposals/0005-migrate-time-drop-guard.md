@@ -38,6 +38,10 @@ choices behind it.
   rename or removal of the plan names storage the plan creates.
 - **Fail closed.** The walk uses the graph native `migrate` planned with, including
   for a squash-replaced target; a planned migration it cannot follow is refused.
+  Storage absent before the plan is the plan's own only where a native creation of
+  the plan adds it. Treating all absent storage as the plan's own was rejected: a
+  `RunSQL` rename then left the renamed, populated storage to a later native drop
+  unprobed.
 - **Render where a model is needed.** The walk keeps its state unrendered and renders
   a full copy of it at each guarded removal, before and after each rename that can
   change a storage name, and once at the end. An `AlterField` that changes no column
@@ -70,7 +74,8 @@ choices behind it.
   so a subclass that replaces `handle` keeps the guard.
 - **Out of scope.** Backwards plans name an explicit target, and the authoring guard
   never covered them. `--fake` runs no operations. `RunSQL` and custom database code
-  are not parsed. The specification lists the native drops that predate the guard.
+  are not parsed; storage only they account for cannot be proved. The specification
+  lists the native drops that predate the guard.
 
 ## Compatibility
 

@@ -322,7 +322,7 @@ assert columns() == ["id", "old", "spare"]
 
 
 @pytest.mark.parametrize("kind", ["column", "table"])
-def test_storage_already_gone_is_skipped(host, kind):
+def test_storage_gone_before_the_plan_cannot_be_proved(host, kind):
     root, run = host
     migration(root, "0002_drop", [REMOVE_OLD if kind == "column" else DELETE_RECORD])
     run(
@@ -334,11 +334,81 @@ def judge():
     check_plan_drops(executor.migration_plan(executor.loader.graph.leaf_nodes()), using="default")
 expect(CommandError, "holds data", judge)
 with connection.cursor() as cursor:
+    # Another table keeps the alias storing something, so the guard probes it.
+    cursor.execute("CREATE TABLE elsewhere (id integer)")
     if {kind!r} == "column":
         cursor.execute("ALTER TABLE alpha_record DROP COLUMN old")
     else:
         cursor.execute("DROP TABLE alpha_record")
-judge()
+# Removed outside the plan: nothing the guard follows accounts for its absence.
+expect(CommandError, "is absent before the plan, and no native operation of the plan creates it", judge)
+"""
+    )
+
+
+@pytest.mark.parametrize("kind", ["table", "column"])
+def test_storage_renamed_by_run_sql_cannot_be_proved(host, kind):
+    root, run = host
+    if kind == "table":
+        sql = "ALTER TABLE alpha_record RENAME TO alpha_ledger"
+        state = 'migrations.AlterModelTable(name="record", table="alpha_ledger")'
+        removal = DELETE_RECORD
+        detail = "(Delete model Record): alpha.record: cannot prove alpha_ledger.* empty"
+    else:
+        sql = "ALTER TABLE alpha_record RENAME COLUMN old TO legacy"
+        field = 'models.CharField(max_length=40, default="", db_column="legacy")'
+        state = f'migrations.AlterField(model_name="record", name="old", field={field})'
+        removal = REMOVE_OLD
+        detail = "(Remove field old from record): alpha.record: cannot prove alpha_record.legacy empty"
+    moved = (
+        f'migrations.SeparateDatabaseAndState(database_operations=[migrations.RunSQL("{sql}")], '
+        f"state_operations=[{state}])"
+    )
+    migration(root, "0002_rename", [moved])
+    migration(root, "0003_drop", [removal], after="0002_rename")
+    run(
+        PRELUDE
+        + f"""
+seed(old="kept")
+expect(CommandError, "alpha.0003_drop {detail}", migrate)
+assert ("alpha", "0002_rename") not in applied()
+with connection.cursor() as cursor:
+    cursor.execute("SELECT old FROM alpha_record")
+    assert cursor.fetchall() == [("kept",)]
+"""
+    )
+
+
+def test_run_sql_for_data_only_is_not_refused(host):
+    root, run = host
+    scratch = (
+        'migrations.CreateModel(name="Scratch", fields=[("id", models.AutoField(primary_key=True, '
+        'serialize=False)), ("note", models.CharField(max_length=40, default=""))])'
+    )
+    migration(
+        root,
+        "0002_data",
+        [
+            scratch,
+            add_field("spare"),
+            "migrations.RunSQL(\"INSERT INTO alpha_scratch (note) VALUES ('written by the plan')\")",
+            "migrations.RunSQL(\"UPDATE alpha_record SET spare = 'written by the plan', old = ''\")",
+        ],
+    )
+    migration(
+        root,
+        "0003_drop",
+        ['migrations.DeleteModel(name="Scratch")', remove_field("spare"), REMOVE_OLD],
+        after="0002_data",
+    )
+    run(
+        PRELUDE
+        + """
+# The plan writes rows into storage it creates and empties the column it drops.
+seed(old="")
+migrate()
+assert columns() == ["id"]
+assert "alpha_scratch" not in tables()
 """
     )
 

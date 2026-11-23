@@ -548,9 +548,12 @@ At `migrate`:
   that replaces Django's `database_forwards` runs custom database code, which is not
   followed. Where the backend ignores the case of table names, as SQLite does, a
   rename that changes only the case of a table or column name moves nothing. Storage
-  absent before the plan is skipped. So is storage under a name that an earlier
-  rename or removal of the same plan vacated, which the plan itself creates. A table
-  owned at the end of the plan is not deleted, even by a declared drop.
+  under a name that an earlier rename or removal of the same plan vacated is the
+  plan's own and skipped. Storage absent before the plan is the plan's own only where
+  a native `CreateModel` or `AddField` of the plan creates it; any other absent
+  storage, such as a table a `RunSQL` renamed, cannot be proved empty and its removal
+  is refused. A table owned at the end of the plan is not deleted, even by a declared
+  drop.
 - **Snapshot:** every proof is taken at `pre_migrate`, before the first operation.
   Rows the plan itself writes, such as a `RunPython` that fills storage a later
   operation of the plan drops, are not protected.
@@ -570,8 +573,10 @@ command. The purge itself applies only the retired label's migrations, and names
 targeted `migrate <app> <name>` for any other app's pending migration in its chain,
 since a full `migrate` would reach the purge.
 
-Faked and backwards plans are not judged, nor is `RunSQL` or other custom database
-code, and a rename that `RunSQL` makes is not followed. Two native drops predate the
+Faked and backwards plans are not judged. `RunSQL` and other custom database code are
+not parsed: a drop they make is not judged, and storage they rename or create is
+absent before the plan under a name no native operation creates, so a later native
+removal of it is refused rather than skipped. Two native drops predate the
 guard and are not judged: `AlterOrderWithRespectTo` to `None` removes the `_order`
 column, and a model deletion drops its implicit many-to-many tables unprobed, which can
 lose rows only when the field sets `db_constraint=False`.
