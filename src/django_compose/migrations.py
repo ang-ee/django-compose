@@ -600,10 +600,12 @@ class _Storage:
 
 
 def _rendered(state: ProjectState, label: str, name: str) -> Any:
-    """The model ``name`` of ``state``, rendered from a clone so ``state`` stays unrendered.
+    """The model ``name`` of ``state``, from a full render of a clone, so ``state`` stays unrendered.
 
-    Django keeps a rendered state current by re-rendering related models at every
-    later operation, which on a densely related history costs more than a fresh render.
+    A rendered state stays current through Django's incremental reload, which at each
+    operation that changes a relation re-renders every model related to the one it
+    changes: where models share a hub, nearly the whole state at nearly every
+    operation. Each call here costs one full render instead.
     """
     return state.clone().apps.get_model(label, name)
 
@@ -698,10 +700,14 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
     ``migrate`` calls this from ``pre_migrate`` with the plan and alias it is about
     to apply, before any operation runs. The specification's "Drop guard" section
     defines the rule. On an alias that stores nothing it returns at once, before
-    classifying apps or walking the plan. The walk keeps its state unrendered and
-    renders a clone only where it needs a model: at a guarded removal, at a rename
-    that can change a storage name, and once at the end. The pre-plan state is the
-    one native ``migrate`` builds, through the private
+    classifying apps or walking the plan.
+
+    The walk keeps its state unrendered and renders a full copy of it where it needs
+    a model: at each guarded removal, before and after each rename that can change a
+    storage name, and once at the end. An ``AlterField`` that changes no column or
+    many-to-many table name is read from the unrendered state. A plan of many
+    storage renames therefore renders more than native ``migrate`` does. The
+    pre-plan state is the one native ``migrate`` builds, through the private
     ``MigrationExecutor._create_project_state``, on the graph native ``migrate``
     planned with: re-check both on each Django upgrade.
     """

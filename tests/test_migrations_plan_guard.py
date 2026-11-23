@@ -1135,7 +1135,8 @@ with override_settings(DATABASE_ROUTERS=[Disjoint()]):
     )
 
 
-def test_the_walk_renders_a_model_only_where_it_needs_one(host):
+@pytest.mark.parametrize("plan", ["renames", "widening"])
+def test_the_walk_renders_the_state_only_where_it_needs_a_model(host, plan):
     root, run = host
 
     def alter(**options):
@@ -1143,18 +1144,43 @@ def test_the_walk_renders_a_model_only_where_it_needs_one(host):
         field = f'models.CharField(max_length=80, default=""{extra})'
         return f'migrations.AlterField(model_name="record", name="old", field={field})'
 
-    migration(root, "0002_alter", [alter(), alter(db_column="legacy"), add_field("spare")])
-    migration(root, "0003_drop", [remove_field("spare")], after="0002_alter")
+    if plan == "renames":
+        operations = [
+            alter(db_column="legacy"),
+            'migrations.RenameField(model_name="record", old_name="old", new_name="kept")',
+        ]
+    else:
+        operations = [alter(), alter(), alter()]
+    migration(root, "0002_spare", [add_field("spare")])
+    migration(root, "0003_drop", [*operations, remove_field("spare")], after="0002_spare")
     run(
         PRELUDE
-        + """
-from django_compose import migrations as guard
-seed(old="kept")
-with patch.object(guard, "_rendered", wraps=guard._rendered) as rendered:
+        + f"""
+from django.db.migrations import state as native
+seed("0002_spare", old="kept")
+registries, models = [], []
+construct, render = native.StateApps.__init__, native.ModelState.render
+def constructing(self, real_apps, states, *args, **kwargs):
+    if states:
+        registries.append(len(states))
+    construct(self, real_apps, states, *args, **kwargs)
+def rendering(self, apps):
+    models.append(self.name)
+    return render(self, apps)
+judge = check_plan_drops
+def counted(plan, *, using):
+    with patch.object(native.StateApps, "__init__", constructing), patch.object(
+        native.ModelState, "render", rendering
+    ):
+        judge(plan, using=using)
+with patch("django_compose.management.commands.migrate.check_plan_drops", counted):
     migrate()
-# Widening renames nothing; the column move renders before and after it; the removal once.
-assert rendered.call_count == 3, rendered.call_args_list
-assert columns() == ["id", "legacy"]
+# Each full render renders the whole state, here one model. A widening AlterField
+# renders nothing; each storage rename renders before and after it; the removal and
+# the end of the plan once each.
+assert registries == [1] * {{"renames": 6, "widening": 2}}[{plan!r}], registries
+assert len(models) == len(registries), models
+assert columns() == ["id", "legacy" if {plan!r} == "renames" else "old"]
 """
     )
 

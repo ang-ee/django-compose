@@ -37,13 +37,15 @@ choices behind it.
   rename or removal of the plan names storage the plan creates.
 - **Fail closed.** The walk uses the graph native `migrate` planned with, including
   for a squash-replaced target; a planned migration it cannot follow is refused.
-- **Render only where a model is needed.** Native `migrate` keeps a rendered state
-  current by re-rendering related models at every operation, which dominates a long
-  history on a densely related schema; a walk doing the same doubled it. The walk
-  keeps its state unrendered and renders a fresh clone at each guarded removal, at
-  each rename that can change a storage name, and once at the end. An `AlterField`
-  that changes no column or many-to-many table name is read from the unrendered
-  state.
+- **Render where a model is needed.** The walk keeps its state unrendered and renders
+  a full copy of it at each guarded removal, before and after each rename that can
+  change a storage name, and once at the end. An `AlterField` that changes no column
+  or many-to-many table name is read from the unrendered state. Keeping one state
+  rendered, as native `migrate` does, was rejected: Django's incremental reload then
+  re-renders, at each operation that changes a relation, every model related to the
+  one it changes, which where models share a hub is nearly the whole state at nearly
+  every operation. The cost is two full renders per storage rename, so a plan of many
+  renames renders more than native `migrate`.
 - **Nothing stored, nothing walked.** An alias with no table but the recorders is
   skipped. An empty pre-plan state was rejected as the test, because `--fake-initial`
   and state-only adoption give existing tables a model the plan introduces. Native
