@@ -544,7 +544,10 @@ At `migrate`:
   walk follows every rename the plan's database operations make, whoever owns them:
   `AlterModelTable`, `RenameModel`, `RenameField` and `AlterField`. It follows each
   where Django applies it, on an alias that migrates the model the operation
-  produces, so a swapped model or one routed elsewhere renames nothing. Storage
+  produces, so a swapped model or one routed elsewhere renames nothing. A subclass
+  that replaces Django's `database_forwards` runs custom database code, which is not
+  followed. Where the backend ignores the case of table names, as SQLite does, a
+  rename that changes only the case of a table or column name moves nothing. Storage
   absent before the plan is skipped. So is storage under a name that an earlier
   rename or removal of the same plan vacated, which the plan itself creates. A table
   owned at the end of the plan is not deleted, even by a declared drop.

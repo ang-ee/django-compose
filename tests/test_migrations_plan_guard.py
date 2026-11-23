@@ -605,6 +605,10 @@ def adopt(name, *, delete_record=False):
     return f"migrations.SeparateDatabaseAndState(state_operations=[{', '.join(operations)}])"
 
 
+def state_only(operation):
+    return f"migrations.SeparateDatabaseAndState(state_operations=[{operation}])"
+
+
 def test_foreign_history_belongs_to_its_owner(host):
     root, run = host
     migration(root, "0002_drop", [REMOVE_OLD])
@@ -1393,5 +1397,80 @@ assert "alpha_record_tags" in tables() and "{table}" not in tables()
 migrate("alpha", "0003_rename")
 expect(CommandError, "{table}.* holds data in 1 rows", migrate)
 assert "{table}" in tables()
+"""
+    )
+
+
+# A field adopting the column old under another name, as a state-only AddField can.
+ON_OLD = 'models.CharField(max_length=40, default="", db_column="old")'
+
+
+@pytest.mark.parametrize("kind", ["table", "column"])
+def test_a_case_only_rename_frees_no_name_where_the_backend_ignores_case(host, kind):
+    root, run = host
+    # SQLite ignores the case of table and column names: the renamed storage keeps both.
+    if kind == "table":
+        moved = 'migrations.AlterModelTable(name="record", table="ALPHA_RECORD")'
+        adopted = adopt("Twin")
+        drops = ['migrations.DeleteModel(name="Twin")', state_only('migrations.DeleteModel(name="Record")')]
+        refusal = "alpha.0004_drop (Delete model Twin): alpha.twin: alpha_record.* holds data in 1 rows"
+    else:
+        field = 'models.CharField(max_length=40, default="", db_column="OLD")'
+        moved = f'migrations.AlterField(model_name="record", name="old", field={field})'
+        adopted = state_only(add_field("legacy", ON_OLD))
+        drops = [remove_field("legacy")]
+        refusal = "alpha.0004_drop (Remove field legacy from record): alpha.record: alpha_record.old holds"
+    migration(root, "0002_case", [moved])
+    migration(root, "0003_adopt", [adopted], after="0002_case")
+    migration(root, "0004_drop", drops, after="0003_adopt")
+    run(
+        PRELUDE
+        + f"""
+seed(old="kept")
+expect(CommandError, "{refusal}", migrate)
+with connection.cursor() as cursor:
+    cursor.execute("SELECT old FROM alpha_record")
+    assert cursor.fetchall() == [("kept",)]
+"""
+    )
+
+
+STATE_ONLY = """
+class StateOnly{name}(migrations.{name}):
+    def database_forwards(self, app_label, schema_editor, from_state, to_state):
+        pass
+"""
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        'AlterModelTable(name="record", table="alpha_ledger")',
+        'RenameModel(old_name="Record", new_name="Ledger")',
+        'RenameField(model_name="record", old_name="old", new_name="legacy")',
+        'AlterField(model_name="record", name="old", '
+        'field=models.CharField(max_length=40, default="", db_column="legacy"))',
+    ],
+)
+def test_a_rename_whose_database_code_is_custom_frees_no_name(host, operation):
+    root, run = host
+    name = operation.partition("(")[0]
+    migration(root, "0002_rename", [f"StateOnly{operation}"], preamble=STATE_ONLY.format(name=name))
+    if name in {"AlterModelTable", "RenameModel"}:
+        migration(root, "0003_adopt", [adopt("Twin")], after="0002_rename")
+        migration(root, "0004_drop", ['migrations.DeleteModel(name="Twin")'], after="0003_adopt")
+        refusal = "alpha.0004_drop (Delete model Twin): alpha.twin: alpha_record.* holds data in 1 rows"
+    else:
+        migration(root, "0003_adopt", [state_only(add_field("spare", ON_OLD))], after="0002_rename")
+        migration(root, "0004_drop", [remove_field("spare")], after="0003_adopt")
+        refusal = "alpha.0004_drop (Remove field spare from record): alpha.record: alpha_record.old holds"
+    run(
+        PRELUDE
+        + f"""
+seed(old="kept")
+expect(CommandError, "{refusal}", migrate)
+with connection.cursor() as cursor:
+    cursor.execute("SELECT old FROM alpha_record")
+    assert cursor.fetchall() == [("kept",)]
 """
     )

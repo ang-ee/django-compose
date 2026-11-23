@@ -254,6 +254,22 @@ def _model_storage(model: Any, *, removed_field: str | None = None) -> Iterator[
             yield through
 
 
+def _native(operation: Operation) -> bool:
+    """Whether Django's own model or field operation applies ``operation`` to the database.
+
+    A subclass that replaces ``database_forwards`` runs custom database code.
+    """
+    forwards = type(operation).database_forwards
+    return any(
+        vars(owner).get("database_forwards") is forwards
+        and any(
+            getattr(module, owner.__name__, None) is owner for module in (model_operations, field_operations)
+        )
+        for owner in type(operation).__mro__
+        if owner is not Operation
+    )
+
+
 def _removal(operation: Operation) -> tuple[str, str | None] | None:
     """The model and field a native removal drops; a deleted model drops no single field."""
     if isinstance(operation, RemoveField):
@@ -518,12 +534,18 @@ class _Storage:
 
     Each current name maps back to its name before the plan. A rename moves the
     storage to its new name and a drop ends it. A name either of them vacates maps
-    to ``None``: storage under it is storage the plan itself creates.
+    to ``None``: storage under it is storage the plan itself creates. Where the
+    backend ignores the case of table names, a rename that changes only the case of
+    a table or column name moves no storage.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, connection: BaseDatabaseWrapper) -> None:
         self.tables: dict[str, str | None] = {}
         self.columns: dict[tuple[str, str], str | None] = {}
+        self.ignores_case = connection.features.ignores_table_name_case
+
+    def _moves(self, old: str, new: str) -> bool:
+        return old != new and not (self.ignores_case and old.lower() == new.lower())
 
     def table(self, name: str) -> str | None:
         return self.tables.get(name, name)
@@ -533,7 +555,7 @@ class _Storage:
         return None if before is None else self.columns.get((before, name), name)
 
     def _rename_table(self, old: str, new: str) -> None:
-        if old != new:
+        if self._moves(old, new):
             self.tables[new] = self.table(old)
             self.tables[old] = None
 
@@ -554,7 +576,12 @@ class _Storage:
                 old, new = field.remote_field.through, now.remote_field.through
                 if old._meta.auto_created and new._meta.auto_created:
                     self._rename_table(old._meta.db_table, new._meta.db_table)
-            elif field.concrete and now.concrete and table is not None and field.column != now.column:
+            elif (
+                field.concrete
+                and now.concrete
+                and table is not None
+                and self._moves(field.column, now.column)
+            ):
                 self.columns[table, now.column] = self.columns.get((table, field.column), field.column)
                 self.columns[table, field.column] = None
 
@@ -617,9 +644,12 @@ def _rendered(state: ProjectState, label: str, name: str) -> Any:
 def _renamed(operation: Operation, state: ProjectState, label: str) -> tuple[str, str, dict[str, str]] | None:
     """The model whose storage a native operation may rename: before, after, renamed fields.
 
-    An ``AlterField`` keeps its model's table, and its field's column or many-to-many
-    table unless what names it changes, which ``state`` shows without rendering.
+    A rename whose database code is custom is not followed. An ``AlterField`` keeps
+    its model's table, and its field's column or many-to-many table unless what names
+    it changes, which ``state`` shows without rendering.
     """
+    if not _native(operation):
+        return None
     if isinstance(operation, RenameModel):
         return operation.old_name, operation.new_name, {}
     if isinstance(operation, AlterModelTable):
@@ -731,7 +761,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         executor.loader.build_graph()
     state: ProjectState = executor._create_project_state(with_applied_migrations=True)  # type: ignore[attr-defined]
     policies = _policies()
-    storage = _Storage()
+    storage = _Storage(connections[using])
     removals: list[tuple[Migration, _Removal]] = []
     refusals: list[tuple[str, str]] = []
 
@@ -954,15 +984,7 @@ def _history_aliases(loader: MigrationLoader, labels: set[str]) -> tuple[str, ..
                     alias for alias in connections if router.allow_migrate(alias, label, **operation.hints)
                 )
             elif (
-                not any(
-                    vars(owner).get("database_forwards") is forwards
-                    and any(
-                        getattr(module, owner.__name__, None) is owner
-                        for module in (model_operations, field_operations)
-                    )
-                    for owner in type(operation).__mro__
-                    if owner is not Operation
-                )
+                not _native(operation)
                 or type(operation).allow_migrate_model is not Operation.allow_migrate_model
             ):
                 aliases.update(connections)
