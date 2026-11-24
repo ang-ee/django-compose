@@ -1643,6 +1643,177 @@ assert ("beta", "0002_drop") not in applied()
     )
 
 
+def beta(root, name, operations, dependencies=()):
+    write(
+        root,
+        f"history/beta/{name}.py",
+        f"""
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    dependencies = {list(dependencies)!r}
+    operations = [{", ".join(operations)}]
+""",
+    )
+
+
+KEY = '("id", models.AutoField(primary_key=True, serialize=False))'
+BETA_ITEMS = [
+    f'migrations.CreateModel(name="Tag", fields=[{KEY}])',
+    f'migrations.CreateModel(name="Other", fields=[{KEY}])',
+    f'migrations.CreateModel(name="Item", fields=[{KEY}, '
+    '("tag", models.ForeignKey("beta.Tag", models.SET_NULL, null=True, db_constraint=False)), '
+    '("links", models.ManyToManyField("beta.Other", related_name="+"))])',
+]
+
+
+@pytest.mark.parametrize("database", ["fresh", "populated"])
+@pytest.mark.parametrize("retarget", [True, False])
+def test_a_project_without_guarded_drops_migrates_past_a_state_the_walk_cannot_render(
+    host, retarget, database
+):
+    root, run = host
+    # beta's history is an installed distribution's. It retargets a many-to-many field
+    # under the same table, which names alone keep owned, then deletes Tag while Item.tag
+    # still points at it, as native migrate applies in place, until a state-only removal
+    # of tag. alpha, the project's, only renames a column in between, where a fresh render
+    # fails. With no drop of its own to guard, the plan migrates as it did before the guard.
+    beta(root, "0001_items", BETA_ITEMS)
+    before = ("beta", "0001_items")
+    if retarget:
+        links = 'models.ManyToManyField("beta.Item", related_name="+")'
+        retargeted = [
+            'migrations.RemoveField(model_name="item", name="links")',
+            f'migrations.AddField(model_name="item", name="links", field={links})',
+        ]
+        beta(root, "0002_retarget", retargeted, [before])
+        before = ("beta", "0002_retarget")
+    me = 'models.ForeignKey("beta.Item", models.SET_NULL, null=True)'
+    dangling = [
+        'migrations.DeleteModel(name="Tag")',
+        f'migrations.AddField(model_name="item", name="me", field={me})',
+    ]
+    beta(root, "0003_dangle", dangling, [before])
+    write(
+        root,
+        "history/alpha/0002_rename.py",
+        """
+from django.db import migrations
+class Migration(migrations.Migration):
+    dependencies = [("alpha", "0001_origin"), ("beta", "0003_dangle")]
+    operations = [migrations.RenameField(model_name="record", old_name="old", new_name="older")]
+""",
+    )
+    untag = 'migrations.RemoveField(model_name="item", name="tag")'
+    beta(root, "0004_untag", [state_only(untag)], [("beta", "0003_dangle"), ("alpha", "0002_rename")])
+    run(
+        PRELUDE
+        + f"""
+import django_compose.migrations as guard
+guard._guarded = lambda labels: frozenset(labels) - {{"beta"}}
+if {database!r} == "populated":
+    seed()
+migrate()
+assert {{("alpha", "0002_rename"), ("beta", "0004_untag")}} <= applied()
+"""
+    )
+
+
+@pytest.mark.parametrize("adopted", [False, True])
+def test_where_nothing_is_stored_the_walk_runs_again_only_for_a_guarded_drop(host, adopted):
+    root, run = host
+    # alpha's own history has no drop, but a stretch that native migrate applies in place
+    # while a fresh render fails, with a rename in it. beta's, an installed distribution's,
+    # deletes X; with Y adopting X's table by state alone, names alone keep it owned. Only
+    # a drop the guard judges makes the walk run again, following names through alpha.
+    migration(root, "0002_tag", [created("Tag"), add_field("tag", TAGGED)])
+    plan = [
+        state_only('migrations.DeleteModel(name="Tag")'),
+        add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)'),
+        'migrations.RenameField(model_name="record", old_name="old", new_name="kept")',
+        state_only(remove_field("tag")),
+    ]
+    migration(root, "0003_plan", plan, after="0002_tag")
+    key = '("id", models.AutoField(primary_key=True))'
+    x = [f'migrations.CreateModel(name="X", fields=[{key}])']
+    if adopted:
+        x.append(
+            state_only(f'migrations.CreateModel(name="Y", fields=[{key}], options={{"db_table": "beta_x"}})')
+        )
+    beta(root, "0001_x", x)
+    beta(
+        root, "0002_drop", ['migrations.DeleteModel(name="X")'], [("beta", "0001_x"), ("alpha", "0003_plan")]
+    )
+    run(
+        PRELUDE
+        + """
+import django_compose.migrations as guard
+from django.db.migrations.executor import MigrationExecutor as Executor
+guarded = guard._guarded
+guard._guarded = lambda labels: guarded(labels) - {"beta"}
+walks = []
+create_state = Executor._create_project_state
+def creating(self, *args, **kwargs):
+    walks.append(1)
+    return create_state(self, *args, **kwargs)
+with patch.object(Executor, "_create_project_state", creating):
+    migrate()
+assert {("alpha", "0003_plan"), ("beta", "0002_drop")} <= applied()
+# Each walk builds the state before the plan once; native migrate builds it once more.
+assert len(walks) == 2, walks
+"""
+    )
+
+
+def test_a_removal_the_walk_cannot_render_is_refused_and_nothing_else_is_blamed(host):
+    root, run = host
+    # alpha's history, an installed distribution's, leaves a stretch where a fresh render
+    # fails until its 0004 removes tag by state alone. beta's own plan runs inside it: it
+    # adds, renames and removes a column. The rename is not refused; the walk follows no
+    # name from there, and the removal it cannot render is.
+    migration(root, "0002_tag", [created("Tag"), add_field("tag", TAGGED)])
+    dangling = [
+        state_only('migrations.DeleteModel(name="Tag")'),
+        add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)'),
+    ]
+    migration(root, "0003_open", dangling, after="0002_tag")
+    write(root, "history/beta/0001_item.py", ITEM)
+    field = "models.CharField(max_length=4, null=True)"
+    extra = f'migrations.AddField(model_name="item", name="extra", field={field})'
+    rename = 'migrations.RenameField(model_name="item", old_name="extra", new_name="later")'
+    removal = 'migrations.RemoveField(model_name="item", name="later")'
+    beta(root, "0002_rename", [extra, rename, removal], [("beta", "0001_item"), ("alpha", "0003_open")])
+    write(
+        root,
+        "history/alpha/0004_close.py",
+        f"""
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    dependencies = [("alpha", "0003_open"), ("beta", "0002_rename")]
+    operations = [{state_only(remove_field("tag"))}]
+""",
+    )
+    run(
+        PRELUDE
+        + """
+import django_compose.migrations as guard
+guarded = guard._guarded
+guard._guarded = lambda labels: guarded(labels) - {"alpha"}
+seed("0002_tag")
+MigrationExecutor(connection).migrate([("beta", "0001_item")])
+try:
+    migrate()
+except CommandError as error:
+    refusal = str(error)
+else:
+    raise AssertionError("expected a refusal")
+removal = "beta.0002_rename (Remove field later from item): cannot render the migration state ("
+assert removal in refusal, refusal
+assert "Rename field" not in refusal and "alpha.0" not in refusal, refusal
+assert ("beta", "0002_rename") not in applied()
+"""
+    )
+
+
 def test_table_renamed_after_a_state_only_adoption_keeps_its_rows_protected(host):
     root, run = host
     migration(root, "0002_adopt", [adopt("Ledger", delete_record=True)])

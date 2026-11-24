@@ -527,10 +527,9 @@ It runs at two points on these rules:
   including for a squash-replaced target, in the order the executor applies it. A
   planned migration the walk cannot follow is refused by name. Where the walk cannot
   render afresh the migration state it reads at an operation, though native `migrate`,
-  which keeps its rendering current in place, may apply it, that operation is refused
-  in the history the guard judges; in other history the walk follows no name from that
-  operation on, so a later judged removal of storage it cannot account for is refused
-  as unproved.
+  which keeps its rendering current in place, may apply it, the walk follows no name
+  from that operation on, whichever history left the state so; only a judged removal
+  it then cannot render, or whose storage it cannot account for, is refused.
 
 At `migrate`:
 
@@ -623,10 +622,10 @@ that held other storage before the plan, the guard probes that other storage, an
 under one a native operation of the plan created or filled, it takes the storage for
 the plan's own and probes nothing. That includes a `RunSQL` that swaps two tables
 present before the plan, and the plan's operations after a state the walk cannot
-render in history the guard does not judge, which it follows no further. Two native
-drops predate the guard and are not judged: `AlterOrderWithRespectTo` to `None`
-removes the `_order` column, and a model deletion drops its implicit many-to-many
-tables unprobed, which can lose rows only when the field sets `db_constraint=False`.
+render, which it follows no further. Two native drops predate the guard and are not
+judged: `AlterOrderWithRespectTo` to `None` removes the `_order` column, and a model
+deletion drops its implicit many-to-many tables unprobed, which can lose rows only
+when the field sets `db_constraint=False`.
 
 Native dispatch must resolve this package's `makemigrations` and `migrate`, or a
 subclass of each. `ComposeConfig` is last in `INSTALLED_APPS`, so a same-named command

@@ -52,10 +52,11 @@ choices behind it.
   the plan's own was rejected: a `RunSQL` rename then left the renamed, populated
   storage to a later native drop unprobed. Custom SQL that moves storage under a name
   the walk accounts for is not detected, since that needs parsing SQL; the
-  specification states that class. A state the walk cannot render in history the guard
-  does not judge stops its following instead of refusing the plan: the refusal named a
-  migration the project cannot edit, and a project without guarded drops must migrate
-  as it did before the guard.
+  specification states that class. A state the walk cannot render stops its following,
+  in whatever history, and only a judged removal it then cannot read or account for is
+  refused. Refusing the operation where the render failed named a migration the
+  project cannot edit, or blamed the project's own for another app's history, and a
+  project without guarded drops must migrate as it did before the guard.
 - **Render in place until a relation changes.** The walk keeps its state unrendered
   until it first needs a model, at a guarded removal or a rename that can change a
   storage name, renders it there in place, and lets Django's incremental reload keep
@@ -76,7 +77,7 @@ choices behind it.
   populated database then deleted a table another model still owns on a fresh one.
   Every test database is fresh, so the walk there renders only at a removal that can
   drop a table and classifies an app's history only where the rule refuses one of its
-  removals.
+  removals, before it walks again, which it then does only for history it judges.
   A table dropped and created again, as Django's autodetector writes a many-to-many
   field's new target, is not kept: the rule asks at the end of the plan whether a
   native creation or followed rename filled the table's name after the drop. Judging
