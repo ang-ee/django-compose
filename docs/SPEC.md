@@ -560,37 +560,37 @@ At `migrate`:
   `default` or `db_default`, from which Django derives its default, only NULL is empty
   in that column. The walk follows every rename the plan's database operations make,
   whoever owns them: `AlterModelTable`, `RenameModel`, `RenameField` and `AlterField`.
-  It follows each
-  where Django applies it, on an alias that migrates the model the operation produces,
-  so a swapped model or one routed elsewhere renames nothing. A subclass that replaces
-  Django's `database_forwards` runs custom database code, which is not followed. Two
-  spellings of a name that the backend does not tell apart name the same storage: a
-  rename between them moves nothing, and storage under either is present. Case does
-  not tell table names apart where Django's `ignores_table_name_case` is set, as on
-  SQLite, nor column names on SQLite and MySQL whatever MySQL's table-name setting,
-  nor any name where the backend's quoting folds case, as Oracle's does. SQLite and
-  MySQL fold the case of ASCII letters only, and so does the guard there; where quoting
-  folds case, the guard compares names as Django quotes them. Only SQLite and
-  PostgreSQL have real-backend coverage. A name that an earlier rename or removal of
-  the plan vacated holds the plan's own storage only once a native `CreateModel` or
-  `AddField` fills it again, or a followed rename moves storage under it, which is
-  then probed under its name before the plan; storage under a vacated name nothing
-  native filled, such as a table a `RunSQL` renamed there, cannot be proved empty and
-  its removal is refused. Storage absent before the plan is the plan's own only where
-  a native creation of the plan adds it; any other absent storage cannot be proved
-  empty either. A table owned at the end of the plan is not deleted, even by a
-  declared drop, unless after the drop a native creation, or a followed rename, puts
-  storage under its name, as Django's removal and addition of a many-to-many field
-  with a new target does, and the owner did not own the table when it was dropped: a
-  model that comes to own the name after the drop owns that new storage, but one that
-  owned the table then, under whatever name a later `RenameModel` gives it, owned the
-  dropped rows. A model that a state-only operation gives the name after the drop owns
-  no table, and the drop stays refused. Under a deleted model's own label, though, a
-  model is taken for that model created again, as histories commonly delete and create
-  a model again, so three shapes that leave it without a table go unnoticed: a
-  state-only `CreateModel` under that label, a state-only `RenameModel` into it, and a
-  native creation under another table followed by a state-only `AlterModelTable` back.
-  Where the dropped table holds rows, the probe still refuses the drop.
+  It follows each where Django applies it, on an alias that migrates the model the
+  operation produces, so a swapped model or one routed elsewhere renames nothing. A
+  subclass that replaces Django's `database_forwards` runs custom database code, which
+  is not followed. Two spellings of a name that the backend does not tell apart name
+  the same storage: a rename between them moves nothing, and storage under either is
+  present. Case does not tell table names apart where Django's
+  `ignores_table_name_case` is set, as on SQLite, nor column names on SQLite and MySQL
+  whatever MySQL's table-name setting, nor any name where the backend's quoting folds
+  case, as Oracle's does. SQLite and MySQL fold the case of ASCII letters only, and so
+  does the guard there; where quoting folds case, the guard compares names as Django
+  quotes them. Only SQLite and PostgreSQL have real-backend coverage. A name that an
+  earlier rename or removal of the plan vacated holds the plan's own storage only once
+  a native `CreateModel` or `AddField` fills it again, or a followed rename moves
+  storage under it, which is then probed under its name before the plan; storage under
+  a vacated name nothing native filled, such as a table a `RunSQL` renamed there,
+  cannot be proved empty and its removal is refused. Storage absent before the plan is
+  the plan's own only where a native creation of the plan adds it; any other absent
+  storage cannot be proved empty either. A table owned at the end of the plan is not
+  deleted, even by a declared drop, unless after the drop a native creation, or a
+  followed rename, puts storage under its name, as Django's removal and addition of a
+  many-to-many field with a new target does, and the owner did not own the table when
+  it was dropped: a model that comes to own the name after the drop owns that new
+  storage, but one that owned the table then, under whatever name a later
+  `RenameModel` gives it, owned the dropped rows. A model that a state-only operation
+  gives the name after the drop owns no table, and the drop stays refused. Under a
+  deleted model's own label, though, a model is taken for that model created again, as
+  histories commonly delete and create a model again, so three shapes that leave it
+  without a table go unnoticed: a state-only `CreateModel` under that label, a
+  state-only `RenameModel` into it, and a native creation under another table followed
+  by a state-only `AlterModelTable` back. Where the dropped table holds rows, the
+  probe still refuses the drop.
 - **Snapshot:** every proof is taken at `pre_migrate`, before the first operation.
   Rows the plan itself writes, such as a `RunPython` that fills storage a later
   operation of the plan drops, are not protected.
@@ -622,10 +622,9 @@ under one a native operation of the plan created or filled, it takes the storage
 the plan's own and probes nothing. That includes a `RunSQL` that swaps two tables
 present before the plan, and the plan's operations after a state the walk cannot
 render in history the guard does not judge, which it follows no further. Two native
-drops predate the guard and are not judged:
-`AlterOrderWithRespectTo` to `None` removes the `_order` column, and a model deletion
-drops its implicit many-to-many tables unprobed, which can lose rows only when the
-field sets `db_constraint=False`.
+drops predate the guard and are not judged: `AlterOrderWithRespectTo` to `None`
+removes the `_order` column, and a model deletion drops its implicit many-to-many
+tables unprobed, which can lose rows only when the field sets `db_constraint=False`.
 
 Native dispatch must resolve this package's `makemigrations` and `migrate`, or a
 subclass of each. `ComposeConfig` is last in `INSTALLED_APPS`, so a same-named command
