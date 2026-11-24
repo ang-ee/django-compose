@@ -665,10 +665,13 @@ sets `db_constraint=False`.
 Native dispatch must resolve this package's `makemigrations` and `migrate`, or a
 subclass of each. `ComposeConfig` is last in `INSTALLED_APPS`, so a same-named command
 of any other app wins and would switch the guard off. System check
-`django_compose.E002` reports either, and `provision` refuses either before any
-database work: it runs `migrate`, and at its end the system checks, which would report
-a shadowing `makemigrations` only after migrating, with the provision record left
-`in_progress`. The guard wraps the command's `execute`, so a subclass that replaces
+`django_compose.E002`, tagged `commands`, reports either. Before any database work,
+`provision` refuses a shadowing `migrate`, which it runs, silenced or not, and refuses
+whatever the `commands` checks report unless it is silenced, as its final system
+check would only after migrating, with the provision record left `in_progress`. A
+host that ships its own `makemigrations`, as django-linear-migrations does, and
+silences `django_compose.E002` and Django's `commands.E001` provisions as the system
+checks allow. The guard wraps the command's `execute`, so a subclass that replaces
 `handle` keeps it; a subclass that overrides `execute` without calling it passes E002
 but has no guard.
 [Proposal 0005](proposals/0005-migrate-time-drop-guard.md) records these decisions.

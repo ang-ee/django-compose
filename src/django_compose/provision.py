@@ -15,6 +15,7 @@ from typing import Any, cast
 
 from django.apps import apps
 from django.apps.registry import Apps
+from django.core import checks
 from django.core.exceptions import ValidationError
 from django.core.management import call_command, get_commands, load_command_class
 from django.core.management.base import BaseCommand, CommandError, OutputWrapper
@@ -267,9 +268,17 @@ def run(command: BaseCommand, options: dict[str, Any]) -> None:
         command.stdout.write(command.style.SUCCESS("provision: ready"))
         return
     verified_receipt()
-    # The specification's "Drop guard" section says why both commands are checked here.
-    if shadowed := unguarded_commands():
-        raise CommandError("provision: " + "; ".join(shadowed))
+    # Before any database work: a shadowing migrate would run unguarded, and the commands'
+    # system checks, unless silenced, would fail the final check only after migrating. The
+    # specification's "Drop guard" section states this.
+    problems = [problem for name, problem in unguarded_commands().items() if name == "migrate"]
+    problems.extend(
+        str(message.msg)
+        for message in checks.run_checks(tags=[checks.Tags.commands])
+        if message.is_serious() and not message.is_silenced()
+    )
+    if problems:
+        raise CommandError("provision: " + "; ".join(dict.fromkeys(problems)))
     connection = connections[using]
     if connection.in_atomic_block or (connection.connection is not None and not connection.get_autocommit()):
         raise CommandError("Provision requires an independent autocommit connection")

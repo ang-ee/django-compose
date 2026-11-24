@@ -38,22 +38,22 @@ def require_serving_mode() -> None:
         raise CommandError("Migration commands require serving mode; unset DJANGO_COMPOSE_MODE")
 
 
-def unguarded_commands() -> tuple[str, ...]:
-    """Describe each drop-guarded command that native dispatch resolves elsewhere.
+def unguarded_commands() -> dict[str, str]:
+    """Describe, by name, each drop-guarded command that native dispatch resolves elsewhere.
 
     ComposeConfig must be last in INSTALLED_APPS, so a same-named command of any
     other app wins native dispatch and its drop guard is silently off. A subclass
     of this package's command keeps the guard unless it overrides ``execute``.
     """
-    shadowed = []
+    shadowed: dict[str, str] = {}
     for name in ("makemigrations", "migrate"):
         # Imported here: the command modules load migration state and models, while
         # this module loads before settings, for the launcher.
         guarded = importlib.import_module(f"django_compose.management.commands.{name}").Command
         app = get_commands()[name]
         if not isinstance(load_command_class(app, name), guarded):
-            shadowed.append(f"{name} resolves to {app}'s command, which bypasses the drop guard")
-    return tuple(shadowed)
+            shadowed[name] = f"{name} resolves to {app}'s command, which bypasses the drop guard"
+    return shadowed
 
 
 def check_guarded_commands(app_configs: Any = None, **kwargs: Any) -> list[checks.CheckMessage]:
@@ -64,7 +64,7 @@ def check_guarded_commands(app_configs: Any = None, **kwargs: Any) -> list[check
             hint="Remove that command, or subclass django-compose's command of the same name.",
             id="django_compose.E002",
         )
-        for problem in unguarded_commands()
+        for problem in unguarded_commands().values()
     ]
 
 

@@ -14,8 +14,9 @@
   declare a drop a migration intends; see
   [intended drops](docs/migrations.md#declare-an-intended-drop).
 - Report another app's `migrate` or `makemigrations` that shadows this package's, and
-  so switches the drop guard off, with system check `django_compose.E002`, which
-  `provision` checks before any database work; see the
+  so switches the drop guard off, with system check `django_compose.E002`, tagged
+  `commands`. Before any database work `provision` refuses a shadowing `migrate`, and
+  whatever the `commands` checks report unless it is silenced; see the
   [drop guard](docs/SPEC.md#drop-guard).
 - `retire_history --purge` applies only the retired label's own migrations.
 - `django_compose.provision.TABLE` and `LEGACY_TABLE` are gone: the provision record's
@@ -43,7 +44,9 @@
   deployment with `retire_history <label> --purge`. Any other installed app, the
   project's or a third party's, that ships a `migrate` or `makemigrations` command now
   fails system check `django_compose.E002` and makes `provision` refuse: remove that
-  command, or make it subclass this package's.
+  command, or make it subclass this package's. A `makemigrations` that must stay, such
+  as django-linear-migrations', provisions once `django_compose.E002` is silenced, with
+  `commands.E001` where Django reports it.
 
 ## 0.1.0.dev13
 

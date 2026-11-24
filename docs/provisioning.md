@@ -22,7 +22,8 @@ Skipping system checks does not skip the [drop guard](SPEC.md#drop-guard): a pla
 whose project-owned history would drop stored data without a declared intent fails the
 migrate step before any operation runs, and provision stays `in_progress`. Before any
 database work, provision also refuses another app's command that shadows this package's
-`migrate` or `makemigrations`, as the [drop guard](SPEC.md#drop-guard) states.
+`migrate`, and one that shadows `makemigrations` unless its system checks are silenced,
+as the [drop guard](SPEC.md#drop-guard) states.
 PostgreSQL refreshes statistics for existing managed tables (including implicit
 many-to-many tables) belonging to apps migrated forward.
 

@@ -224,7 +224,8 @@ with (
     patch.object(provision,'run_step',step),
     patch.object(provision,'migrate_and_analyze',lambda *args,**kwargs:events.append('migrate')),
     # Native steps are stubbed above, so command resolution is outside this owner test.
-    patch.object(provision,'unguarded_commands',return_value=()),
+    patch.object(provision,'unguarded_commands',return_value={}),
+    patch.object(provision.checks,'run_checks',return_value=[]),
 ):
     try:
         run(command,options)
@@ -587,14 +588,18 @@ def test_provision_judges_a_root_app_with_plain_models_and_its_own_migrations(tm
         ]
 
 
+@pytest.mark.parametrize("silenced", [False, True])
 @pytest.mark.parametrize("command", ["migrate", "makemigrations"])
 def test_provision_refuses_a_shadowed_guarded_command_before_any_database_work(
-    tmp_path: Path, command: str
+    tmp_path: Path, command: str, silenced: bool
 ) -> None:
     manage = _composed_host(tmp_path, _item_models("old = models.CharField(max_length=40, default='')"))
     database = tmp_path / "probe.sqlite3"
     # A safe plan: provision's own final system check would report either command only
-    # after migrating, so it refuses both first.
+    # after migrating, so it refuses both first. A shadowing migrate would run without the
+    # guard, silenced or not; a shadowing makemigrations, which provision never runs, it
+    # refuses only where the system checks would, as for a host that ships another
+    # makemigrations and silences them.
     _history(
         tmp_path,
         "0002_add",
@@ -609,19 +614,30 @@ def test_provision_refuses_a_shadowed_guarded_command_before_any_database_work(
     (tmp_path / f"probe/management/commands/{command}.py").write_text(
         f"from django.core.management.commands.{command} import Command as Command\n"
     )
+    if silenced:
+        settings = tmp_path / "probe/settings.py"
+        silence = "SILENCED_SYSTEM_CHECKS=['commands.E001', 'django_compose.E002']\n"
+        settings.write_text(
+            settings.read_text().replace("configure(globals())", silence + "configure(globals())")
+        )
     assert manage("compose").returncode == 0
     result = manage("provision", "--wait-db", "1")
-    assert result.returncode != 0
     output = result.stdout + result.stderr
-    assert f"provision: {command} resolves to probe's command, which bypasses the drop guard" in output, (
-        output
-    )
+    refused = command == "migrate" or not silenced
+    assert (result.returncode != 0) is refused, output
     with sqlite3.connect(database) as connection:
-        assert [row[1] for row in connection.execute("PRAGMA table_info(probe_item)")] == ["id", "old"]
-        assert connection.execute("SELECT state FROM django_compose_provision").fetchall() == [("complete",)]
-    result = manage("check")
-    assert result.returncode != 0
-    assert "django_compose.E002" in result.stderr, result.stdout + result.stderr
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(probe_item)")]
+        state = connection.execute("SELECT state FROM django_compose_provision").fetchall()
+    if refused:
+        problem = f"provision: {command} resolves to probe's command, which bypasses the drop guard"
+        assert problem in output, output
+        assert (columns, state) == (["id", "old"], [("complete",)])
+    else:
+        assert (columns, state) == (["id", "old", "new"], [("complete",)])
+    # The commands checks are what provision runs first.
+    result = manage("check", "--tag", "commands")
+    assert (result.returncode != 0) is not silenced, result.stdout + result.stderr
+    assert ("django_compose.E002" in result.stderr) is not silenced, result.stdout + result.stderr
 
 
 def test_native_makemigrations_then_migrate_sees_new_file_in_same_process(tmp_path: Path) -> None:
