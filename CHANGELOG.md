@@ -17,7 +17,9 @@
   but the migration and provision recorders, such as a fresh or test database on
   PostgreSQL, where a table an extension owns does not count, or SQLite, nothing is
   stored, so nothing is probed; deleting a table another model still owns is refused
-  there too, since that rule needs no data. Other backends always probe. See
+  there too, since that rule needs no data, unless a native operation of the plan
+  creates the table again after the drop, as Django writes a many-to-many field's new
+  target. Other backends always probe. See
   [proposal 0005](docs/proposals/0005-migrate-time-drop-guard.md).
 - Add `django_compose.operations.IntendedRemoveField` and `IntendedDeleteModel` to
   declare a drop a migration intends; see

@@ -799,6 +799,69 @@ assert ("alpha", "0003_drop") not in applied()
     )
 
 
+def created(name, **options):
+    """A model with only a primary key."""
+    key = '("id", models.AutoField(primary_key=True))'
+    return f'migrations.CreateModel(name="{name}", fields=[{key}], options={options})'
+
+
+@pytest.mark.parametrize("database", ["fresh", "test", "populated"])
+@pytest.mark.parametrize("history", ["retarget", "reintroduce", "reuse", "recreate"])
+def test_a_table_a_native_operation_creates_again_after_its_drop_is_not_kept(host, history, database):
+    root, run = host
+
+    def tags(target):
+        return add_field("tags", f'models.ManyToManyField("alpha.{target}")')
+
+    migration(root, "0002_tags", [created("Tag"), created("Label"), created("Note"), tags("Tag")])
+    if history == "retarget":
+        # Django's autodetector writes a many-to-many field's new target as a removal and
+        # an addition, which drops alpha_record_tags and creates it again.
+        migration(root, "0003_later", [remove_field("tags"), tags("Label")], after="0002_tags")
+    elif history == "reintroduce":
+        migration(root, "0003_drop", [remove_field("tags")], after="0002_tags")
+        migration(root, "0004_later", [tags("Tag")], after="0003_drop")
+    else:
+        again = created("Entry", db_table="alpha_note") if history == "reuse" else created("Note")
+        migration(root, "0003_drop", ['migrations.DeleteModel(name="Note")'], after="0002_tags")
+        migration(root, "0004_later", [again], after="0003_drop")
+    run(
+        PRELUDE
+        + f"""
+database = {database!r}
+if database == "test":
+    connection.creation.create_test_db(verbosity=0, autoclobber=True, serialize=False)
+else:
+    if database == "populated":
+        seed("0002_tags", old="kept")
+    migrate()
+    assert any(name.endswith("_later") for label, name in applied() if label == "alpha")
+    assert {{"alpha_record_tags", "alpha_note"}} <= tables()
+"""
+    )
+
+
+@pytest.mark.parametrize("adopter", ["Twin", "Record"])
+@pytest.mark.parametrize("database", ["fresh", "populated"])
+def test_a_table_a_state_only_operation_adopts_after_its_drop_is_kept(host, database, adopter):
+    root, run = host
+    # A model adopts alpha_record after the deletion dropped it, under another name or the
+    # deleted model's own: nothing creates it again, so the model would have no table.
+    adopted = state_only(created(adopter, db_table="alpha_record"))
+    migration(root, "0002_drop", [DELETE_RECORD])
+    migration(root, "0003_adopt", [adopted], after="0002_drop")
+    run(
+        PRELUDE
+        + f"""
+if {database!r} == "populated":
+    seed()
+owner = "table 'alpha_record' is still owned by alpha.{adopter.lower()} on"
+expect(CommandError, "alpha.0002_drop (Delete model Record): " + owner, migrate)
+assert "alpha_record" in tables() if {database!r} == "populated" else not applied()
+"""
+    )
+
+
 def test_where_nothing_is_stored_only_a_refused_app_is_classified(host):
     root, run = host
     migration(root, "0002_twin", [adopt("Twin")])

@@ -568,7 +568,10 @@ At `migrate`:
   its removal is refused. Storage absent before the plan is the plan's own only where
   a native creation of the plan adds it; any other absent storage cannot be proved
   empty either. A table owned at the end of the plan is not deleted, even by a
-  declared drop.
+  declared drop, unless after the drop a native creation, or a followed rename, puts
+  storage under its name, as Django's removal and addition of a many-to-many field
+  with a new target does: the owner then owns that storage. A model that a state-only
+  operation gives the name after the drop owns no table, and the drop stays refused.
 - **Snapshot:** every proof is taken at `pre_migrate`, before the first operation.
   Rows the plan itself writes, such as a `RunPython` that fills storage a later
   operation of the plan drops, are not protected.

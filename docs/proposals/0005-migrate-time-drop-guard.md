@@ -64,6 +64,13 @@ choices behind it.
   Every test database is fresh, so the walk there renders only at a removal that can
   drop a table and classifies an app's history only where the rule refuses one of its
   removals.
+  A table dropped and created again, as Django's autodetector writes a many-to-many
+  field's new target, is not kept: the rule asks at the end of the plan whether a
+  native creation or followed rename filled the table's name after the drop. Judging
+  ownership at the removal instead was rejected: a model that a state-only operation
+  gives the name after the drop would be left without a table. Where nothing is
+  stored, the walk follows names only once names alone keep a table, so a fresh
+  database pays for following them only then.
   An empty pre-plan state was rejected as the test, because `--fake-initial`
   and state-only adoption give existing tables a model the plan introduces. Native
   table introspection was rejected as the inventory, because on PostgreSQL it lists

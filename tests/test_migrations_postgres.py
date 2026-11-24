@@ -27,6 +27,7 @@ def _drive(environment: Path) -> None:
         DropGuardAutodetector,
         _changed_removals,
         _shared_table_drops,
+        _Storage,
         _stores_nothing,
     )
     from django_compose.provision import ProvisionRecorder
@@ -170,6 +171,25 @@ def _drive(environment: Path) -> None:
                 list(_changed_removals(before, changes)), after, connections, catalog=False
             )
             assert names and all("from names alone" in refusal for _, _, refusal in names), names
+        # Where nothing is stored, names are compared alone, and a table a native operation
+        # creates again after its drop is told by its whole name: created again in another
+        # schema under the same bare name, it fills nothing, so a model still owning the
+        # dropped table keeps it; created again under the same name, it is new storage.
+        before, graph = state('"left"."records"', '"left"."records"')
+        after = before.clone()
+        after.remove_model("alpha", "record")
+        for again, kept in (('"left"."records"', False), ('"right"."records"', True)):
+            storage = _Storage(connection)
+            storage.end(before.apps.get_model("alpha", "Record"), None)
+            storage.create(state(again)[0].apps.get_model("alpha", "Record"), None)
+            removals = list(_changed_removals(before, changes))
+            with patch.object(connection, "cursor", side_effect=AssertionError("catalog query")):
+                refused = _shared_table_drops(
+                    removals, after, ["default"], catalog=False, refilled=storage.refilled
+                )
+            assert [refusal for _, _, refusal in refused] == (
+                ["table '\"left\".\"records\"' is still owned by beta.record on 'default'"] if kept else []
+            ), refused
         # Identical names on disjoint aliases protect only their own storage.
         before, graph = state("alias_records", '"alias_records"')
         model = before.apps.get_model("alpha", "Record")
