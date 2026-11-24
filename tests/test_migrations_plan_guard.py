@@ -3013,3 +3013,43 @@ else:
     assert ("beta", "0002_held") in applied()
 """
     )
+
+
+def test_storage_with_no_definition_before_the_plan_is_adopted_by_migrating_to_its_adoption_first(host):
+    root, run = host
+    # --fake-initial adopts a table that holds a row, and the same plan removes a column
+    # of it. Before the plan no field is stored in that column, so it cannot be proved
+    # empty, and the remedy is to migrate to the adopting migration first: the column is
+    # then judged by the definition that migration gives it.
+    note = '("note", models.CharField(max_length=10, default=""))'
+    legacy = (
+        f'migrations.CreateModel(name="Legacy", fields=[{KEY}, {note}], options={{"db_table": "legacy"}})'
+    )
+    beta(root, "0001_initial", [legacy])
+    beta(
+        root,
+        "0002_drop",
+        ['migrations.RemoveField(model_name="legacy", name="note")'],
+        [("beta", "0001_initial")],
+    )
+    run(
+        PRELUDE
+        + """
+with connection.cursor() as cursor:
+    cursor.execute("CREATE TABLE legacy (id integer PRIMARY KEY AUTOINCREMENT, note varchar(10) NOT NULL)")
+    cursor.execute("INSERT INTO legacy (note) VALUES ('')")
+refusal = (
+    "beta.0002_drop (Remove field note from legacy): beta.legacy: cannot prove legacy.note empty on "
+    "'default' (the state before the plan defines no field stored in it). Nothing was migrated. "
+    "To proceed, migrate to the migration that adopts that storage first, for example "
+    "migrate <app> 0001 --fake-initial, then migrate."
+)
+expect(CommandError, refusal, lambda: migrate(fake_initial=True))
+assert ("beta", "0001_initial") not in applied()
+migrate("beta", "0001", fake_initial=True)
+migrate()
+with connection.cursor() as cursor:
+    described = connection.introspection.get_table_description(cursor, "legacy")
+assert [column.name for column in described] == ["id"]
+"""
+    )

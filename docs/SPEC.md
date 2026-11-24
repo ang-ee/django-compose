@@ -614,7 +614,14 @@ At `migrate`:
   each remedy once. The remedy for a shared table is to keep it or change that owner
   first, since declaring the drop cannot help; authoring and `retire_history --purge`
   refuse it in the same words. Shared storage whose identity cannot be resolved needs
-  a name that can be.
+  a name that can be. A column no field of the state before the plan is stored in
+  needs the plan to start after the migration that adopts it: migrate to that
+  migration first, such as `migrate <app> 0001 --fake-initial` for a table
+  `--fake-initial` adopts, then migrate. A plan that starts between the two halves of
+  Django's documented move of a model between apps, after the old app's state-only
+  deletion and before the new app's state-only creation, meets such columns too, and
+  the new app's creation is the migration to apply first. A state that cannot be
+  rendered or resolved needs the history ordered so that it can be.
 
 A migration declares a drop it intends with `IntendedRemoveField` or
 `IntendedDeleteModel` from `django_compose.operations`: native subclasses applied and

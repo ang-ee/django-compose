@@ -548,7 +548,12 @@ _UNFILLED = "an earlier operation of the plan vacated its name, and no native op
 
 
 class _Undefined(Exception):
-    """The state before the plan gives stored rows no one definition to judge them by."""
+    """The state before the plan gives stored rows no one definition to judge them by;
+    ``remedy`` is what to do instead of declaring the drop, where that differs."""
+
+    def __init__(self, reason: str, remedy: str | None = None) -> None:
+        super().__init__(reason)
+        self.remedy = remedy
 
 
 def _unproved(model: Any, table: str, column: str | None, alias: str, reason: object) -> str:
@@ -565,8 +570,9 @@ def _proofs(
     *,
     added: bool,
     absent: str = _ABSENT,
-) -> Iterator[str]:
-    """Yield a refusal for each alias the operation drops ``dropped`` on where it may hold data.
+) -> Iterator[tuple[str | None, str]]:
+    """Yield a refusal for each alias the operation drops ``dropped`` on where it may hold
+    data, after the remedy it has of its own, if any.
 
     Routing is decided here, once per alias: Django routes the operation with
     ``routed``, the model it removes, while ``dropped`` names the storage as the
@@ -612,14 +618,17 @@ def _proofs(
                         present = key(name) in {key(convert(item)) for item in names}
             data = rows(alias) if present else None
             count = data.using(alias).count() if data is not None and data.using(alias).exists() else 0
-        except (DatabaseError, ImproperlyConfigured, _Undefined) as error:
-            yield _unproved(routed, table, column, alias, error)
+        except _Undefined as error:
+            yield error.remedy, _unproved(routed, table, column, alias, error)
+            continue
+        except (DatabaseError, ImproperlyConfigured) as error:
+            yield None, _unproved(routed, table, column, alias, error)
             continue
         if not present and not added:
-            yield _unproved(routed, table, column, alias, absent)
+            yield None, _unproved(routed, table, column, alias, absent)
         elif count:
             storage = f"{table}.{column or '*'}"
-            yield f"{routed._meta.label_lower}: {storage} holds data in {count} rows on {alias!r}"
+            yield None, f"{routed._meta.label_lower}: {storage} holds data in {count} rows on {alias!r}"
 
 
 _AUTHOR = "declare a reviewed cutover migration before native makemigrations"
@@ -652,7 +661,7 @@ class DropGuardAutodetector(MigrationAutodetector):
             for operation, model, field, _ in removals
             if (dropped := _dropped(model, field, policies)) is not None
             # A database that lags the history holds nothing in storage it lacks.
-            for refusal in _proofs(operation, model, dropped, aliases, added=True)
+            for _, refusal in _proofs(operation, model, dropped, aliases, added=True)
         ]
         refusals.extend(
             (remedy, refusal)
@@ -674,6 +683,10 @@ _DECLARE = (
 
 
 _RENDER = "order the history so that its state renders at every operation, each relation's target defined"
+_ADOPT = (
+    "migrate to the migration that adopts that storage first, for example "
+    "migrate <app> 0001 --fake-initial, then migrate"
+)
 
 
 class _End(Exception):
@@ -1226,8 +1239,8 @@ class _Walk:
             proof = _dropped(model, field, self.policies)
         if proof is None:
             return
-        for refusal in _proofs(operation, routed, proof, (using,), added=origin.added):
-            self.refused.append((migration, operation, None, refusal))
+        for remedy, refusal in _proofs(operation, routed, proof, (using,), added=origin.added):
+            self.refused.append((migration, operation, remedy, refusal))
 
     def _written(self, table: str, column: str) -> QuerySet[Any] | None:
         """The rows holding data in column ``column`` of table ``table``, named as before the
@@ -1238,7 +1251,8 @@ class _Walk:
         ``None`` is returned. A field without a database type stores nothing in it. Every
         field stored in the column must agree on what reads as empty in it. Where none is,
         they disagree, or one cannot be resolved or its default evaluated, the rows cannot
-        be judged, and ``_Undefined`` says why.
+        be judged, and ``_Undefined`` says why and, where it differs from declaring the
+        drop, what to do instead.
         """
         alias = self.connection.alias
         definitions = []
@@ -1250,9 +1264,10 @@ class _Walk:
                 ):
                     definitions.append((model, field))
             except (FieldDoesNotExist, LookupError, ValueError) as error:
-                raise _Undefined(f"the state before the plan cannot resolve {field} ({error})") from error
+                reason = f"the state before the plan cannot resolve {field} ({error})"
+                raise _Undefined(reason, _RENDER) from error
         if not definitions:
-            raise _Undefined("the state before the plan defines no field stored in it")
+            raise _Undefined("the state before the plan defines no field stored in it", _ADOPT)
         empty = []
         for _, field in definitions:
             try:
@@ -1282,7 +1297,7 @@ class _Walk:
                         key = self.storage.key(model._meta.db_table, field.column)
                         self._written_by.setdefault(key, []).append((model, field))
         if self._unwritten:
-            raise _Undefined(self._unwritten)
+            raise _Undefined(self._unwritten, _RENDER)
         return self._written_by.get(self.storage.key(table, column), [])
 
     def _judge(
