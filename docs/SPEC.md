@@ -498,21 +498,21 @@ uninstall anything. See [migration workflows](migrations.md).
 The drop guard refuses a native removal that would destroy stored data. A removal is a
 `RemoveField` or `DeleteModel`, also one among the database operations of a
 `SeparateDatabaseAndState`. It drops a concrete field's column, a field's implicit
-many-to-many table, or a model's table; explicit through models and generated columns
-own no storage of their own. Storage is empty when no row holds data in it, read
-without the model's managers: a nullable column is empty at NULL and a non-null column
-at its native default, while a database default cannot prove emptiness. A deleted
-table may still hold rows that `MigrationPolicy.retired_primary_keys(model, alias)`
-explicitly retires. Eligibility follows native model options and routers. Storage
-identity follows the backend's own rules: on PostgreSQL quoted case, explicit schemas
-and `search_path`, and on SQLite its case rule and the temporary tables it resolves
-first. Attached SQLite databases, an identifier Django's `split_identifier` does not
-represent faithfully, a namespace on another backend, a name over the backend's length
-limit, and an unavailable eligible database cannot prove a drop safe. A table that an
-active model still owns on the same alias is never deleted, even when empty; identical
-names on disjoint aliases are not shared. An unmanaged, proxy or swapped model owns no
-table, since Django neither creates nor deletes one for it, so it keeps no table from
-deletion; the rows of that table remain protected.
+many-to-many table, or a model's table; an explicit through model owns no storage of its
+own, and a generated column holds no data of its own. Storage is empty when no row holds
+data in it, read without the model's managers: a nullable column is empty at NULL and a
+non-null column at its native default, while a database default cannot prove emptiness.
+Rows a deleted table still holds may be retired explicitly by
+`MigrationPolicy.retired_primary_keys(model, alias)`. Eligibility follows native model
+options and routers. Storage identity follows the backend's own rules: on PostgreSQL
+quoted case, explicit schemas and `search_path`, and on SQLite its case rule and the
+temporary tables it resolves first. Attached SQLite databases, an identifier Django's
+`split_identifier` does not represent faithfully, a namespace on another backend, a name
+over the backend's length limit, and an unavailable eligible database cannot prove a
+drop safe. A table that an active model still owns on the same alias is never deleted,
+even when empty; identical names on disjoint aliases are not shared. An unmanaged, proxy
+or swapped model owns no table, since Django neither creates nor deletes one for it, so
+it keeps no table from deletion; the rows of that table remain protected.
 
 It runs at two points on these rules:
 
@@ -553,13 +553,18 @@ At `migrate`:
   still guards what it autodetects for them. That includes an editable install, such
   as `uv sync` or `pip install -e` makes, which records the project directory as PEP
   610 `dir_info`.
-- **Probe:** each removal is routed and defined by the plan's state at that operation,
-  and its storage is probed under the name it had before the plan. A column is judged by
-  the definition the state before the plan gives it, under which its rows were written,
+- **Probe:** the plan's state at each removal routes it and tells only what Django
+  drops: the model's tables, a many-to-many field's table, or a field's column, which a
+  field without a database type does not have. That storage is probed under the name it
+  had before the plan. A column is judged by the definition the state before the plan
+  gives it, on a model that migrates on the alias, under which its rows were written,
   whatever the plan redefines in any form or under any name: its class, `null`,
-  `default` or `db_default`, from which Django derives its default. Where no field of
-  that state is stored in the column, as for a table `--fake-initial` adopts, where the
-  fields stored in it read as empty differently, or where that state cannot be rendered,
+  `default` or `db_default`, from which Django derives its default, or whether it is
+  generated. A column generated before the plan holds no data of its own, while one the
+  plan redefines as generated still holds the rows written before it. Where no field
+  of that state is stored in the column, as for a table `--fake-initial` adopts, where
+  the fields stored in it read as empty differently, where a field stored in it cannot
+  be resolved or its default raises an error, or where that state cannot be rendered,
   the column cannot be proved empty. The walk follows every rename the plan's database
   operations make, whoever owns them: `AlterModelTable`, `RenameModel`, `RenameField`
   and `AlterField`. It follows each where Django applies it, on an alias that migrates

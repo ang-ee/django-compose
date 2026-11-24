@@ -40,10 +40,12 @@ choices behind it.
   before the plan holds rows written under the definition the state before the plan
   gives it, and is judged by that definition, found through the same storage names;
   the walk keeps that state, and its rendering where it has one before the first
-  operation changes it. Tracking the plan's alterations instead, with such a column
-  empty only at NULL, lost a redefinition made by the `AlterField` that renamed the
-  column, missed a state-only removal and addition, and refused Django's own
-  make-nullable-then-remove.
+  operation changes it. The plan's state tells only what Django drops. Tracking the
+  plan's alterations instead, with such a column empty only at NULL, lost a
+  redefinition made by the `AlterField` that renamed the column, missed a state-only
+  removal and addition, and refused Django's own make-nullable-then-remove; letting the
+  plan's definition say whether a column holds data lost the rows of one that a
+  state-only redefinition made generated.
 - **Refuse what the walk cannot account for.** The walk uses the graph native
   `migrate` planned with, including for a squash-replaced target; a planned migration
   it cannot follow is refused. Storage absent before the plan is the plan's own only

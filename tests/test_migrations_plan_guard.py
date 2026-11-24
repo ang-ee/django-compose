@@ -445,8 +445,16 @@ REDEFINITIONS = [
     "rename_and_class",
     "split",
     "state_remove_add",
+    "to_generated",
+    "from_generated",
     "nullable",
 ]
+
+
+def generated(source):
+    """A stored column computed from column ``source``: it holds no data of its own."""
+    output = "models.CharField(max_length=40)"
+    return f'models.GeneratedField(expression=models.F("{source}"), output_field={output}, db_persist=True)'
 
 
 @pytest.mark.parametrize("redefinition", REDEFINITIONS)
@@ -454,8 +462,10 @@ def test_a_column_is_judged_by_its_definition_before_the_plan(host, redefinition
     root, run = host
     # old's rows hold "kept" under its default "" before the plan, as written then. Judged
     # by the default "kept" the plan gives the column before removing it, in whatever form
-    # and under whatever name, they would read as empty. A widening and Django's own
-    # make-nullable-then-remove, as contenttypes' 0002 does, leave "" empty.
+    # and under whatever name, they would read as empty, and as a generated column they
+    # would hold nothing of their own. A widening and Django's own make-nullable-then-remove,
+    # as contenttypes' 0002 does, leave "" empty. A column generated before the plan holds
+    # nothing of its own, whatever the plan redefines it as.
     kept = 'models.CharField(max_length=40, default="kept")'
     alter = {
         "rename_and_default": 'models.CharField(max_length=40, default="kept", db_column="renamed")',
@@ -463,35 +473,97 @@ def test_a_column_is_judged_by_its_definition_before_the_plan(host, redefinition
         "rename_and_class": 'models.TextField(default="kept", db_column="renamed")',
         "widening": 'models.CharField(max_length=80, default="")',
         "nullable": 'models.CharField(max_length=40, default="", null=True)',
+        "to_generated": generated("id"),
+        "from_generated": 'models.CharField(max_length=40, default="")',
     }.get(redefinition, kept)
-    alter = f'migrations.AlterField(model_name="record", name="old", field={alter})'
+    name = "copy" if redefinition == "from_generated" else "old"
+    alter = f'migrations.AlterField(model_name="record", name="{name}", field={alter})'
     operations = {
         "state_only": [state_only(alter)],
+        "to_generated": [state_only(alter)],
+        "from_generated": [state_only(alter)],
         "run_sql": [f"migrations.RunSQL(migrations.RunSQL.noop, state_operations=[{alter}])"],
         "state_remove_add": [
             f"migrations.SeparateDatabaseAndState(state_operations=[{REMOVE_OLD}, {add_field('old', kept)}])"
         ],
     }.get(redefinition, [alter])
+    target = "0001_origin"
     if redefinition == "split":
         # As makemigrations writes it: the removal in a migration of its own.
         migration(root, "0002_alter", operations)
         migration(root, "0003_drop", [REMOVE_OLD], after="0002_alter")
+    elif redefinition == "from_generated":
+        target = "0002_copy"
+        migration(root, target, [add_field("copy", generated("old"))])
+        migration(root, "0003_drop", [*operations, remove_field("copy")], after=target)
     else:
         migration(root, "0002_drop", [*operations, REMOVE_OLD])
     run(
         PRELUDE
         + f"""
 redefinition = {redefinition!r}
-seed(old="" if redefinition == "nullable" else "kept")
+seed({target!r}, old="" if redefinition == "nullable" else "kept")
 if redefinition == "widening":
     seed(old="")
-if redefinition == "nullable":
+if redefinition in {{"nullable", "from_generated"}}:
     migrate()
-    assert columns() == ["id"]
+    assert columns() == (["id"] if redefinition == "nullable" else ["id", "old"])
 else:
     refusal = "(Remove field old from record): alpha.record: alpha_record.old holds data in 1 rows"
     expect(CommandError, refusal, migrate)
     assert columns() == ["id", "old"]
+"""
+    )
+
+
+@pytest.mark.parametrize("database", ["populated", "fresh"])
+def test_a_generated_column_replaced_by_state_alone_then_removed_holds_no_data(host, database):
+    root, run = host
+    # Django's state-only removal and addition gives a generated column a stored
+    # definition; dropping it then loses nothing, as its rows hold nothing of their own.
+    migration(root, "0002_copy", [add_field("copy", generated("old"))])
+    replaced = f"{remove_field('copy')}, {add_field('copy')}"
+    plan = [f"migrations.SeparateDatabaseAndState(state_operations=[{replaced}])", remove_field("copy")]
+    migration(root, "0003_drop", plan, after="0002_copy")
+    run(
+        PRELUDE
+        + f"""
+if {database!r} == "populated":
+    seed("0002_copy", old="kept")
+migrate()
+assert columns() == ["id", "old"]
+"""
+    )
+
+
+def test_a_default_the_state_before_the_plan_cannot_evaluate_cannot_prove_a_column_empty(host):
+    root, run = host
+    preamble = """
+FAIL = False
+
+def stamp():
+    if FAIL:
+        raise RuntimeError("stamp is gone")
+    return ""
+"""
+    migration(
+        root,
+        "0002_stamp",
+        [add_field("stamp", "models.CharField(max_length=40, default=stamp)")],
+        preamble=preamble,
+    )
+    migration(root, "0003_drop", [remove_field("stamp")], after="0002_stamp")
+    run(
+        PRELUDE
+        + """
+seed("0002_stamp", old="kept")
+importlib.import_module("history.alpha.0002_stamp").FAIL = True
+refusal = (
+    "alpha.0003_drop (Remove field stamp from record): alpha.record: cannot prove alpha_record.stamp empty "
+    "on 'default' (its default raised RuntimeError: stamp is gone)"
+)
+expect(CommandError, refusal, migrate)
+assert columns() == ["id", "old", "stamp"]
 """
     )
 
