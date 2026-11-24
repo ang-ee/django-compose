@@ -358,7 +358,10 @@ def _shared_table_drops(
                     filled = refilled is not None and refilled(table)
                     remaining = set()
                     for owner, active_storage in owners:
-                        if not operation.allow_migrate_model(alias, owner):
+                        # An owner under a deleted model's own label is that model created again.
+                        if (
+                            field is None and owner._meta.label_lower == model._meta.label_lower
+                        ) or not operation.allow_migrate_model(alias, owner):
                             continue
                         active_table = active_storage._meta.db_table
                         other = _storage_identifier(connection, active_table)

@@ -71,7 +71,11 @@ choices behind it.
   ownership at the removal instead was rejected: a model that a state-only operation
   gives the name after the drop would be left without a table. Where nothing is
   stored, the walk follows names only once names alone keep a table, so a fresh
-  database pays for following them only then.
+  database pays for following them only then. An owner under a deleted model's own
+  label is taken for that model created again, as histories commonly delete and
+  re-create a model: telling a state-only re-adoption under that label apart made a
+  composed host's every fresh database follow the plan's names, several times the
+  cost.
   An empty pre-plan state was rejected as the test, because `--fake-initial`
   and state-only adoption give existing tables a model the plan introduces. Native
   table introspection was rejected as the inventory, because on PostgreSQL it lists

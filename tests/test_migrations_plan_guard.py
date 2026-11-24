@@ -841,13 +841,12 @@ else:
     )
 
 
-@pytest.mark.parametrize("adopter", ["Twin", "Record"])
 @pytest.mark.parametrize("database", ["fresh", "populated"])
-def test_a_table_a_state_only_operation_adopts_after_its_drop_is_kept(host, database, adopter):
+def test_a_table_a_state_only_operation_adopts_after_its_drop_is_kept(host, database):
     root, run = host
-    # A model adopts alpha_record after the deletion dropped it, under another name or the
-    # deleted model's own: nothing creates it again, so the model would have no table.
-    adopted = state_only(created(adopter, db_table="alpha_record"))
+    # Twin adopts alpha_record after the deletion dropped it: nothing creates it again,
+    # so Twin would be left without a table.
+    adopted = state_only(created("Twin", db_table="alpha_record"))
     migration(root, "0002_drop", [DELETE_RECORD])
     migration(root, "0003_adopt", [adopted], after="0002_drop")
     run(
@@ -855,7 +854,7 @@ def test_a_table_a_state_only_operation_adopts_after_its_drop_is_kept(host, data
         + f"""
 if {database!r} == "populated":
     seed()
-owner = "table 'alpha_record' is still owned by alpha.{adopter.lower()} on"
+owner = "table 'alpha_record' is still owned by alpha.twin on"
 expect(CommandError, "alpha.0002_drop (Delete model Record): " + owner, migrate)
 assert "alpha_record" in tables() if {database!r} == "populated" else not applied()
 """
