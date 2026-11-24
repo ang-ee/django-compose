@@ -57,6 +57,9 @@ choices behind it.
   no data, so it is not probed; the shared-table rule needs no data and applies there
   from names alone. Skipping the whole walk was rejected: a plan refused on every
   populated database then deleted a table another model still owns on a fresh one.
+  Every test database is fresh, so the walk there renders only at a removal that can
+  drop a table and classifies an app's history only where the rule refuses one of its
+  removals.
   An empty pre-plan state was rejected as the test, because `--fake-initial`
   and state-only adoption give existing tables a model the plan introduces. Native
   table introspection was rejected as the inventory, because on PostgreSQL it lists

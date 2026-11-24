@@ -762,6 +762,12 @@ def _leaves_state(operation: Operation) -> bool:
     )
 
 
+def _drops_table(state: ProjectState, label: str, removed: tuple[str, str | None]) -> bool:
+    """Whether a removal can drop a table: a deleted model's, or a removed many-to-many field's."""
+    name, field = removed
+    return field is None or bool(state.models[label, name.lower()].fields[field].many_to_many)
+
+
 def _database_removals(operations: Iterable[Operation]) -> list[Operation]:
     """Native removals that reach the database, including nested database operations."""
     removals: list[Operation] = []
@@ -830,8 +836,9 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
     ``migrate`` calls this from ``pre_migrate`` with the plan and alias it is about
     to apply, before any operation runs. The specification's "Drop guard" section
     defines the rule. An alias that stores nothing holds no data to prove: there the
-    walk probes nothing and follows no rename, and only the shared-table rule, which
-    needs no data, applies, offline.
+    walk probes nothing, follows no rename and renders only at a removal that can drop
+    a table, and only the shared-table rule, which needs no data, applies, offline. An
+    app's history is classified there only if that rule refuses one of its removals.
 
     The walk renders its own state in place where it needs a model: at a guarded
     removal, at a rename that can change a storage name, and at the end. Django's
@@ -849,11 +856,13 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         (migration.app_label, migration.name): migration for migration, backwards in plan if not backwards
     }
     labels = {key[0] for key, migration in forwards.items() if _database_removals(migration.operations)}
-    guarded = _guarded(labels) if labels else frozenset()
-    if not guarded:
+    if not labels:
         return
     connection = connections[using]
     probe = not _stores_nothing(connection)
+    guarded = _guarded(labels) if probe else frozenset(labels)
+    if not guarded:
+        return
     executor = MigrationExecutor(connection)
     if not forwards.keys() <= executor.loader.graph.nodes.keys():
         # Native migrate planned a replaced target on a graph without replacements.
@@ -890,7 +899,12 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                 judge(migration, operation.state_operations, state, database=False)
                 continue
             removed = _removal(operation)
-            if database and removed is not None and label in guarded:
+            if (
+                database
+                and removed is not None
+                and label in guarded
+                and (probe or _drops_table(state, label, removed))
+            ):
                 routed = rendered(state, label, removed[0])
                 removals.append((migration, (operation, routed, removed[1])))
                 dropped = _dropped(routed, removed[1], policies) if probe else None
@@ -946,11 +960,17 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             + ", ".join(f"{label}.{name}" for label, name in unwalked)
             + "; nothing was migrated"
         )
-    for index, remedy, refusal in _shared_table_drops(
-        [removal for _, removal in removals], state, (using,), database=probe
-    ):
+    shared = (
+        _shared_table_drops([removal for _, removal in removals], state, (using,), database=probe)
+        if removals
+        else []
+    )
+    if shared and not probe:
+        guarded = _guarded({removals[index][0].app_label for index, _, _ in shared})
+    for index, remedy, refusal in shared:
         migration, (operation, _, _) = removals[index]
-        refuse(migration, operation, refusal, remedy)
+        if migration.app_label in guarded:
+            refuse(migration, operation, refusal, remedy)
     if refusals:
         raise _unsafe("unsafe migration drop", refusals, " Nothing was migrated.")
 

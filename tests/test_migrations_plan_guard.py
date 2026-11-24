@@ -749,8 +749,23 @@ if database == "adopted":
     assert columns() == ["id", "old"]
     assert not {{key for key in applied() if key[0] == "alpha"}}
 else:
-    with patch("django_compose.migrations._proofs", side_effect=AssertionError("probed")):
+    from django.db.migrations import state as native
+    registries = []
+    construct = native.StateApps.__init__
+    def constructing(self, real_apps, states, *args, **kwargs):
+        if states:
+            registries.append(len(states))
+        construct(self, real_apps, states, *args, **kwargs)
+    judge = check_plan_drops
+    def counted(plan, *, using):
+        with patch.object(native.StateApps, "__init__", constructing):
+            judge(plan, using=using)
+    # A column drop cannot drop a table, so nothing is rendered or classified either.
+    with patch("django_compose.migrations._proofs", side_effect=AssertionError("probed")), patch(
+        "django_compose.migrations._guarded", side_effect=AssertionError("classified")
+    ), patch("django_compose.management.commands.migrate.check_plan_drops", counted):
         migrate()
+    assert registries == [], registries
     assert columns() == ["id"]
     assert ("alpha", "0002_drop") in applied()
 """
@@ -770,6 +785,38 @@ if {database!r} == "populated":
 # The rule needs no data, so a database that stores nothing applies it too.
 expect(CommandError, "table 'alpha_record' is still owned by alpha.twin on 'default'", migrate)
 assert ("alpha", "0003_drop") not in applied()
+"""
+    )
+
+
+def test_where_nothing_is_stored_only_a_refused_app_is_classified(host):
+    root, run = host
+    migration(root, "0002_twin", [adopt("Twin")])
+    migration(root, "0003_drop", [DELETE_RECORD], after="0002_twin")
+    write(
+        root,
+        "history/beta/0001_note.py",
+        """
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    operations = [
+        migrations.CreateModel(name="Note", fields=[
+            ("id", models.AutoField(primary_key=True)), ("text", models.CharField(max_length=40))]),
+        migrations.RemoveField(model_name="note", name="text"),
+    ]
+""",
+    )
+    run(
+        PRELUDE
+        + """
+from unittest.mock import Mock
+# beta's column drop drops no table, so beta needs no classifying. The rule refuses
+# alpha's deletion; were alpha's history its owners', that refusal would go.
+classify = Mock(return_value=frozenset())
+with patch("django_compose.migrations._guarded", classify):
+    migrate()
+classify.assert_called_once_with({"alpha"})
+assert ("alpha", "0003_drop") in applied()
 """
     )
 
