@@ -560,12 +560,15 @@ At `migrate`:
   SQLite, nor column names on SQLite and MySQL whatever MySQL's table-name setting,
   nor any name where the backend's quoting folds case, as Oracle's does. Python's
   `casefold` stands in for the backend's folding of non-ASCII names. Only SQLite and
-  PostgreSQL have real-backend coverage. Storage under a name that an earlier rename
-  or removal of the same plan vacated is the plan's own and skipped. Storage absent
-  before the plan is the plan's own only where a native `CreateModel` or `AddField` of
-  the plan creates it; any other absent storage, such as a table a `RunSQL` renamed,
-  cannot be proved empty and its removal is refused. A table owned at the end of the
-  plan is not deleted, even by a declared drop.
+  PostgreSQL have real-backend coverage. A name that an earlier rename or removal of
+  the plan vacated holds the plan's own storage only once a native `CreateModel` or
+  `AddField` fills it again, or a followed rename moves storage under it, which is
+  then probed under its name before the plan; storage under a vacated name nothing
+  native filled, such as a table a `RunSQL` renamed there, cannot be proved empty and
+  its removal is refused. Storage absent before the plan is the plan's own only where
+  a native creation of the plan adds it; any other absent storage cannot be proved
+  empty either. A table owned at the end of the plan is not deleted, even by a
+  declared drop.
 - **Snapshot:** every proof is taken at `pre_migrate`, before the first operation.
   Rows the plan itself writes, such as a `RunPython` that fills storage a later
   operation of the plan drops, are not protected.
@@ -588,12 +591,15 @@ targeted `migrate <app> <name>` for any other app's pending migration in its cha
 since a full `migrate` would reach the purge.
 
 Faked and backwards plans are not judged. `RunSQL` and other custom database code are
-not parsed: a drop they make is not judged, and storage they rename or create is
-absent before the plan under a name no native operation creates, so a later native
-removal of it is refused rather than skipped. Two native drops predate the guard and
-are not judged: `AlterOrderWithRespectTo` to `None` removes the `_order` column, and a
-model deletion drops its implicit many-to-many tables unprobed, which can lose rows
-only when the field sets `db_constraint=False`.
+not parsed: a drop they make is not judged, and the walk follows no rename they make.
+A later native removal of storage they moved is refused where it lies under a vacated
+name or one absent before the plan, but under a name that held other storage before
+the plan the guard probes that other storage: a `RunSQL` that swaps two tables present
+before the plan goes undetected, so a native removal of either is judged by the
+other's rows. Two native drops predate the guard and are not judged:
+`AlterOrderWithRespectTo` to `None` removes the `_order` column, and a model deletion
+drops its implicit many-to-many tables unprobed, which can lose rows only when the
+field sets `db_constraint=False`.
 
 Native dispatch must resolve this package's `makemigrations` and `migrate`, or a
 subclass of each. `ComposeConfig` is last in `INSTALLED_APPS`, so a same-named command

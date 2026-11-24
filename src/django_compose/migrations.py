@@ -7,8 +7,9 @@ import importlib.util
 import stat
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from enum import Enum
 from pathlib import Path
-from typing import Any, NamedTuple, cast
+from typing import Any, Final, Literal, NamedTuple, cast
 
 from django.apps import apps as global_apps
 from django.apps.registry import Apps
@@ -434,6 +435,16 @@ def _dropped(model: Any, field: str | None, policies: tuple[MigrationPolicy, ...
     return _Dropped(model._meta.db_table, removed.column, lambda alias: query)
 
 
+_ABSENT = "it is absent before the plan, and no native operation of the plan creates it"
+_VACANT = "an earlier operation of the plan vacated its name, and no native operation fills it again"
+
+
+def _unproved(model: Any, dropped: _Dropped, alias: str, reason: object) -> str:
+    """The refusal for storage of ``model`` that cannot be proved empty on ``alias``."""
+    storage = f"{dropped.table}.{dropped.column or '*'}"
+    return f"{model._meta.label_lower}: cannot prove {storage} empty on {alias!r} ({reason})"
+
+
 def _proofs(
     operation: Operation,
     routed: type[Any],
@@ -454,11 +465,6 @@ def _proofs(
     is counted.
     """
     table, column, rows = dropped
-
-    def unproved(alias: str, reason: object) -> str:
-        return (
-            f"{model._meta.label_lower}: cannot prove {table}.{column or '*'} empty on {alias!r} ({reason})"
-        )
 
     for alias in aliases:
         connection = connections[alias]
@@ -499,15 +505,10 @@ def _proofs(
             held = rows(alias).using(alias) if present else None
             count = held.count() if held is not None and held.exists() else 0
         except (DatabaseError, ImproperlyConfigured) as error:
-            yield alias, None if declared else unproved(alias, error)
+            yield alias, None if declared else _unproved(model, dropped, alias, error)
             continue
         if not present and not created:
-            yield (
-                alias,
-                unproved(
-                    alias, "it is absent before the plan, and no native operation of the plan creates it"
-                ),
-            )
+            yield alias, _unproved(model, dropped, alias, _ABSENT)
         elif count:
             yield (
                 alias,
@@ -575,41 +576,55 @@ class _Unrendered(Exception):
     """The drop guard's walk cannot render the migration state where it reads a model."""
 
 
-class _Storage:
-    """Table and column names that the plan's database operations change or create.
+class _Vacated(Enum):
+    """A name whose storage the plan moved away or dropped, and has not filled since."""
 
-    Each current name maps back to its name before the plan. A rename moves the
-    storage to its new name and a drop ends it. A name either of them vacates maps
-    to ``None``: storage under it is storage the plan itself creates. ``created``
-    holds the names before the plan of storage a native creation adds: storage
-    absent before the plan is the plan's own only under one of them. A rename between
-    two spellings the backend does not tell apart moves no storage; see ``_name_key``.
+    NAME = "vacated"
+
+
+_VACATED: Final = _Vacated.NAME
+# The storage under a name, as named before the plan: None where the plan created it.
+type _Before = str | None | Literal[_Vacated.NAME]
+
+
+class _Storage:
+    """Table and column names the plan's database operations change, create or drop, on one alias.
+
+    Each name maps back to the storage under it before the plan: that storage's name
+    then; ``None`` where a native creation of the plan added it; or ``_VACATED`` where a
+    followed rename moved its storage away or a native removal dropped it, and no native
+    creation or followed rename has filled it since. Custom code is not followed, so
+    storage it moves under a vacated name cannot be proved. ``created`` holds the names
+    before the plan of storage a native creation adds: storage absent before the plan is
+    the plan's own only under one of them. Names are kept as the backend tells them
+    apart; see ``_name_key``.
     """
 
     def __init__(self, connection: BaseDatabaseWrapper) -> None:
-        self.tables: dict[str, str | None] = {}
-        self.columns: dict[tuple[str, str], str | None] = {}
+        self.tables: dict[str, _Before] = {}
+        self.columns: dict[tuple[str, str | None], _Before] = {}
         self.created: set[tuple[str, str | None]] = set()
         self._held: list[tuple[Operation, str, str, str | None]] = []
         self.alias = connection.alias
-        self.table_key = _name_key(connection)
-        self.column_key = _name_key(connection, column=True)
+        self._table = _name_key(connection)
+        self._column = _name_key(connection, column=True)
 
-    def _moves(self, old: str, new: str, *, column: bool = False) -> bool:
-        key = self.column_key if column else self.table_key
-        return key(old) != key(new)
+    def _key(self, table: str, column: str | None) -> tuple[str, str | None]:
+        return self._table(table), None if column is None else self._column(column)
 
-    def table(self, name: str) -> str | None:
-        return self.tables.get(name, name)
+    def table(self, name: str) -> _Before:
+        """The storage under table ``name``."""
+        return self.tables.get(self._table(name), name)
 
-    def column(self, table: str, name: str) -> str | None:
+    def column(self, table: str, name: str) -> _Before:
+        """The storage under column ``name`` of ``table``, which shares a created or vacated table's fate."""
         before = self.table(table)
-        return None if before is None else self.columns.get((before, name), name)
+        return self.columns.get(self._key(before, name), name) if isinstance(before, str) else before
 
     def _rename_table(self, old: str, new: str) -> None:
-        if self._moves(old, new):
-            self.tables[new] = self.table(old)
-            self.tables[old] = None
+        if self._table(old) != self._table(new):
+            self.tables[self._table(new)] = self.table(old)
+            self.tables[self._table(old)] = _VACATED
 
     def follow(self, before: Any, after: Any, renamed: Mapping[str, str]) -> None:
         """Record what a database operation renamed, from the model before and after it.
@@ -631,11 +646,11 @@ class _Storage:
             elif (
                 field.concrete
                 and now.concrete
-                and table is not None
-                and self._moves(field.column, now.column, column=True)
+                and isinstance(table, str)
+                and self._column(field.column) != self._column(now.column)
             ):
-                self.columns[table, now.column] = self.columns.get((table, field.column), field.column)
-                self.columns[table, field.column] = None
+                self.columns[self._key(table, now.column)] = self.column(after._meta.db_table, field.column)
+                self.columns[self._key(table, field.column)] = _VACATED
 
     def add(self, operation: Operation, label: str, created: tuple[str, str | None]) -> None:
         """Hold the native creation of the model and field ``created`` names until ``resolve_from``."""
@@ -660,26 +675,38 @@ class _Storage:
         self._held.clear()
 
     def create(self, model: Any, field: str | None) -> None:
-        """Record the storage a native creation adds: a model's tables, or a field's table or column."""
+        """Record the storage a native creation adds: a model's tables, or a field's table or column.
+
+        A vacated name it fills holds the plan's own storage from then on.
+        """
         added: list[tuple[str, str | None]] = [
             (storage._meta.db_table, None) for storage in _model_storage(model, removed_field=field)
         ]
         if field is not None and (definition := model._meta.get_field(field)).concrete:
             added.append((model._meta.db_table, definition.column))
         for table, column in added:
-            before = self.table(table)
-            if before is not None and (column is None or (column := self.column(table, column)) is not None):
-                self.created.add((before, column))
+            origin = self.table(table)
+            if column is None:
+                if origin is _VACATED:
+                    self.tables[self._table(table)] = None
+                elif origin is not None:
+                    self.created.add(self._key(origin, None))
+            elif isinstance(origin, str):
+                before = self.columns.get(self._key(origin, column), column)
+                if before is _VACATED:
+                    self.columns[self._key(origin, column)] = None
+                elif before is not None:
+                    self.created.add(self._key(origin, before))
 
     def end(self, model: Any, field: str | None) -> None:
         """Record what a native removal drops: a deleted model's tables, its implicit
         many-to-many tables among them, or a removed field's column or many-to-many table."""
         if field is not None and not (definition := model._meta.get_field(field)).many_to_many:
-            if definition.concrete and (table := self.table(model._meta.db_table)) is not None:
-                self.columns[table, definition.column] = None
+            if definition.concrete and isinstance(origin := self.table(model._meta.db_table), str):
+                self.columns[self._key(origin, definition.column)] = _VACATED
             return
         for storage in _model_storage(model, removed_field=field):
-            self.tables[storage._meta.db_table] = None
+            self.tables[self._table(storage._meta.db_table)] = _VACATED
 
     def stored(
         self,
@@ -689,18 +716,23 @@ class _Storage:
         routed: Any,
         dropped: _Dropped,
         policies: tuple[MigrationPolicy, ...],
-    ) -> tuple[Any, _Dropped, bool] | None:
+    ) -> tuple[Any, _Dropped, bool] | None | Literal[_Vacated.NAME]:
         """The model naming ``dropped`` as stored before the plan, its proof, and whether
         a native creation of the plan adds that storage, should it be absent before it.
 
-        ``routed`` is the removed model as ``state`` defines it. ``None`` means the
-        plan itself creates that storage.
+        ``routed`` is the removed model as ``state`` defines it. ``None`` means the plan
+        itself created that storage, and ``_VACATED`` that its name was vacated.
         """
         table = self.table(dropped.table)
-        column = None if dropped.column is None else self.column(dropped.table, dropped.column)
-        if table is None or (dropped.column is not None and column is None):
-            return None
-        created = (table, None) in self.created or (table, column) in self.created
+        if not isinstance(table, str):
+            return table
+        column: str | None = None
+        if dropped.column is not None:
+            before = self.columns.get(self._key(table, dropped.column), dropped.column)
+            if not isinstance(before, str):
+                return before
+            column = before
+        created = self._key(table, None) in self.created or self._key(table, column) in self.created
         name, field = removed
         if (table, column) == (dropped.table, dropped.column):
             return routed, dropped, created
@@ -924,6 +956,29 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         storage.resolve_from(state)
         return state.apps.get_model(label, name)
 
+    def prove(
+        migration: Migration,
+        operation: Operation,
+        state: ProjectState,
+        routed: Any,
+        removed: tuple[str, str | None],
+    ) -> None:
+        """Refuse a judged removal unless what it drops on ``using`` is proved empty or declared."""
+        if (dropped := _dropped(routed, removed[1], policies)) is None:
+            return
+        stored = storage.stored(state, migration.app_label, removed, routed, dropped, policies)
+        declared = isinstance(operation, _INTENDED)
+        if stored is _VACATED:
+            if not declared and operation.allow_migrate_model(using, routed):
+                refuse(migration, operation, _unproved(routed, dropped, using, _VACANT))
+        elif stored is not None:
+            model, proof, created = stored
+            for _, refusal in _proofs(
+                operation, routed, model, proof, (using,), declared=declared, created=created
+            ):
+                if refusal is not None:
+                    refuse(migration, operation, refusal)
+
     def judge(
         migration: Migration, operations: Iterable[Operation], state: ProjectState, *, database: bool = True
     ) -> None:
@@ -946,31 +1001,26 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                 storage.resolve_from(progressed)
             judge(migration, operation.state_operations, state, database=False)
             return
-        removed = _removal(operation)
-        if (
-            database
-            and removed is not None
-            and label in guarded
-            and (probe or _drops_table(state, label, removed))
-        ):
-            routed = rendered(state, label, removed[0])
-            removals.append((migration, (operation, routed, removed[1])))
-            dropped = _dropped(routed, removed[1], policies) if probe else None
-            stored = (
-                None if dropped is None else storage.stored(state, label, removed, routed, dropped, policies)
-            )
-            if dropped is not None and stored is not None:
-                model, proof, created = stored
-                declared = isinstance(operation, _INTENDED)
-                for _, refusal in _proofs(
-                    operation, routed, model, proof, (using,), declared=declared, created=created
-                ):
-                    if refusal is not None:
-                        refuse(migration, operation, refusal)
+        removed = _removal(operation) if database else None
+        if removed is not None:
+            judged = label in guarded
+            drops_table = judged and _drops_table(state, label, removed)
+            # Where something is stored, every routed removal ends what it drops, whoever
+            # owns it, and a judged one is proved; where nothing is, only the shared-table
+            # rule judges a removal that can drop a table.
+            if probe or drops_table:
+                routed = rendered(state, label, removed[0])
+                if drops_table:
+                    removals.append((migration, (operation, routed, removed[1])))
+                if probe and judged:
+                    prove(migration, operation, state, routed, removed)
+                if probe and operation.allow_migrate_model(using, routed):
                     storage.end(routed, removed[1])
         # Custom database code, such as RunSQL or a subclass replacing Django's
-        # database_forwards, is not followed: storage it renames or creates is absent
-        # before the plan under a name no native operation accounts for.
+        # database_forwards, is not followed. Storage it moves under a vacated name, or
+        # under one absent before the plan that no native operation creates, cannot be
+        # proved; under a name that held other storage before the plan, the walk probes
+        # that storage instead, which only parsing the custom code could detect.
         native = probe and database and _native(operation)
         renamed = _renamed(operation, state, label) if native else None
         adds = _created(operation) if native else None

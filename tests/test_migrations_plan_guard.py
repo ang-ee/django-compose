@@ -1714,6 +1714,63 @@ assert "alpha_ledger" in tables()
     )
 
 
+def sql_rename(statement, state):
+    """Django's documented manual rename: RunSQL among database_operations, the state beside it."""
+    sql = f"migrations.RunSQL({statement!r})"
+    return f"migrations.SeparateDatabaseAndState(database_operations=[{sql}], state_operations=[{state}])"
+
+
+@pytest.mark.parametrize("vacated", ["rename", "removal", "refilled_then_removal"])
+def test_storage_custom_sql_moves_under_a_vacated_name_cannot_be_proved(host, vacated):
+    root, run = host
+    again = f'migrations.CreateModel(name="Again", fields={FIELDS}, options={{"db_table": "alpha_record"}})'
+    # The plan vacates alpha_record, then custom SQL renames the populated alpha_archive to it.
+    vacate = {
+        "rename": ['migrations.RenameModel(old_name="Record", new_name="Ledger")'],
+        "removal": [DELETE_RECORD],
+        "refilled_then_removal": [DELETE_RECORD, again, 'migrations.DeleteModel(name="Again")'],
+    }[vacated]
+    migration(root, "0002_archive", [ARCHIVE])
+    retable = 'migrations.AlterModelTable(name="archive", table="alpha_record")'
+    moved = sql_rename("ALTER TABLE alpha_archive RENAME TO alpha_record", retable)
+    migration(
+        root, "0003_drop", [*vacate, moved, 'migrations.DeleteModel(name="Archive")'], after="0002_archive"
+    )
+    run(
+        PRELUDE
+        + """
+Record = seed("0002_archive")
+Record._meta.apps.get_model("alpha", "Archive")._base_manager.create(old="archived")
+refusal = (
+    "alpha.0003_drop (Delete model Archive): alpha.archive: cannot prove alpha_record.* empty on 'default' "
+    "(an earlier operation of the plan vacated its name, and no native operation fills it again)"
+)
+expect(CommandError, refusal, migrate)
+assert "alpha_archive" in tables()
+"""
+    )
+
+
+def test_a_column_custom_sql_moves_under_a_vacated_name_cannot_be_proved(host):
+    root, run = host
+    rename = 'migrations.RenameField(model_name="record", old_name="old", new_name="legacy")'
+    field = 'models.CharField(max_length=40, default="", db_column="old")'
+    back = sql_rename(
+        'ALTER TABLE alpha_record RENAME COLUMN "legacy" TO "old"',
+        f'migrations.AlterField(model_name="record", name="legacy", field={field})',
+    )
+    migration(root, "0002_drop", [rename, back, remove_field("legacy")])
+    run(
+        PRELUDE
+        + """
+seed(old="kept")
+refusal = "alpha.record: cannot prove alpha_record.old empty on 'default' (an earlier operation"
+expect(CommandError, refusal, migrate)
+assert columns() == ["id", "old"]
+"""
+    )
+
+
 def test_a_column_moved_by_alter_field_stays_protected(host):
     root, run = host
     moved = 'models.CharField(max_length=40, default="", db_column="legacy")'

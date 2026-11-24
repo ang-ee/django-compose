@@ -35,13 +35,17 @@ choices behind it.
   and a later database rename can move it. Tracking model identities followed
   neither, so the walk maps each storage name the plan's database operations change
   back to its name before the plan and probes that. A name vacated by an earlier
-  rename or removal of the plan names storage the plan creates.
-- **Fail closed.** The walk uses the graph native `migrate` planned with, including
-  for a squash-replaced target; a planned migration it cannot follow is refused.
-  Storage absent before the plan is the plan's own only where a native creation of
-  the plan adds it. Treating all absent storage as the plan's own was rejected: a
-  `RunSQL` rename then left the renamed, populated storage to a later native drop
-  unprobed.
+  rename or removal of the plan names storage the plan creates once a native
+  creation fills it again, or storage a followed rename moved there.
+- **Refuse what the walk cannot account for.** The walk uses the graph native
+  `migrate` planned with, including for a squash-replaced target; a planned migration
+  it cannot follow is refused. Storage absent before the plan is the plan's own only
+  where a native creation of the plan adds it, and a vacated name only once a native
+  operation fills it again. Treating all absent storage, or every vacated name, as
+  the plan's own was rejected: a `RunSQL` rename then left the renamed, populated
+  storage to a later native drop unprobed. Custom SQL that moves storage under a name
+  that held other storage before the plan, such as a swap of two tables, is not
+  detected: that needs parsing SQL.
 - **Render in place until a relation changes.** The walk keeps its state unrendered
   until it first needs a model, at a guarded removal or a rename that can change a
   storage name, renders it there in place, and lets Django's incremental reload keep
@@ -82,7 +86,8 @@ choices behind it.
   so a subclass that replaces `handle` keeps the guard.
 - **Out of scope.** Backwards plans name an explicit target, and the authoring guard
   never covered them. `--fake` runs no operations. `RunSQL` and custom database code
-  are not parsed; storage only they account for cannot be proved. The specification
+  are not parsed; storage only they account for cannot be proved, and storage they
+  move under another existing name is probed as that name's. The specification
   lists the native drops that predate the guard.
 
 ## Compatibility
