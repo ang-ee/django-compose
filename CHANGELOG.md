@@ -9,9 +9,9 @@
   it. Storage absent before the plan counts as the plan's own only where a native
   operation of the plan creates it, and a name an earlier operation of the plan
   vacated only once a native operation fills it again; a removal of other such
-  storage, such as a table a `RunSQL` renamed, cannot be proved and is refused. Custom
-  SQL is not parsed: a `RunSQL` that swaps two tables present before the plan goes
-  undetected. Previously only autodetected removals were judged, at `makemigrations`,
+  storage, such as a table a `RunSQL` renamed, cannot be proved and is refused; the
+  specification states what custom database code leaves undetected. Previously only
+  autodetected removals were judged, at `makemigrations`,
   so a removal migration already on disk was applied unchecked. Django's and other
   apps' history remains their owners' responsibility. On an alias that holds no table
   but the migration and provision recorders, such as a fresh or test database on

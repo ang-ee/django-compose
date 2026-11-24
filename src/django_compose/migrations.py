@@ -1188,10 +1188,8 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                     if following and operation.allow_migrate_model(using, routed):
                         storage.end(routed, removed[1])
             # Custom database code, such as RunSQL or a subclass replacing Django's
-            # database_forwards, is not followed. Storage it moves under a vacated name, or
-            # under one absent before the plan that no native operation creates, cannot be
-            # proved; under a name that held other storage before the plan, the walk probes
-            # that storage instead, which only parsing the custom code could detect.
+            # database_forwards, is not followed; the specification's "Drop guard" section
+            # states what that leaves undetected.
             native = following and database and _native(operation)
             renamed = _renamed(operation, state, label) if native else None
             adds = _created(operation) if native else None

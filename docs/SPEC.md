@@ -609,11 +609,15 @@ since a full `migrate` would reach the purge.
 
 Faked and backwards plans are not judged. `RunSQL` and other custom database code are
 not parsed: a drop they make is not judged, and the walk follows no rename they make.
-A later native removal of storage they moved is refused where it lies under a vacated
-name or one absent before the plan, but under a name that held other storage before
-the plan the guard probes that other storage: a `RunSQL` that swaps two tables present
-before the plan goes undetected, so a native removal of either is judged by the
-other's rows. Two native drops predate the guard and are not judged:
+Storage they move under a vacated name, or under one absent before the plan that no
+native operation of the plan creates, cannot be proved, and its removal is refused.
+Storage they move under a name the walk accounts for is not detected: under a name
+that held other storage before the plan, the guard probes that other storage, and
+under one a native operation of the plan created or filled, it takes the storage for
+the plan's own and probes nothing. That includes a `RunSQL` that swaps two tables
+present before the plan, and the plan's operations after a state the walk cannot
+render in history the guard does not judge, which it follows no further. Two native
+drops predate the guard and are not judged:
 `AlterOrderWithRespectTo` to `None` removes the `_order` column, and a model deletion
 drops its implicit many-to-many tables unprobed, which can lose rows only when the
 field sets `db_constraint=False`.

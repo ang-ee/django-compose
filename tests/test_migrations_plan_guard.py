@@ -1979,6 +1979,73 @@ assert "alpha_archive" in tables()
     )
 
 
+LEGACY = """
+with connection.cursor() as cursor:
+    cursor.execute("CREATE TABLE alpha_legacy (id integer PRIMARY KEY, old varchar(40))")
+    cursor.execute("INSERT INTO alpha_legacy VALUES (1, 'legacy rows')")
+"""
+
+
+@pytest.mark.parametrize("shape", ["created", "filled", "column", "swap"])
+def test_custom_code_moving_storage_under_a_name_the_walk_accounts_for_goes_undetected(host, shape):
+    root, run = host
+    # A stated limit: custom SQL is not parsed. It moves populated storage under a name the
+    # walk accounts for, one a native operation of the plan created or filled, or one that
+    # held other storage before the plan, and a later native removal drops those rows
+    # judged as that name's. If the guard ever detects one, the specification changes too.
+    again = f'migrations.CreateModel(name="Again", fields={FIELDS}, options={{"db_table": "alpha_record"}})'
+    if shape == "created":
+        sql = ["DROP TABLE alpha_x", "ALTER TABLE alpha_legacy RENAME TO alpha_x"]
+        plan = [created("X"), f"migrations.RunSQL({sql!r})", 'migrations.DeleteModel(name="X")']
+    elif shape == "filled":
+        sql = ["DROP TABLE alpha_record", "ALTER TABLE alpha_archive RENAME TO alpha_record"]
+        plan = [DELETE_RECORD, again, f"migrations.RunSQL({sql!r})", 'migrations.DeleteModel(name="Again")']
+    elif shape == "column":
+        moved = [
+            'migrations.RunSQL("ALTER TABLE alpha_record DROP COLUMN extra")',
+            'migrations.RunSQL("ALTER TABLE alpha_record RENAME COLUMN old TO extra")',
+        ]
+        separate = (
+            f"migrations.SeparateDatabaseAndState(database_operations=[{', '.join(moved)}], "
+            f"state_operations=[{remove_field('old')}])"
+        )
+        plan = [add_field("extra"), separate, remove_field("extra")]
+    else:
+        sql = [
+            "ALTER TABLE alpha_record RENAME TO alpha_swap",
+            "ALTER TABLE alpha_archive RENAME TO alpha_record",
+            "ALTER TABLE alpha_swap RENAME TO alpha_archive",
+        ]
+        plan = [f"migrations.RunSQL({sql!r})", DELETE_RECORD]
+    if shape in {"filled", "swap"}:
+        migration(root, "0002_archive", [ARCHIVE])
+        migration(root, "0003_drop", plan, after="0002_archive")
+    else:
+        migration(root, "0002_drop", plan)
+    run(
+        PRELUDE
+        + (LEGACY if shape == "created" else "")
+        + f"""
+shape = {shape!r}
+Record = seed("0002_archive" if shape in {{"filled", "swap"}} else "0001_origin")
+if shape in {{"filled", "swap"}}:
+    Record._meta.apps.get_model("alpha", "Archive")._base_manager.create(old="archived")
+if shape == "column":
+    Record._base_manager.create(old="kept")
+migrate()
+if shape == "column":
+    assert columns() == ["id"]
+elif shape == "swap":
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM alpha_archive")
+        assert cursor.fetchone() == (0,)
+else:
+    moved = "alpha_legacy" if shape == "created" else "alpha_archive"
+    assert moved not in tables(), tables()
+"""
+    )
+
+
 def test_a_column_custom_sql_moves_under_a_vacated_name_cannot_be_proved(host):
     root, run = host
     rename = 'migrations.RenameField(model_name="record", old_name="old", new_name="legacy")'

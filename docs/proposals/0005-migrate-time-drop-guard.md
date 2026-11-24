@@ -47,8 +47,8 @@ choices behind it.
   operation fills it again. Treating all absent storage, or every vacated name, as
   the plan's own was rejected: a `RunSQL` rename then left the renamed, populated
   storage to a later native drop unprobed. Custom SQL that moves storage under a name
-  that held other storage before the plan, such as a swap of two tables, is not
-  detected: that needs parsing SQL. A state the walk cannot render in history the guard
+  the walk accounts for is not detected, since that needs parsing SQL; the
+  specification states that class. A state the walk cannot render in history the guard
   does not judge stops its following instead of refusing the plan: the refusal named a
   migration the project cannot edit, and a project without guarded drops must migrate
   as it did before the guard.
@@ -109,9 +109,8 @@ choices behind it.
   so a subclass that replaces `handle` keeps the guard.
 - **Out of scope.** Backwards plans name an explicit target, and the authoring guard
   never covered them. `--fake` runs no operations. `RunSQL` and custom database code
-  are not parsed; storage only they account for cannot be proved, and storage they
-  move under another existing name is probed as that name's. The specification
-  lists the native drops that predate the guard.
+  are not parsed; the specification states what that leaves undetected, and lists the
+  native drops that predate the guard.
 
 ## Compatibility
 
