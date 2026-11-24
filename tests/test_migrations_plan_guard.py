@@ -861,6 +861,38 @@ assert "alpha_record" in tables() if {database!r} == "populated" else not applie
     )
 
 
+@pytest.mark.parametrize("rename", [None, "native", "run_sql"])
+@pytest.mark.parametrize("drop", ["declared", "undeclared"])
+def test_a_model_owning_a_table_at_its_drop_keeps_it_though_the_plan_fills_its_name(host, drop, rename):
+    root, run = host
+    # Shadow owns alpha_record with Record before the plan, as a state-only adoption leaves
+    # it. The plan drops the table and creates Fresh's under its name: Shadow owned the
+    # dropped rows, and would be left owning Fresh's empty table, renamed to Shade or not.
+    migration(root, "0002_shadow", [state_only(created("Shadow", db_table="alpha_record"))])
+    removal = 'IntendedDeleteModel(name="Record")' if drop == "declared" else DELETE_RECORD
+    operations = [removal, created("Fresh", db_table="alpha_record")]
+    shade = 'migrations.RenameModel(old_name="Shadow", new_name="Shade")'
+    if rename == "native":
+        operations.append(shade)
+    elif rename == "run_sql":
+        operations.append(f"migrations.RunSQL(migrations.RunSQL.noop, state_operations=[{shade}])")
+    owner = "shadow" if rename is None else "shade"
+    migration(root, "0003_drop", operations, after="0002_shadow")
+    run(
+        PRELUDE
+        + f"""
+Record = seed("0002_shadow")
+if {drop!r} == "declared":
+    # Only the shared-table rule can refuse a declared drop; rows prove nothing to it.
+    Record._base_manager.create(old="kept")
+refusal = "alpha.0003_drop (Delete model Record): table 'alpha_record' is still owned by alpha.{owner} on"
+expect(CommandError, refusal, migrate)
+kept = ["kept"] if {drop!r} == "declared" else []
+assert list(Record._base_manager.values_list("old", flat=True)) == kept
+"""
+    )
+
+
 def test_where_nothing_is_stored_only_a_refused_app_is_classified(host):
     root, run = host
     migration(root, "0002_twin", [adopt("Twin")])

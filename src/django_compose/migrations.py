@@ -6,7 +6,7 @@ import importlib
 import importlib.util
 import stat
 import sys
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from enum import Enum
 from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple, cast
@@ -317,6 +317,37 @@ def _unsafe(prefix: str, refusals: Iterable[tuple[str, str]], outcome: str = "")
     )
 
 
+def _owners(state: ProjectState) -> Iterator[tuple[Any, Any]]:
+    """Each model of ``state``, swapped ones included, with each table it owns: its own
+    and its implicit many-to-many tables."""
+    for owner in state.apps.get_models(include_swapped=True):
+        for storage in _model_storage(owner):
+            yield owner, storage
+
+
+def _holders(state: ProjectState, model: Any, field: str | None, connection: BaseDatabaseWrapper) -> set[str]:
+    """The labels of the models of ``state`` that own a table the removal of ``model``,
+    or of its ``field``, drops, besides that storage itself, under a name the backend
+    does not tell apart from it."""
+    key = _name_key(connection)
+
+    def name(storage: Any) -> tuple[str, str] | None:
+        try:
+            namespace, table = _storage_identifier(connection, storage._meta.db_table)
+        except ImproperlyConfigured:
+            # The shared-table rule refuses a name it cannot resolve on its own.
+            return None
+        return namespace, key(table)
+
+    dropped = tuple(_model_storage(model, removed_field=field))
+    names = {name(storage) for storage in dropped} - {None}
+    return {
+        owner._meta.label_lower
+        for owner, storage in _owners(state)
+        if storage not in dropped and name(storage) in names
+    }
+
+
 def _shared_table_drops(
     removals: Sequence[_Removal],
     after: ProjectState,
@@ -324,6 +355,7 @@ def _shared_table_drops(
     *,
     catalog: bool,
     refilled: Callable[[str], bool] | None = None,
+    holders: Sequence[Collection[str]] = (),
 ) -> list[tuple[int, str, str]]:
     """Each removal, by position, that would drop a table a model of ``after`` still owns.
 
@@ -333,13 +365,11 @@ def _shared_table_drops(
     the catalog could tell apart cannot be resolved. ``refilled`` tells whether a native
     operation put storage under a dropped table's name after the drop, as Django's
     ``RemoveField`` and ``AddField`` for a retargeted many-to-many field do: a model
-    owning that name at the end owns the new storage, not the dropped table.
+    owning that name at the end owns the new storage, not the dropped table, unless it
+    is among the removal's ``holders``, the models that owned the table when it was
+    dropped, and so owned the dropped rows.
     """
-    owners = tuple(
-        (owner, storage)
-        for owner in after.apps.get_models(include_swapped=True)
-        for storage in _model_storage(owner)
-    )
+    owners = tuple(_owners(after))
     aliases = tuple(aliases)
     refusals: list[tuple[int, str, str]] = []
     for index, (operation, model, field) in enumerate(removals):
@@ -352,6 +382,7 @@ def _shared_table_drops(
                 if not operation.allow_migrate_model(alias, model):
                     continue
                 key = _name_key(connection)
+                held = holders[index] if holders else ()
                 for storage in dropped:
                     table = storage._meta.db_table
                     identity = _storage_identifier(connection, table)
@@ -365,7 +396,12 @@ def _shared_table_drops(
                             continue
                         active_table = active_storage._meta.db_table
                         other = _storage_identifier(connection, active_table)
-                        if filled and identity[0] == other[0] and key(identity[1]) == key(other[1]):
+                        if (
+                            filled
+                            and owner._meta.label_lower not in held
+                            and identity[0] == other[0]
+                            and key(identity[1]) == key(other[1])
+                        ):
                             continue
                         if identity == other:
                             remaining.add(active_storage._meta.label_lower)
@@ -975,6 +1011,8 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         state: ProjectState = executor._create_project_state(with_applied_migrations=True)  # type: ignore[attr-defined]
         storage = _Storage(connection)
         removals: list[tuple[Migration, _Removal]] = []
+        # The models, by label, owning each table-dropping removal's table as it drops it.
+        holding: list[set[str]] = []
 
         def rendered(state: ProjectState, label: str, name: str) -> Any:
             storage.resolve_from(state)
@@ -1029,6 +1067,21 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                     storage.resolve_from(progressed)
                 judge(migration, operation.state_operations, state, database=False)
                 return
+            if (
+                isinstance(operation, RunSQL)
+                and operation.state_operations
+                and type(operation).state_forwards is RunSQL.state_forwards
+            ):
+                # Its SQL is not followed; RunSQL applies its state operations one by one.
+                storage.resolve_from(state)
+                judge(migration, operation.state_operations, state, database=False)
+                return
+            if follow and isinstance(operation, RenameModel):
+                # A model that owned a dropped table keeps that claim under its new name.
+                old, new = (f"{label}.{name.lower()}" for name in (operation.old_name, operation.new_name))
+                for held in holding:
+                    if old in held:
+                        held.add(new)
             removed = _removal(operation) if database else None
             if removed is not None:
                 judged = label in guarded
@@ -1040,6 +1093,8 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                     routed = rendered(state, label, removed[0])
                     if drops_table:
                         removals.append((migration, (operation, routed, removed[1])))
+                        # Only a followed walk asks whether a native operation filled the name.
+                        holding.append(_holders(state, routed, removed[1], connection) if follow else set())
                     if probe and judged:
                         prove(migration, operation, state, routed, removed)
                     if follow and operation.allow_migrate_model(using, routed):
@@ -1096,7 +1151,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         return [
             (removals[index][0], removals[index][1][0], remedy, refusal)
             for index, remedy, refusal in _shared_table_drops(
-                drops, state, (using,), catalog=probe, refilled=refilled
+                drops, state, (using,), catalog=probe, refilled=refilled, holders=holding
             )
         ]
 

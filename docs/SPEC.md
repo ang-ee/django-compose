@@ -569,10 +569,13 @@ At `migrate`:
   empty either. A table owned at the end of the plan is not deleted, even by a
   declared drop, unless after the drop a native creation, or a followed rename, puts
   storage under its name, as Django's removal and addition of a many-to-many field
-  with a new target does: the owner then owns that storage. A model that a state-only
-  operation gives the name after the drop owns no table, and the drop stays refused;
-  under a deleted model's own label, though, a model is taken for that model created
-  again, so a state-only one there goes unnoticed.
+  with a new target does, and the owner did not own the table when it was dropped: a
+  model that comes to own the name after the drop owns that new storage, but one that
+  owned the table then, under whatever name a later `RenameModel` gives it, owned the
+  dropped rows. A model that a state-only operation gives the name after the drop owns
+  no table, and the drop stays refused; under a deleted model's own label, though, a
+  model is taken for that model created again, so a state-only one there goes
+  unnoticed.
 - **Snapshot:** every proof is taken at `pre_migrate`, before the first operation.
   Rows the plan itself writes, such as a `RunPython` that fills storage a later
   operation of the plan drops, are not protected.

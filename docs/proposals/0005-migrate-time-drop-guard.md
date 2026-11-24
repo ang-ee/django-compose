@@ -69,7 +69,10 @@ choices behind it.
   field's new target, is not kept: the rule asks at the end of the plan whether a
   native creation or followed rename filled the table's name after the drop. Judging
   ownership at the removal instead was rejected: a model that a state-only operation
-  gives the name after the drop would be left without a table. Where nothing is
+  gives the name after the drop would be left without a table. Each such removal
+  records the models owning its table as it drops it, and they never own the new
+  storage: taking every owner of a filled name for its owner lost the rows of a model
+  that owned the table beside the removed one. Where nothing is
   stored, the walk follows names only once names alone keep a table, so a fresh
   database pays for following them only then. An owner under a deleted model's own
   label is taken for that model created again, as histories commonly delete and

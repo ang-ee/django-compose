@@ -7,10 +7,129 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 from test_provision import _composed_host, _history, _item_models
 from test_provision_postgres import ROOT, _configure, _database
+
+FIELDS = '[("id", models.AutoField(primary_key=True)), ("old", models.CharField(max_length=40, default=""))]'
+
+
+def _create(name: str, table: str | None = None) -> str:
+    options = "" if table is None else f", options={{'db_table': {table!r}}}"
+    return f'migrations.CreateModel(name="{name}", fields={FIELDS}{options})'
+
+
+def _state_only(operation: str) -> str:
+    return f"migrations.SeparateDatabaseAndState(state_operations=[{operation}])"
+
+
+class _Case(NamedTuple):
+    """A history of app ``alpha``, the migrations applied before the plan with the rows
+    ``Record`` then holds, and the refusal ``migrate`` gives for the rest, or ``None``."""
+
+    history: list[list[str]]
+    applied: int
+    rows: list[str]
+    refusal: str | None
+
+
+CASES = {
+    # Shadow owns alpha_record with Record before the plan. A declared drop of Record's
+    # table, then a creation of Fresh's under its name, would leave Shadow without its row.
+    "continuing_refill": _Case(
+        [
+            [_create("Record")],
+            [_state_only(_create("Shadow", "alpha_record"))],
+            ['IntendedDeleteModel(name="Record")', _create("Fresh", "alpha_record")],
+        ],
+        2,
+        ["kept"],
+        "table 'alpha_record' is still owned by alpha.shadow on 'default'",
+    ),
+}
+
+
+def _migrate(environment: Path, root: Path, name: str) -> None:
+    """Apply ``name``'s case with this package's migrate on a disposable PostgreSQL database."""
+    import importlib
+
+    import django
+    from django.apps import AppConfig
+    from django.conf import settings
+
+    case = CASES[name]
+    for package in ("alpha", "history", "history/alpha"):
+        (root / package).mkdir(parents=True)
+        (root / package / "__init__.py").write_text("")
+    migrations = [f"{index:04d}_step" for index in range(1, len(case.history) + 1)]
+    for index, operations in enumerate(case.history):
+        dependencies = [("alpha", migrations[index - 1])] if index else []
+        (root / f"history/alpha/{migrations[index]}.py").write_text(
+            "from django.db import migrations, models\n"
+            "from django_compose.operations import IntendedDeleteModel\n\n"
+            "class Migration(migrations.Migration):\n"
+            f"    dependencies = {dependencies!r}\n"
+            f"    operations = [{', '.join(operations)}]\n"
+        )
+    sys.path.insert(0, str(root))
+    settings.configure(
+        INSTALLED_APPS=[AppConfig("django_compose", importlib.import_module("django_compose")), "alpha"],
+        SECRET_KEY="migrate-proof",
+        DEFAULT_AUTO_FIELD="django.db.models.AutoField",
+        # The test database starts empty; only the case's own migrate applies its history.
+        DATABASES={"default": {**_database(environment, prefix="compose_plan"), "TEST": {"MIGRATE": False}}},
+        MIGRATION_MODULES={"alpha": "history.alpha"},
+    )
+    django.setup()
+    from django.core.management import call_command
+    from django.core.management.base import CommandError
+    from django.db import connection
+    from django.db.migrations.executor import MigrationExecutor
+
+    old_name = connection.settings_dict["NAME"]
+    connection.creation.create_test_db(verbosity=0, autoclobber=False)
+    try:
+        record = None
+        if case.applied:
+            executor = MigrationExecutor(connection)
+            target = ("alpha", migrations[case.applied - 1])
+            executor.migrate([target])
+            record = executor.loader.project_state(target).apps.get_model("alpha", "Record")
+            for value in case.rows:
+                record._base_manager.create(old=value)
+        try:
+            call_command("migrate", interactive=False, verbosity=0)
+        except CommandError as error:
+            assert case.refusal is not None and case.refusal in str(error), str(error)
+            if record is not None:
+                assert list(record._base_manager.values_list("old", flat=True)) == case.rows
+        else:
+            assert case.refusal is None, f"expected refusal: {case.refusal}"
+    finally:
+        connection.close()
+        connection.creation.destroy_test_db(old_database_name=old_name, verbosity=0)
+    print(f"PostgreSQL migrate case {name} verified")
+
+
+def _private_run(tmp_path: Path, *arguments: str) -> str:
+    """Run this module with ``arguments``; a failure leaves only a private diagnostic."""
+    result = subprocess.run(
+        [sys.executable, "-B", str(Path(__file__).resolve()), *arguments],
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode:
+        diagnostic = tmp_path / "migrations-postgres-private.stderr"
+        descriptor = os.open(diagnostic, os.O_CREAT | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(result.stderr)
+        pytest.fail(f"PostgreSQL migration proof failed; private diagnostic: {diagnostic}")
+    return result.stdout
 
 
 def _drive(environment: Path) -> None:
@@ -235,21 +354,17 @@ def test_postgres_migration_storage_identity(tmp_path: Path) -> None:
     environment = os.environ.get("DJANGO_COMPOSE_PROVISION_POSTGRES_ENV")
     if not environment:
         pytest.skip("requires an explicit private PostgreSQL test environment")
-    result = subprocess.run(
-        [sys.executable, "-B", str(Path(__file__).resolve()), "--probe", environment],
-        env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    if result.returncode:
-        diagnostic = tmp_path / "migrations-postgres-private.stderr"
-        descriptor = os.open(diagnostic, os.O_CREAT | os.O_WRONLY, 0o600)
-        with os.fdopen(descriptor, "w") as stream:
-            stream.write(result.stderr)
-        pytest.fail(f"PostgreSQL migration storage proof failed; private diagnostic: {diagnostic}")
-    assert "namespaces, quoting, search paths, aliases and teardown verified" in result.stdout
+    output = _private_run(tmp_path, "--probe", environment)
+    assert "namespaces, quoting, search paths, aliases and teardown verified" in output
+
+
+@pytest.mark.parametrize("case", sorted(CASES))
+def test_postgres_migrate_judges_the_plan_it_applies(tmp_path: Path, case: str) -> None:
+    environment = os.environ.get("DJANGO_COMPOSE_PROVISION_POSTGRES_ENV")
+    if not environment:
+        pytest.skip("requires an explicit private PostgreSQL test environment")
+    output = _private_run(tmp_path, "--migrate", environment, case, str(tmp_path / "host"))
+    assert f"PostgreSQL migrate case {case} verified" in output
 
 
 @pytest.mark.parametrize("scenario", ["column", "table", "declared"])
@@ -333,5 +448,8 @@ def _prove_provision(root: Path, scenario: str, settings: str, server: dict[str,
 
 
 if __name__ == "__main__":
-    assert sys.argv[1] == "--probe"
-    _drive(Path(sys.argv[2]))
+    if sys.argv[1] == "--migrate":
+        _migrate(Path(sys.argv[2]), Path(sys.argv[4]), sys.argv[3])
+    else:
+        assert sys.argv[1] == "--probe"
+        _drive(Path(sys.argv[2]))
