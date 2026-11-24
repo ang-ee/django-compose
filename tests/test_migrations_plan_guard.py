@@ -1146,6 +1146,54 @@ assert columns() == ["id", "old"]
     )
 
 
+@pytest.mark.parametrize("swap", ["state_operations", "separate"])
+def test_a_creation_is_named_before_custom_code_moves_a_legacy_table_into_its_model(host, swap):
+    root, run = host
+    # The plan creates alpha_x, then custom SQL drops it and renames a populated legacy
+    # table to alpha_n, which the model then names. Named only after that, the creation
+    # would make alpha_n the plan's own and its rows would be dropped unprobed.
+    statements = ["DROP TABLE alpha_x", "ALTER TABLE alpha_legacy RENAME TO alpha_n"]
+    retable = 'migrations.AlterModelTable(name="x", table="alpha_n")'
+    if swap == "state_operations":
+        moved = f"migrations.RunSQL({statements!r}, state_operations=[{retable}])"
+    else:
+        sql = ", ".join(f"migrations.RunSQL({statement!r})" for statement in statements)
+        moved = (
+            f"migrations.SeparateDatabaseAndState(database_operations=[{sql}], state_operations=[{retable}])"
+        )
+    create = f'migrations.CreateModel(name="X", fields={FIELDS})'
+    migration(root, "0002_legacy", [create, moved, 'migrations.DeleteModel(name="X")'])
+    run(
+        PRELUDE
+        + """
+seed()
+with connection.cursor() as cursor:
+    cursor.execute("CREATE TABLE alpha_legacy (id integer PRIMARY KEY, old varchar(40))")
+    cursor.execute("INSERT INTO alpha_legacy VALUES (1, 'legacy rows')")
+refusal = "alpha.0002_legacy (Delete model X): alpha.x: cannot prove alpha_n.* empty"
+expect(CommandError, refusal, migrate)
+assert "alpha_legacy" in tables()
+"""
+    )
+
+
+def test_a_creation_among_database_operations_is_the_plans_own(host):
+    root, run = host
+    # Django documents database_operations and state_operations that create one model.
+    create = f'migrations.CreateModel(name="X", fields={FIELDS})'
+    both = f"migrations.SeparateDatabaseAndState(database_operations=[{create}], state_operations=[{create}])"
+    migration(root, "0002_create", [both])
+    migration(root, "0003_drop", ['migrations.DeleteModel(name="X")'], after="0002_create")
+    run(
+        PRELUDE
+        + """
+seed(old="kept")
+migrate()
+assert "alpha_x" not in tables()
+"""
+    )
+
+
 def test_a_planned_migration_the_guard_cannot_walk_is_refused(host):
     _, run = host
     run(
