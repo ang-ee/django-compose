@@ -698,7 +698,7 @@ class _End(Exception):
 # a model or field the state lacks, and a model class Django refuses to build.
 _STUCK = (ValueError, LookupError, FieldDoesNotExist, FieldError)
 
-# A judged removal: the migration and operation refused, the remedy where the refusal
+# A refused removal: its migration and operation, the remedy where the refusal
 # has one of its own (see _refusal), and the refusal.
 type _Refused = tuple[Migration, Operation, str | None, str]
 

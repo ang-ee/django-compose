@@ -3099,3 +3099,62 @@ assert {{("alpha", "0002_drop"), ("beta", "0002_name")}} <= applied()
 assert ("beta", "0003_rename") not in applied()
 """
     )
+
+
+def test_a_column_is_judged_only_by_the_definitions_of_models_migrating_on_the_alias(host):
+    root, run = host
+    # beta's Shadow maps alpha_record with another default, on another database only:
+    # rows on this one were never written under its definition.
+    fields = FIELDS.replace('default="")', 'default="x")')
+    shadow = f'migrations.CreateModel(name="Shadow", fields={fields}, options={{"db_table": "alpha_record"}})'
+    beta(root, "0001_shadow", [state_only(shadow)])
+    migration(root, "0002_drop", [REMOVE_OLD])
+    run(
+        PRELUDE
+        + """
+from django.db import router
+class Elsewhere:
+    def allow_migrate(self, db, app_label, **hints):
+        return app_label != "beta" if db == "default" else None
+seed(old="")
+MigrationExecutor(connection).migrate([("beta", "0001_shadow")])
+expect(CommandError, "read as empty differently", migrate)
+router.routers = [Elsewhere()]
+migrate()
+assert columns() == ["id"]
+"""
+    )
+
+
+@pytest.mark.parametrize("rows", [0, 1])
+def test_an_adopted_many_to_many_table_is_judged_by_its_auto_created_through_model(host, rows):
+    root, run = host
+    # A state-only model adopts Record's implicit many-to-many table, as Django documents
+    # for putting a many-to-many field behind an explicit through model; the plan then
+    # drops one of its columns, written under the auto-created through model's definition.
+    tags = 'models.ManyToManyField("alpha.Tag", related_name="+")'
+    migration(root, "0002_tags", [created("Tag"), add_field("tags", tags)])
+    link = '("{0}", models.ForeignKey("alpha.{0}", models.CASCADE))'
+    through = (
+        f'migrations.CreateModel(name="RecordTag", fields=[{KEY}, {link.format("record")}, '
+        f'{link.format("tag")}], options={{"db_table": "alpha_record_tags"}})'
+    )
+    adopt_through = state_only(f"{remove_field('tags')}, {through}")
+    removal = 'migrations.RemoveField(model_name="recordtag", name="tag")'
+    migration(root, "0003_drop", [adopt_through, removal], after="0002_tags")
+    run(
+        PRELUDE
+        + f"""
+Record = seed("0002_tags", old="")
+if {rows}:
+    with connection.cursor() as cursor:
+        cursor.execute("INSERT INTO alpha_tag (id) VALUES (1)")
+        cursor.execute("INSERT INTO alpha_record_tags (record_id, tag_id) VALUES (1, 1)")
+    expect(CommandError, "alpha.recordtag: alpha_record_tags.tag_id holds data in 1 rows", migrate)
+else:
+    migrate()
+    with connection.cursor() as cursor:
+        described = connection.introspection.get_table_description(cursor, "alpha_record_tags")
+    assert "tag_id" not in [column.name for column in described]
+"""
+    )
