@@ -1143,6 +1143,33 @@ expect(CommandError, "cannot follow migrate's plan through alpha.0099_ghost",
     )
 
 
+def test_a_state_the_walk_cannot_render_is_refused_at_its_operation(host):
+    root, run = host
+    key = '("id", models.AutoField(primary_key=True))'
+    tag = '("tag", models.ForeignKey("alpha.Tag", models.SET_NULL, null=True, db_constraint=False))'
+    models = [
+        f'migrations.CreateModel(name="{name}", fields=[{key}{fields}])'
+        for name, fields in [("Tag", ""), ("Holder", f", {tag}")]
+    ]
+    migration(root, "0002_tag", models)
+    # Deleting the target first leaves Holder.tag dangling; Django applies this in place,
+    # but a fresh render of the state after 0004 adds a relation cannot resolve it.
+    migration(root, "0003_untag", ['migrations.DeleteModel(name="Tag")'], after="0002_tag")
+    link = add_field("holder", 'models.ForeignKey("alpha.Holder", models.SET_NULL, null=True)')
+    migration(root, "0004_link", [link], after="0003_untag")
+    migration(root, "0005_drop", [REMOVE_OLD], after="0004_link")
+    run(
+        PRELUDE
+        + """
+seed("0002_tag")
+refusal = "alpha.0005_drop (Remove field old from record): cannot render the migration state (The field"
+expect(CommandError, refusal, migrate)
+expect(CommandError, "To proceed, order the history so that its state renders at every operation", migrate)
+assert ("alpha", "0003_untag") not in applied()
+"""
+    )
+
+
 def test_table_renamed_after_a_state_only_adoption_keeps_its_rows_protected(host):
     root, run = host
     migration(root, "0002_adopt", [adopt("Ledger", delete_record=True)])

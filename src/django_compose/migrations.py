@@ -575,6 +575,13 @@ _DECLARE = (
 )
 
 
+_RENDER = "order the history so that its state renders at every operation, each relation's target defined"
+
+
+class _Unrendered(Exception):
+    """The drop guard's walk cannot render the migration state where it reads a model."""
+
+
 class _Storage:
     """Table and column names that the plan's database operations change or create.
 
@@ -915,73 +922,83 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
     def judge(
         migration: Migration, operations: Iterable[Operation], state: ProjectState, *, database: bool = True
     ) -> None:
-        label = migration.app_label
         for operation in operations:
-            if isinstance(operation, SeparateDatabaseAndState):
-                if database and operation.database_operations:
-                    # Database operations progress their own state, as Django applies them.
-                    progressed = state.clone()
-                    judge(migration, operation.database_operations, progressed)
-                    if storage.pending:
-                        storage.resolve(progressed.apps)
-                judge(migration, operation.state_operations, state, database=False)
-                continue
-            removed = _removal(operation)
-            if (
-                database
-                and removed is not None
-                and label in guarded
-                and (probe or _drops_table(state, label, removed))
-            ):
-                routed = rendered(state, label, removed[0])
-                removals.append((migration, (operation, routed, removed[1])))
-                dropped = _dropped(routed, removed[1], policies) if probe else None
-                stored = (
-                    None
-                    if dropped is None
-                    else storage.stored(state, label, removed, routed, dropped, policies)
-                )
-                if dropped is not None and stored is not None:
-                    model, proof, created = stored
-                    declared = isinstance(operation, _INTENDED)
-                    for _, refusal in _proofs(
-                        operation, routed, model, proof, (using,), declared=declared, created=created
-                    ):
-                        if refusal is not None:
-                            refuse(migration, operation, refusal)
-                        storage.end(dropped)
-            # Custom database code, such as RunSQL or a subclass replacing Django's
-            # database_forwards, is not followed: storage it renames or creates is absent
-            # before the plan under a name no native operation accounts for.
-            native = probe and database and _native(operation)
-            renamed = _renamed(operation, state, label) if native else None
-            adds = _created(operation) if native else None
-            if storage.pending and not native and not _leaves_state(operation):
-                # Name what earlier creations added before an operation the walk does
-                # not follow can rename it.
-                storage.resolve(state.apps)
-            before_model = rendered(state, label, renamed[0]) if renamed else None
-            if "apps" in state.__dict__ and _relinks(operation, state, label):
-                # Render afresh where the walk next needs a model instead.
-                del state.apps
-            operation.state_forwards(label, state)
-            # Django changes storage only where the operation migrates the model it
-            # produces: never for a swapped model, nor on an alias routed away.
-            if renamed:
-                after_model = rendered(state, label, renamed[1])
-                if operation.allow_migrate_model(using, after_model):
-                    storage.follow(before_model, after_model, renamed[2])
-            if adds:
-                # Named at the walk's next render, before anything can rename it.
-                storage.pending.append((operation, label, *adds))
+            try:
+                step(migration, operation, state, database=database)
+            except ValueError as error:
+                # Django cannot render the state where the walk reads a model; nothing
+                # after this operation can be followed.
+                refuse(migration, operation, f"cannot render the migration state ({error})", _RENDER)
+                raise _Unrendered from error
+
+    def step(migration: Migration, operation: Operation, state: ProjectState, *, database: bool) -> None:
+        label = migration.app_label
+        if isinstance(operation, SeparateDatabaseAndState):
+            if database and operation.database_operations:
+                # Database operations progress their own state, as Django applies them.
+                progressed = state.clone()
+                judge(migration, operation.database_operations, progressed)
+                if storage.pending:
+                    storage.resolve(progressed.apps)
+            judge(migration, operation.state_operations, state, database=False)
+            return
+        removed = _removal(operation)
+        if (
+            database
+            and removed is not None
+            and label in guarded
+            and (probe or _drops_table(state, label, removed))
+        ):
+            routed = rendered(state, label, removed[0])
+            removals.append((migration, (operation, routed, removed[1])))
+            dropped = _dropped(routed, removed[1], policies) if probe else None
+            stored = (
+                None if dropped is None else storage.stored(state, label, removed, routed, dropped, policies)
+            )
+            if dropped is not None and stored is not None:
+                model, proof, created = stored
+                declared = isinstance(operation, _INTENDED)
+                for _, refusal in _proofs(
+                    operation, routed, model, proof, (using,), declared=declared, created=created
+                ):
+                    if refusal is not None:
+                        refuse(migration, operation, refusal)
+                    storage.end(dropped)
+        # Custom database code, such as RunSQL or a subclass replacing Django's
+        # database_forwards, is not followed: storage it renames or creates is absent
+        # before the plan under a name no native operation accounts for.
+        native = probe and database and _native(operation)
+        renamed = _renamed(operation, state, label) if native else None
+        adds = _created(operation) if native else None
+        if storage.pending and not native and not _leaves_state(operation):
+            # Name what earlier creations added before an operation the walk does
+            # not follow can rename it.
+            storage.resolve(state.apps)
+        before_model = rendered(state, label, renamed[0]) if renamed else None
+        if "apps" in state.__dict__ and _relinks(operation, state, label):
+            # Render afresh where the walk next needs a model instead.
+            del state.apps
+        operation.state_forwards(label, state)
+        # Django changes storage only where the operation migrates the model it
+        # produces: never for a swapped model, nor on an alias routed away.
+        if renamed:
+            after_model = rendered(state, label, renamed[1])
+            if operation.allow_migrate_model(using, after_model):
+                storage.follow(before_model, after_model, renamed[2])
+        if adds:
+            # Named at the walk's next render, before anything can rename it.
+            storage.pending.append((operation, label, *adds))
 
     walked: set[tuple[str, str]] = set()
     # Native migrate applies its plan in the order of the full clean plan.
-    for migration, _ in executor.migration_plan(executor.loader.graph.leaf_nodes(), clean_start=True):
-        key = (migration.app_label, migration.name)
-        if key in forwards:
-            walked.add(key)
-            judge(forwards[key], forwards[key].operations, state)
+    try:
+        for migration, _ in executor.migration_plan(executor.loader.graph.leaf_nodes(), clean_start=True):
+            key = (migration.app_label, migration.name)
+            if key in forwards:
+                walked.add(key)
+                judge(forwards[key], forwards[key].operations, state)
+    except _Unrendered:
+        raise _unsafe("unsafe migration drop", refusals, " Nothing was migrated.") from None
     if unwalked := sorted(forwards.keys() - walked):
         raise CommandError(
             "the drop guard cannot follow migrate's plan through "
