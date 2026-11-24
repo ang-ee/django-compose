@@ -528,8 +528,9 @@ It runs at two points on these rules:
   including for a squash-replaced target, in the order the executor applies it. A
   planned migration the walk cannot follow is refused by name. Where the walk cannot
   render afresh the migration state it reads, though native `migrate`, which keeps its
-  rendering current in place, may apply it, or cannot copy an operation or move that
-  state forward through it, the walk ends there, whichever history left it so. From there
+  rendering current in place, may apply it, or where whatever it runs raises while it
+  copies an operation, reads a field's naming or moves that state forward, the walk ends
+  there, whichever history left it so, and its refusals name what was raised. From there
   on every removal in the history the guard judges is refused, however empty, and so
   is every such table drop the walk met, whose owners at the end of the plan it cannot
   tell; a plan without one applies as native `migrate` applies it. Without the state,
@@ -566,10 +567,12 @@ At `migrate`:
   `default` or `db_default`, from which Django derives its default, or whether it is
   generated. A column generated before the plan holds no data of its own, while one the
   plan redefines as generated still holds the rows written before it. Where no field
-  of that state is stored in the column, as for a table `--fake-initial` adopts, where
-  the fields stored in it read as empty differently, where a field stored in it cannot
-  be resolved or its default raises an error, or where that state cannot be rendered,
-  the column cannot be proved empty. The walk follows every rename the plan's database
+  of that state is stored in the column, as for a table `--fake-initial` adopts, or
+  where the fields stored in it read as empty differently, the column cannot be proved
+  empty. Nor can any storage whose proof raises anything while the guard builds or reads
+  it, such as a field that cannot be resolved or a default that raises or that the
+  query's lookup rejects: that leaves the storage unproved, naming what was raised, and
+  never stops `migrate` itself. The walk follows every rename the plan's database
   operations make, whoever owns them: `AlterModelTable`, `RenameModel`, `RenameField`
   and `AlterField`. It follows each where Django applies it, on an alias that migrates
   the model the operation produces, so a swapped model or one routed elsewhere renames

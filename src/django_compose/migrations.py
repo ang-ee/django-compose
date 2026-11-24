@@ -9,6 +9,7 @@ import stat
 import string
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple, cast
@@ -16,7 +17,7 @@ from typing import Any, Final, Literal, NamedTuple, cast
 from django.apps import apps as global_apps
 from django.apps.registry import Apps
 from django.conf import settings
-from django.core.exceptions import FieldDoesNotExist, FieldError, ImproperlyConfigured
+from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
 from django.core.management.base import CommandError
 from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, router, transaction
 from django.db.backends.base.base import BaseDatabaseWrapper
@@ -144,14 +145,16 @@ def history_labels() -> tuple[str, ...]:
     return tuple(receipt.HISTORY_LABELS)
 
 
-def _own(operations: Iterable[Operation]) -> list[Operation]:
-    """Copies of ``operations`` for a state this package progresses itself.
+def _own(operation: Operation, memo: dict[int, Any]) -> Operation:
+    """A copy of ``operation`` for a state this package progresses itself.
 
     Django's ``ProjectState.rename_field`` rewrites in place the fields that reference a
     renamed field, and every loader's migrations share their modules' operations, which
-    native ``migrate`` may apply later in the same process.
+    native ``migrate`` may apply later in the same process. ``memo`` keeps what one
+    migration's operations share shared in their copies. Copying runs the history's own
+    code, which may raise anything.
     """
-    return copy.deepcopy(list(operations))
+    return copy.deepcopy(operation, memo)
 
 
 def _own_fields(state: ProjectState) -> ProjectState:
@@ -174,11 +177,15 @@ def check_native_history(apps: Apps, *, labels: Iterable[str]) -> None:
         return
     loader = MigrationLoader(None, ignore_no_migrations=True)
     for migration in loader.graph.nodes.values():
-        try:
-            migration.operations = _own(migration.operations)
-        except TypeError, copy.Error:
-            # An operation that cannot be copied stays shared, as Django shares it.
-            continue
+        memo: dict[int, Any] = {}
+        owned = []
+        for operation in migration.operations:
+            try:
+                owned.append(_own(operation, memo))
+            except Exception:
+                # An operation that cannot be copied stays shared, as Django shares it.
+                owned.append(operation)
+        migration.operations = owned
     before, after = effective_states(loader, apps)
     changes = MigrationAutodetector(before, after).changes(
         graph=loader.graph,
@@ -539,8 +546,9 @@ def _dropped(model: Any, field: str | None, policies: tuple[MigrationPolicy, ...
         return _Dropped(through._meta.db_table, None, lambda alias: QuerySet(through))
     if not removed.concrete or removed.generated:
         return None
-    query = _rows(model, removed, _empty(removed))
-    return _Dropped(model._meta.db_table, removed.column, lambda alias: query)
+    return _Dropped(
+        model._meta.db_table, removed.column, lambda alias: _rows(model, removed, _empty(removed))
+    )
 
 
 _ABSENT = "it is absent before the plan, and no native operation of the plan creates it"
@@ -580,6 +588,10 @@ def _proofs(
     native creation ``added`` it; otherwise nothing accounts for its absence, so it
     cannot be proved empty, for the reason ``absent`` gives. One EXISTS query proves
     present storage empty; only storage holding data is counted.
+
+    This is where a proof is built and read, so whatever Django, a database or the
+    history's code raises here, such as a default a lookup rejects, leaves the storage
+    unproved on that alias rather than stopping ``migrate``.
     """
     table, column, rows = dropped
 
@@ -621,8 +633,8 @@ def _proofs(
         except _Undefined as error:
             yield error.remedy, _unproved(routed, table, column, alias, error)
             continue
-        except (DatabaseError, ImproperlyConfigured) as error:
-            yield None, _unproved(routed, table, column, alias, error)
+        except Exception as error:
+            yield None, _unproved(routed, table, column, alias, f"{type(error).__name__}: {error}")
             continue
         if not present and not added:
             yield None, _unproved(routed, table, column, alias, absent)
@@ -690,13 +702,14 @@ _ADOPT = (
 
 
 class _End(Exception):
-    """The walk cannot render its migration state, or move it forward, from here on."""
+    """The walk cannot follow its migration state past ``migration``, or at the end of the
+    plan where it is ``None``: ``error`` was raised while it copied, read or moved that state."""
 
+    def __init__(self, migration: Migration | None, error: Exception) -> None:
+        where = "the end of the plan" if migration is None else f"{migration.app_label}.{migration.name}"
+        super().__init__(f"cannot follow the migration state at {where} ({type(error).__name__}: {error})")
+        self.migration = migration
 
-# What Django raises where it cannot render a migration state, read a model or field from
-# it, or move it forward through an operation: a render's unresolved references or bases,
-# a model or field the state lacks, and a model class Django refuses to build.
-_STUCK = (ValueError, LookupError, FieldDoesNotExist, FieldError)
 
 # A refused removal: its migration and operation, the remedy where the refusal
 # has one of its own (see _refusal), and the refusal.
@@ -1061,10 +1074,11 @@ class _Walk:
     proves each judged removal; where it follows, it follows the names the plan's native
     operations change, create and drop. A column that existed before the plan is judged
     by the definition the state before the plan gives it, reached through the names it
-    follows. Where the walk cannot render its state, or move it forward through an
-    operation, in whatever history, it ends: every judged removal from there on cannot be
-    read, and no judged table drop can be told apart from a table a model still owns at
-    the end of the plan.
+    follows. Whatever is raised while the walk copies, reads or moves its state, in
+    whatever history, ends it, see ``_following``: every judged removal from there on
+    cannot be read, and no judged table drop can be told apart from a table a model still
+    owns at the end of the plan. Whatever is raised while it proves one removal leaves
+    only that removal unproved; see ``_proofs``.
 
     It renders its own state in place where it needs a model: at every removal it
     follows, and otherwise at a judged removal it proves or that can drop a table; at a
@@ -1113,10 +1127,21 @@ class _Walk:
         # How many of the plan's database removals, in its order, the walk has passed.
         self.passed = 0
         # The state before the plan, kept where data is stored, and the fields it stores
-        # in each column, or why it cannot be rendered; see _written.
+        # in each column; see _written.
         self.before: ProjectState
         self._written_by: dict[tuple[str, str | None], list[tuple[Any, Any]]] | None = None
-        self._unwritten = ""
+
+    @contextmanager
+    def _following(self, migration: Migration | None) -> Iterator[None]:
+        """Where the walk copies, reads or moves its state at ``migration``, or at the end of
+        the plan where it is ``None``: whatever Django or the history's code raises there
+        ends the walk."""
+        try:
+            yield
+        except _End:
+            raise
+        except Exception as error:
+            raise _End(migration, error) from error
 
     def run(self) -> list[_Refused]:
         """Walk the plan; return each removal it refuses.
@@ -1143,11 +1168,10 @@ class _Walk:
         self.before = state
         try:
             for migration in planned:
-                try:
+                with self._following(migration):
                     # Native migrate applies the planned operations after the walk.
-                    operations = _own(migration.operations)
-                except (TypeError, copy.Error) as error:
-                    raise _End(f"cannot copy {migration.app_label}.{migration.name} ({error})") from error
+                    memo: dict[int, Any] = {}
+                    operations = [_own(operation, memo) for operation in migration.operations]
                 self._judge(migration, operations, state)
             shared = self._shared(state)
         except _End as end:
@@ -1158,7 +1182,7 @@ class _Walk:
         """The judged table drops the shared-table rule refuses at the end of the plan."""
         if not self.drops:
             return []
-        try:
+        with self._following(None):
             if self.following:
                 # Name what the plan's last creations added before asking what fills a name.
                 self.storage.name_created(state)
@@ -1170,8 +1194,6 @@ class _Walk:
                 planned=True,
                 refilled=self.storage.refilled if self.following else None,
             )
-        except _STUCK as error:
-            raise _End(f"cannot render the migration state at the end of the plan ({error})") from error
         return [
             (self.drops[index][0], self.drops[index][1].operation, remedy, refusal)
             for index, remedy, refusal in shared
@@ -1214,28 +1236,23 @@ class _Walk:
 
         The plan's state tells only what Django drops: the removed model's tables, a
         many-to-many field's table, or a field's column, which a field without a database
-        type does not have. Whether a column existing before the plan holds data, the
-        state before the plan tells; see ``_written``.
+        type does not have. Reading that is following the state, as are the names before
+        the plan it maps to. Whether that storage holds data, the state before the plan
+        tells; see ``_written``. The proof is built and read in ``_proofs``.
         """
         using = self.connection.alias
         if isinstance(operation, _INTENDED) or not operation.allow_migrate_model(using, routed):
             return
         field = removed[1]
-        table, column, dropped = routed._meta.db_table, field, None
-        try:
-            definition = None if field is None else routed._meta.get_field(field)
-            if definition is not None and not definition.many_to_many:
-                if definition.db_parameters(connection=self.connection)["type"] is None:
-                    return
-                column = definition.column
-            elif (dropped := _dropped(routed, field, self.policies)) is None:
+        definition = None if field is None else routed._meta.get_field(field)
+        if definition is not None and not definition.many_to_many:
+            if definition.db_parameters(connection=self.connection)["type"] is None:
                 return
-            else:
-                table, column = dropped.table, None
-        except (FieldDoesNotExist, LookupError, ValueError) as error:
-            reason = f"cannot resolve what the plan removes ({error})"
-            self.refused.append((migration, operation, None, _unproved(routed, table, column, using, reason)))
+            table, column, dropped = routed._meta.db_table, definition.column, None
+        elif (dropped := _dropped(routed, field, self.policies)) is None:
             return
+        else:
+            table, column = dropped.table, None
         origin = self.storage.stored(table, column)
         if origin is _VACATED:
             self.refused.append(
@@ -1267,31 +1284,21 @@ class _Walk:
         A generated field owns no storage of its own, so its column holds no data and
         ``None`` is returned. A field without a database type stores nothing in it. Every
         field stored in the column must agree on what reads as empty in it. Where none is,
-        they disagree, or one cannot be resolved or its default evaluated, the rows cannot
-        be judged, and ``_Undefined`` says why and, where it differs from declaring the
-        drop, what to do instead.
+        or they disagree, the rows cannot be judged, and ``_Undefined`` says why and, where
+        it differs from declaring the drop, what to do instead. This runs inside the proof
+        that ``_proofs`` reads, which also turns whatever resolving a field or evaluating a
+        default raises into a column that cannot be proved empty.
         """
         alias = self.connection.alias
-        definitions = []
-        for model, field in self._stored(table, column):
-            try:
-                if (
-                    router.allow_migrate_model(alias, model)
-                    and field.db_parameters(connection=self.connection)["type"] is not None
-                ):
-                    definitions.append((model, field))
-            except (FieldDoesNotExist, LookupError, ValueError) as error:
-                reason = f"the state before the plan cannot resolve {field} ({error})"
-                raise _Undefined(reason, _RENDER) from error
+        definitions = [
+            (model, field)
+            for model, field in self._stored(table, column)
+            if router.allow_migrate_model(alias, model)
+            and field.db_parameters(connection=self.connection)["type"] is not None
+        ]
         if not definitions:
             raise _Undefined("the state before the plan defines no field stored in it", _ADOPT)
-        empty = []
-        for _, field in definitions:
-            try:
-                empty.append((field.generated, None if field.generated else _empty(field)))
-            except Exception as error:
-                # A callable default is code of the history's own, and may fail in any way.
-                raise _Undefined(f"its default raised {type(error).__name__}: {error}") from error
+        empty = [(field.generated, None if field.generated else _empty(field)) for _, field in definitions]
         if any(type(value[1]) is not type(empty[0][1]) or value != empty[0] for value in empty):
             raise _Undefined(
                 "the state before the plan defines fields stored in it that read as empty differently"
@@ -1303,18 +1310,13 @@ class _Walk:
         """The models of the state before the plan, auto-created ones included, and their
         fields stored in column ``column`` of table ``table``, rendering that state once."""
         if self._written_by is None:
-            self._written_by = {}
-            try:
-                models = self.before.apps.get_models(include_auto_created=True)
-            except ValueError as error:
-                self._unwritten = f"cannot render the migration state before the plan ({error})"
-            else:
-                for model in models:
-                    for field in model._meta.local_concrete_fields:
-                        key = self.storage.key(model._meta.db_table, field.column)
-                        self._written_by.setdefault(key, []).append((model, field))
-        if self._unwritten:
-            raise _Undefined(self._unwritten, _RENDER)
+            written: dict[tuple[str, str | None], list[tuple[Any, Any]]] = {}
+            for model in self.before.apps.get_models(include_auto_created=True):
+                for field in model._meta.local_concrete_fields:
+                    written.setdefault(self.storage.key(model._meta.db_table, field.column), []).append(
+                        (model, field)
+                    )
+            self._written_by = written
         return self._written_by.get(self.storage.key(table, column), [])
 
     def _judge(
@@ -1326,11 +1328,8 @@ class _Walk:
         database: bool = True,
     ) -> None:
         for operation in operations:
-            try:
+            with self._following(migration):
                 self._step(migration, operation, state, database=database)
-            except _STUCK as error:
-                where = f"{migration.app_label}.{migration.name}"
-                raise _End(f"cannot render the migration state at {where} ({error})") from error
 
     def _step(
         self, migration: Migration, operation: Operation, state: ProjectState, *, database: bool
@@ -1385,11 +1384,7 @@ class _Walk:
             # Render afresh where the walk next needs a model instead; after a followed
             # rename it needs one at once, and a fresh render would cost every model.
             del state.apps
-        try:
-            operation.state_forwards(label, state)
-        except _STUCK as error:
-            where = f"{label}.{migration.name}"
-            raise _End(f"cannot move the migration state forward through {where} ({error})") from error
+        operation.state_forwards(label, state)
         # Django changes storage only where the operation migrates the model it
         # produces: never for a swapped model, nor on an alias routed away.
         if renamed:

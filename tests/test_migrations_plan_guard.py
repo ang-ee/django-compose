@@ -560,7 +560,7 @@ seed("0002_stamp", old="kept")
 importlib.import_module("history.alpha.0002_stamp").FAIL = True
 refusal = (
     "alpha.0003_drop (Remove field stamp from record): alpha.record: cannot prove alpha_record.stamp empty "
-    "on 'default' (its default raised RuntimeError: stamp is gone)"
+    "on 'default' (RuntimeError: stamp is gone)"
 )
 expect(CommandError, refusal, migrate)
 assert columns() == ["id", "old", "stamp"]
@@ -1642,7 +1642,7 @@ def test_a_state_the_walk_cannot_render_ends_it_and_refuses_what_it_judges(host)
         PRELUDE
         + """
 seed("0002_tag")
-ended = "cannot render the migration state at alpha.0005_drop (The field"
+ended = "cannot follow the migration state at alpha.0005_drop (ValueError: The field"
 expect(CommandError, "alpha.0005_drop (Remove field old from record): " + ended, migrate)
 # Without the state at the end of the plan, no table drop can be told from a kept table.
 unowned = "alpha.0003_untag (Delete model Tag): cannot tell who owns its table at the end of the plan"
@@ -1710,7 +1710,7 @@ except CommandError as error:
     refusal = str(error)
 else:
     raise AssertionError("expected a refusal")
-ended = "cannot render the migration state at alpha.0003_plan ("
+ended = "cannot follow the migration state at alpha.0003_plan (ValueError: "
 assert "beta.0002_drop (Remove field spare from item): " + ended in refusal, refusal
 if {database!r} == "later":
     assert "beta.0002_drop (Remove field extra from item): " + ended in refusal, refusal
@@ -1756,7 +1756,7 @@ seed("0002_tag")
 MigrationExecutor(connection).migrate([("beta", "0001_item")])
 with connection.cursor() as cursor:
     cursor.execute("INSERT INTO beta_item (spare, kept) VALUES ('', 'precious')")
-ended = "cannot render the migration state at alpha.0003_plan ("
+ended = "cannot follow the migration state at alpha.0003_plan (ValueError: "
 expect(CommandError, "beta.0002_drop (Remove field spare from item): " + ended, migrate)
 with connection.cursor() as cursor:
     cursor.execute("SELECT spare, kept FROM beta_item")
@@ -2023,7 +2023,7 @@ except CommandError as error:
     refusal = str(error)
 else:
     raise AssertionError("expected a refusal")
-removal = "beta.0002_rename (Remove field later from item): cannot render the migration state at "
+removal = "beta.0002_rename (Remove field later from item): cannot follow the migration state at "
 assert removal + "beta.0002_rename (" in refusal, refusal
 assert "Rename field" not in refusal and "alpha.0" not in refusal, refusal
 assert ("beta", "0002_rename") not in applied()
@@ -2955,21 +2955,36 @@ assert ("alpha", "0003_plan") not in applied()
 HOLDING = """
 import sys
 
+class Delegating:
+    # A callable wrapper whose attribute lookups delegate, as wrappers commonly do: copying
+    # it recurses until RecursionError.
+    def __init__(self, inner):
+        self.inner = inner
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+    def __call__(self, apps, editor):
+        pass
+
 class Holding(migrations.RunPython):
-    # A custom operation holding a module, which cannot be copied.
-    def __init__(self):
+    # A custom operation with a state_forwards of its own, so the walk copies it, holding
+    # what cannot be copied.
+    def __init__(self, held):
         super().__init__(migrations.RunPython.noop, migrations.RunPython.noop)
-        self.module = sys
+        self.held = held
+    def state_forwards(self, app_label, state):
+        pass
 """
 
 
+@pytest.mark.parametrize("held", ["sys", "Delegating(migrations.RunPython.noop)"])
 @pytest.mark.parametrize("removal", [False, True])
-def test_an_operation_the_walk_cannot_copy_ends_it(host, removal):
+def test_an_operation_the_walk_cannot_copy_ends_it(host, removal, held):
     root, run = host
     # beta's history is an installed distribution's, with an operation the walk cannot
-    # copy, so cannot progress without changing what native migrate applies. On a
-    # database that stores nothing, the walk judges beta's deletion of Spare and ends
-    # there; only a removal of alpha's own history after it is refused.
+    # copy, so cannot progress without changing what native migrate applies: copying a
+    # module raises TypeError, a delegating wrapper RecursionError. On a database that
+    # stores nothing, the walk judges beta's deletion of Spare and ends there; only a
+    # removal of alpha's own history after it is refused.
     beta(root, "0001_spare", [f'migrations.CreateModel(name="Spare", fields=[{KEY}])'])
     write(
         root,
@@ -2979,7 +2994,7 @@ from django.db import migrations
 {HOLDING}
 class Migration(migrations.Migration):
     dependencies = [("beta", "0001_spare")]
-    operations = [migrations.DeleteModel(name="Spare"), Holding()]
+    operations = [migrations.DeleteModel(name="Spare"), Holding({held})]
 """,
     )
     if removal:
@@ -2993,6 +3008,7 @@ class Migration(migrations.Migration):
     operations = [{REMOVE_OLD}]
 """,
         )
+    error = "TypeError" if held == "sys" else "RecursionError"
     run(
         PRELUDE
         + f"""
@@ -3005,12 +3021,77 @@ try:
 except RuntimeError as error:
     assert "does not match composed models" in str(error), error
 if {removal!r}:
-    refusal = "alpha.0002_drop (Remove field old from record): cannot copy beta.0002_held ("
-    expect(CommandError, refusal, migrate)
+    refusal = "alpha.0002_drop (Remove field old from record): cannot follow the migration state at "
+    expect(CommandError, refusal + "beta.0002_held ({error}: ", migrate)
     assert ("beta", "0002_held") not in applied()
 else:
     migrate()
     assert ("beta", "0002_held") in applied()
+"""
+    )
+
+
+@pytest.mark.parametrize("rows", [0, 1])
+def test_a_default_a_lookup_rejects_cannot_prove_a_column_empty(host, rows):
+    root, run = host
+    # Record.price is added with the default 0, then given the default "" by an AlterField,
+    # which runs no DDL. Judged by that definition, the query rejects its own default.
+    price = "models.DecimalField(max_digits=5, decimal_places=0, default={})"
+    alter = f'migrations.AlterField(model_name="record", name="price", field={price.format(repr(""))})'
+    migration(root, "0002_price", [add_field("price", price.format(0)), alter])
+    migration(root, "0003_drop", [remove_field("price")], after="0002_price")
+    run(
+        PRELUDE
+        + f"""
+seed("0002_price")
+if {rows}:
+    with connection.cursor() as cursor:
+        cursor.execute("INSERT INTO alpha_record (old, price) VALUES ('', 5)")
+# Even an empty table is not proved empty: the proof itself cannot be built.
+refusal = (
+    "alpha.0003_drop (Remove field price from record): alpha.record: cannot prove alpha_record.price "
+    "empty on 'default' (ValidationError: "
+)
+expect(CommandError, refusal, migrate)
+assert columns() == ["id", "old", "price"]
+"""
+    )
+
+
+def test_a_through_left_as_a_string_by_an_in_place_reload_ends_the_walk(host):
+    root, run = host
+    # A state-only deletion of Record.tags' explicit through, then a reload of Record in
+    # place, leaves the through a string; the walk then asks every model which tables it
+    # owns at the deletion of Spare, and cannot read it.
+    link = '("{0}", models.ForeignKey("alpha.{0}", models.CASCADE))'
+    tags = add_field("tags", 'models.ManyToManyField("alpha.Tag", through="alpha.Link")')
+    migration(
+        root,
+        "0002_tags",
+        [
+            created("Tag"),
+            created("Spare"),
+            f'migrations.CreateModel(name="Link", fields=[{KEY}, {link.format("record")}, '
+            f"{link.format('tag')}])",
+            tags,
+            add_field("gone", 'models.CharField(max_length=5, default="")'),
+        ],
+    )
+    window = [
+        remove_field("gone"),
+        state_only('migrations.DeleteModel(name="Link")'),
+        add_field("x", "models.CharField(max_length=5, null=True)"),
+        'migrations.DeleteModel(name="Spare")',
+        state_only(remove_field("tags")),
+    ]
+    migration(root, "0003_window", window, after="0002_tags")
+    run(
+        PRELUDE
+        + """
+seed("0002_tags", old="")
+refusal = "alpha.0003_window (Delete model Spare): cannot follow the migration state at alpha.0003_window ("
+expect(CommandError, refusal + "AttributeError: ", migrate)
+assert ("alpha", "0003_window") not in applied()
 """
     )
 
