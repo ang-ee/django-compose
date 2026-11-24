@@ -58,7 +58,9 @@ choices behind it.
   it current. Before an operation that Django's own reload rule re-renders
   recursively, such as one that adds a relational field or alters a key other models
   reference, it drops the rendering and renders afresh at its next need: where models
-  share a hub, that re-render is nearly the whole state. The walk asks Django's
+  share a hub, that re-render is nearly the whole state. Before a rename it follows,
+  which it reads right after, it keeps the rendering: a fresh render there costs every
+  model, the recursive one only the related models. The walk asks Django's
   `get_references` for that rule rather than copying it. An `AlterField` that changes
   no column or many-to-many table name is read from the unrendered state. Rendering a
   fresh copy at each use was rejected because every rename then cost two full renders;

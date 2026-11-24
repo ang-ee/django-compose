@@ -1013,7 +1013,8 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
     removal, at a rename that can change a storage name, and at the end. Django's
     incremental reload then keeps the rendering current while it is cheap, and the
     walk drops it before an operation where Django would re-render every related
-    model recursively; see ``_relinks``. An ``AlterField`` that changes no column or
+    model recursively, see ``_relinks``, unless it follows that operation's rename and
+    so reads the model right after it. An ``AlterField`` that changes no column or
     many-to-many table name is read from the state without rendering it. Storage a
     native creation adds, and a column an alteration redefines, are named where the walk
     next renders, or before an operation the walk does not follow. The pre-plan state is
@@ -1202,8 +1203,9 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             # empty in a column; see _empty_changes.
             altered = operation if probe and following and isinstance(operation, AlterField) else None
             before_field = None if altered is None else _field(state, label, altered)
-            if "apps" in state.__dict__ and _relinks(operation, state, label):
-                # Render afresh where the walk next needs a model instead.
+            if not renamed and "apps" in state.__dict__ and _relinks(operation, state, label):
+                # Render afresh where the walk next needs a model instead; after a followed
+                # rename it needs one at once, and a fresh render would cost every model.
                 del state.apps
             operation.state_forwards(label, state)
             if altered and _empty_changes(before_field, _field(state, label, altered)):

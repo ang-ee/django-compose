@@ -1811,7 +1811,7 @@ def linked(name, target):
     return f'migrations.CreateModel(name="{name}", fields=[{key}, {up}])'
 
 
-@pytest.mark.parametrize("plan", ["renames", "widening", "hub"])
+@pytest.mark.parametrize("plan", ["renames", "widening", "hub", "renamed_key"])
 def test_the_walk_renders_its_state_in_place_until_a_relation_changes(host, plan):
     root, run = host
 
@@ -1824,17 +1824,28 @@ def test_the_walk_renders_its_state_in_place_until_a_relation_changes(host, plan
         field = f"models.{kind}(primary_key=True, serialize=False)"
         return f'migrations.AlterField(model_name="record", name="id", field={field})'
 
-    rename = 'migrations.RenameField(model_name="record", old_name="old", new_name="kept")'
+    def rename(old, new):
+        return f'migrations.RenameField(model_name="record", old_name="{old}", new_name="{new}")'
+
     operations = {
-        "renames": [alter(db_column="legacy"), rename],
+        "renames": [alter(db_column="legacy"), rename("old", "kept")],
         "widening": [alter(), alter(), alter()],
         # Altering a key other models reference makes Django re-render them recursively.
-        "hub": [alter(db_column="legacy"), *map(key, ["BigAutoField", "AutoField", "BigAutoField"]), rename],
+        "hub": [
+            alter(db_column="legacy"),
+            *map(key, ["BigAutoField", "AutoField", "BigAutoField"]),
+            rename("old", "kept"),
+        ],
+        # So does renaming it, but the walk reads the model right after each rename.
+        "renamed_key": [rename("id", "ident"), rename("ident", "id"), rename("id", "ident")],
     }[plan]
-    # In the hub plan Record is referenced by three spokes, each referenced by two leaves.
-    spokes = [linked(f"Spoke{i}", "Record") for i in range(3)] if plan == "hub" else []
+    # In the hub plans Record is referenced by three spokes, each referenced by two
+    # leaves; sixty models beside them reference nothing.
+    hub = plan in {"hub", "renamed_key"}
+    spokes = [linked(f"Spoke{i}", "Record") for i in range(3)] if hub else []
     leaves = [linked(f"Leaf{i}{j}", f"Spoke{i}") for i in range(len(spokes)) for j in range(2)]
-    migration(root, "0002_spare", [add_field("spare"), *spokes, *leaves])
+    others = [created(f"Other{i}") for i in range(60)] if plan == "renamed_key" else []
+    migration(root, "0002_spare", [add_field("spare"), *spokes, *leaves, *others])
     migration(root, "0003_drop", [*operations, remove_field("spare")], after="0002_spare")
     run(
         PRELUDE
@@ -1863,7 +1874,12 @@ with patch("django_compose.management.commands.migrate.check_plan_drops", counte
 # AlterField renders nothing before the removal. Each key alteration in the hub plan
 # would re-render all ten models, so the walk drops its rendering before the first and
 # renders afresh at the rename: two full renders and 32 models, against 52 kept current.
-full, size, rendered = {{"renames": (1, 1, 4), "widening": (1, 1, 2), "hub": (2, 10, 32)}}[{plan!r}]
+# Each key rename re-renders the ten models as well, but a fresh render right after it
+# would also render the sixty beside them, so the walk keeps its rendering there: one
+# full render and 104 models, against four and 284.
+full, size, rendered = {{
+    "renames": (1, 1, 4), "widening": (1, 1, 2), "hub": (2, 10, 32), "renamed_key": (1, 70, 104)
+}}[{plan!r}]
 assert registries == [size] * full, registries
 assert len(models) == rendered, models
 """
