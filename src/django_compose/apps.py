@@ -11,6 +11,10 @@ from django_compose.management import check_guarded_commands
 from django_compose.serving import _close_startup_verification, _finish_startup_verification, mode, verify
 from django_compose.snapshot import Snapshot
 
+# The table provision records its runs in, outside every migration history: this app's
+# own, which the drop guard, like Django's migration recorder's, counts as storing nothing.
+PROVISION_TABLE = "django_compose_provision"
+
 
 class ComposeConfig(AppConfig):
     """Register management commands without importing build or source models."""

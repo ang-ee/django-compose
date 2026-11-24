@@ -39,13 +39,13 @@ from django.db.models import QuerySet
 from django.db.models.expressions import DatabaseDefault
 from django.utils.module_loading import module_dir
 
+from django_compose.apps import PROVISION_TABLE
 from django_compose.artifacts import atomic_write, receipt_lock, update_receipt
 from django_compose.declarations import MigrationPolicy, resolve_integrations
 from django_compose.management import require_serving_mode as require_serving_mode
 from django_compose.migration_imports import HistoricalImport as HistoricalImport
 from django_compose.migration_imports import historical_imports as historical_imports
 from django_compose.operations import IntendedDeleteModel, IntendedRemoveField
-from django_compose.provision import TABLE as PROVISION_TABLE
 from django_compose.serving import Receipt, read_receipt, verified_receipt
 from django_compose.sources import SourceResolver
 
@@ -952,7 +952,8 @@ def _guarded(labels: Iterable[str]) -> frozenset[str]:
     The composition owns its build record's history labels. A project-source app
     owns its own history: the retained-import audit's resolver attributes no
     installed distribution to its migration package. Django's and other installed
-    apps' history belongs to their owners.
+    apps' history belongs to their owners. One owning distribution settles an
+    installed app cheaply; only a project-source app needs every RECORD read.
     """
     receipt = _build_record()
     composed = frozenset(receipt.HISTORY_LABELS) if receipt else frozenset()
@@ -960,7 +961,7 @@ def _guarded(labels: Iterable[str]) -> frozenset[str]:
     guarded = set()
     for label in labels:
         module = MigrationLoader.migrations_module(label)[0]
-        if label in composed or (module is not None and resolver.resolve(module).kind != "distribution"):
+        if label in composed or (module is not None and not resolver.installed(module)):
             guarded.add(label)
     return frozenset(guarded)
 

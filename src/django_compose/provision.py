@@ -26,11 +26,11 @@ from django.db.models.signals import post_migrate
 from django.utils.functional import classproperty
 from django.utils.timezone import now
 
+from django_compose.apps import PROVISION_TABLE as TABLE
 from django_compose.management import unguarded_commands
 from django_compose.serving import receipt_lease, verified_receipt
 
 PROVISION_LOCK = 0x416E676565507276
-TABLE = "django_compose_provision"
 LEGACY_TABLE = "base_provision"
 
 

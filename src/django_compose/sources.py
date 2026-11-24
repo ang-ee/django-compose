@@ -47,12 +47,28 @@ class SourceResolver:
         self._distributions = None if distributions is None else tuple(distributions)
         self._owners: dict[Path, set[str]] | None = None
 
+    def _all(self) -> Iterable[metadata.Distribution]:
+        return metadata.distributions() if self._distributions is None else self._distributions
+
+    @staticmethod
+    def _project(distribution: metadata.Distribution) -> Path | None:
+        """The local project directory a PEP 610 ``dir_info`` install records, if any."""
+        direct = distribution.read_text("direct_url.json")
+        if direct:
+            try:
+                direct_url = json.loads(direct)
+                url = urlsplit(direct_url.get("url", ""))
+                if "dir_info" in direct_url and url.scheme == "file" and url.netloc in ("", "localhost"):
+                    return Path(unquote(url.path)).resolve()
+            except ValueError, TypeError, AttributeError:
+                pass
+        return None
+
     def _index(self) -> tuple[dict[Path, set[str]], dict[Path, set[str]]]:
         """Key each resolved RECORD file and its ancestors, and each PEP 610 project, to owners."""
         owners: dict[Path, set[str]] = {}
         projects: dict[Path, set[str]] = {}
-        distributions = self._distributions
-        for distribution in metadata.distributions() if distributions is None else distributions:
+        for distribution in self._all():
             name = distribution.metadata["Name"]
             if not name:
                 continue
@@ -63,16 +79,26 @@ class SourceResolver:
                     if name in names:
                         break  # Every further ancestor already records this distribution.
                     names.add(name)
-            direct = distribution.read_text("direct_url.json")
-            if direct:
-                try:
-                    direct_url = json.loads(direct)
-                    url = urlsplit(direct_url.get("url", ""))
-                    if "dir_info" in direct_url and url.scheme == "file" and url.netloc in ("", "localhost"):
-                        projects.setdefault(Path(unquote(url.path)).resolve(), set()).add(name)
-                except ValueError, TypeError, AttributeError:
-                    continue
+            if (project := self._project(distribution)) is not None:
+                projects.setdefault(project, set()).add(name)
         return owners, projects
+
+    def _owns(self, distribution: metadata.Distribution, location: Path) -> bool:
+        """Whether ``distribution`` owns resolved ``location``, as the index would say, if its
+        PEP 610 project holds it or its RECORD's text names it: a cheap partial test."""
+        project = self._project(distribution)
+        if project is None or not location.is_relative_to(project):
+            base = Path(str(distribution.locate_file(""))).resolve()
+            if not location.is_relative_to(base):
+                return False
+            named = location.relative_to(base).as_posix()
+            if named not in (distribution.read_text("RECORD") or "") or not any(
+                Path(str(distribution.locate_file(file))).resolve().is_relative_to(location)
+                for file in distribution.files or ()
+                if file.as_posix() == named or file.as_posix().startswith(f"{named}/")
+            ):
+                return False
+        return bool(distribution.metadata["Name"])
 
     def distribution_names(self, path: Path) -> tuple[str, ...]:
         """Match RECORD files or a PEP 610 local project directory, never package names.
@@ -154,6 +180,21 @@ class SourceResolver:
         source, ownership_paths = self._locate(module)
         names = tuple(sorted({name for path in ownership_paths for name in self.distribution_names(path)}))
         return replace(source, kind="distribution", distributions=names) if names else source
+
+    def installed(self, module: str) -> bool:
+        """Whether ``resolve`` attributes ``module`` to an installed distribution.
+
+        One owner settles it, so before the index is built each distribution's PEP 610
+        project and RECORD text are asked for one; only a module no distribution owns
+        that way needs every RECORD resolved.
+        """
+        _, ownership_paths = self._locate(module)
+        locations = [path.resolve() for path in ownership_paths]
+        if self._owners is None and any(
+            self._owns(distribution, location) for distribution in self._all() for location in locations
+        ):
+            return True
+        return any(self.distribution_names(path) for path in ownership_paths)
 
 
 def resolve_module(module: str, entries: Iterable[AppSource] = ()) -> ModuleSource:

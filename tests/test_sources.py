@@ -6,6 +6,7 @@ import sys
 import zipfile
 from importlib import metadata
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -102,6 +103,28 @@ def test_pep610_project_ownership_uses_directory_boundary(tmp_path):
     resolver = SourceResolver(distributions=(native,))
     assert resolver.distribution_names(source) == ("editable-dist",)
     assert resolver.distribution_names(tmp_path / "editable-other/module.py") == ()
+
+
+def test_one_owner_settles_installed_ownership_without_the_full_index(tmp_path, monkeypatch):
+    project = tmp_path / "editable"
+    for root, package in ((tmp_path, "ownedprobe"), (project, "editableprobe"), (tmp_path, "looseprobe")):
+        (root / package / "migrations").mkdir(parents=True)
+        (root / package / "__init__.py").write_text("")
+        (root / package / "migrations" / "__init__.py").write_text("")
+    owned = distribution(
+        tmp_path, "owned-dist", ("ownedprobe/__init__.py", "ownedprobe/migrations/__init__.py")
+    )
+    editable = distribution(tmp_path, "editable-dist", project=project)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.syspath_prepend(str(project))
+    resolver = SourceResolver(distributions=(owned, editable))
+    with patch.object(SourceResolver, "_index", side_effect=AssertionError("every RECORD resolved")):
+        assert resolver.installed("ownedprobe.migrations")
+        assert resolver.installed("editableprobe.migrations")
+    # Only proving that no distribution owns a module takes the index; both agree.
+    modules = ("ownedprobe.migrations", "editableprobe.migrations", "looseprobe.migrations")
+    assert [resolver.installed(module) for module in modules] == [True, True, False]
+    assert [resolver.resolve(module).kind == "distribution" for module in modules] == [True, True, False]
 
 
 def test_interpreter_modules_are_classified_without_package_metadata(monkeypatch):
