@@ -243,14 +243,6 @@ def _storage_identity(connection: BaseDatabaseWrapper, table: str, cursor: Any) 
     return (namespace, key(name)) if key(name) in tables else None
 
 
-def _allows_migrate_model(operation: Operation, alias: str, model: Any, *, offline: bool) -> bool:
-    # Feature properties can connect (e.g. MySQL server metadata). Offline
-    # planning must conservatively retain an alias instead of probing it.
-    if offline and model._meta.required_db_features and not model._meta.required_db_vendor:
-        return router.allow_migrate_model(alias, model)
-    return operation.allow_migrate_model(alias, model)
-
-
 def _model_storage(model: Any, *, removed_field: str | None = None) -> Iterator[Any]:
     """Tables a native model deletion or implicit M2M field removal drops, and its creation adds."""
     # Django intentionally creates no implicit through classes for swapped models.
@@ -325,13 +317,14 @@ def _unsafe(prefix: str, refusals: Iterable[tuple[str, str]], outcome: str = "")
 
 
 def _shared_table_drops(
-    removals: Sequence[_Removal], after: ProjectState, aliases: Iterable[str], *, database: bool = False
+    removals: Sequence[_Removal], after: ProjectState, aliases: Iterable[str], *, catalog: bool
 ) -> list[tuple[int, str, str]]:
     """Each removal, by position, that would drop a table a model of ``after`` still owns.
 
     Each comes with its remedy: declaring the drop cannot help a table that is not the
     removed model's alone, and storage whose identity cannot be resolved needs a name
-    that can be.
+    that can be. Without the ``catalog``, names are compared alone, and two that only
+    the catalog could tell apart cannot be resolved.
     """
     owners = tuple(
         (owner, storage)
@@ -347,7 +340,7 @@ def _shared_table_drops(
         for alias in aliases:
             connection = connections[alias]
             try:
-                if not _allows_migrate_model(operation, alias, model, offline=not database):
+                if not operation.allow_migrate_model(alias, model):
                     continue
                 key = _name_key(connection)
                 for storage in dropped:
@@ -357,7 +350,7 @@ def _shared_table_drops(
                     for owner, active_storage in owners:
                         if (
                             field is None and owner._meta.label_lower == model._meta.label_lower
-                        ) or not _allows_migrate_model(operation, alias, owner, offline=not database):
+                        ) or not operation.allow_migrate_model(alias, owner):
                             continue
                         active_table = active_storage._meta.db_table
                         other = _storage_identifier(connection, active_table)
@@ -365,9 +358,9 @@ def _shared_table_drops(
                             remaining.add(active_storage._meta.label_lower)
                         elif key(identity[1]) == key(other[1]):
                             # Another namespace or case: only the catalog can tell them apart.
-                            if not database:
+                            if not catalog:
                                 raise ImproperlyConfigured(
-                                    f"cannot resolve shared storage {table!r} and {active_table!r} offline"
+                                    f"cannot tell {table!r} from {active_table!r} from names alone"
                                 )
                             with connection.cursor() as cursor:
                                 physical = _storage_identity(connection, table, cursor)
@@ -558,7 +551,7 @@ class DropGuardAutodetector(MigrationAutodetector):
         ]
         refusals.extend(
             (remedy, refusal)
-            for _, remedy, refusal in _shared_table_drops(removals, self.to_state, aliases, database=True)
+            for _, remedy, refusal in _shared_table_drops(removals, self.to_state, aliases, catalog=True)
         )
         if refusals:
             raise _unsafe("unsafe autodetected drop", refusals)
@@ -597,7 +590,7 @@ class _Storage:
         self.tables: dict[str, str | None] = {}
         self.columns: dict[tuple[str, str], str | None] = {}
         self.created: set[tuple[str, str | None]] = set()
-        self.pending: list[tuple[Operation, str, str, str | None]] = []
+        self._held: list[tuple[Operation, str, str, str | None]] = []
         self.alias = connection.alias
         self.table_key = _name_key(connection)
         self.column_key = _name_key(connection, column=True)
@@ -644,20 +637,27 @@ class _Storage:
                 self.columns[table, now.column] = self.columns.get((table, field.column), field.column)
                 self.columns[table, field.column] = None
 
-    def resolve(self, apps: Apps) -> None:
-        """Name the storage each pending native creation added, from ``apps`` rendered since.
+    def add(self, operation: Operation, label: str, created: tuple[str, str | None]) -> None:
+        """Hold the native creation of the model and field ``created`` names until ``resolve_from``."""
+        self._held.append((operation, label, *created))
 
-        Django creates storage only where the operation migrates the model. A model or
-        field removed in between is left unnamed, so its absent storage stays refused.
+    def resolve_from(self, state: ProjectState) -> None:
+        """Name the storage each held creation added, from ``state`` rendered since.
+
+        Nothing is rendered while nothing is held. Django creates storage only where the
+        operation migrates the model. A model or field removed in between is left
+        unnamed, so its absent storage stays refused.
         """
-        for operation, label, name, field in self.pending:
+        if not self._held:
+            return
+        for operation, label, name, field in self._held:
             try:
-                model = apps.get_model(label, name)
+                model = state.apps.get_model(label, name)
                 if operation.allow_migrate_model(self.alias, model):
                     self.create(model, field)
             except LookupError, FieldDoesNotExist:
                 continue
-        self.pending.clear()
+        self._held.clear()
 
     def create(self, model: Any, field: str | None) -> None:
         """Record the storage a native creation adds: a model's tables, or a field's table or column."""
@@ -870,8 +870,9 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
     to apply, before any operation runs. The specification's "Drop guard" section
     defines the rule. An alias that stores nothing holds no data to prove: there the
     walk probes nothing, follows no rename and renders only at a removal that can drop
-    a table, and only the shared-table rule, which needs no data, applies, offline. An
-    app's history is classified there only if that rule refuses one of its removals.
+    a table, and only the shared-table rule, which needs no data, applies, from names
+    alone. An app's history is classified there only if that rule refuses one of its
+    removals.
 
     The walk renders its own state in place where it needs a model: at a guarded
     removal, at a rename that can change a storage name, and at the end. Django's
@@ -916,7 +917,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         refusals.append((remedy or _DECLARE, f"{label}.{migration.name} ({operation.describe()}): {refusal}"))
 
     def rendered(state: ProjectState, label: str, name: str) -> Any:
-        storage.resolve(state.apps)
+        storage.resolve_from(state)
         return state.apps.get_model(label, name)
 
     def judge(
@@ -938,8 +939,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                 # Database operations progress their own state, as Django applies them.
                 progressed = state.clone()
                 judge(migration, operation.database_operations, progressed)
-                if storage.pending:
-                    storage.resolve(progressed.apps)
+                storage.resolve_from(progressed)
             judge(migration, operation.state_operations, state, database=False)
             return
         removed = _removal(operation)
@@ -970,10 +970,10 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         native = probe and database and _native(operation)
         renamed = _renamed(operation, state, label) if native else None
         adds = _created(operation) if native else None
-        if storage.pending and not native and not _leaves_state(operation):
+        if not native and not _leaves_state(operation):
             # Name what earlier creations added before an operation the walk does
             # not follow can rename it.
-            storage.resolve(state.apps)
+            storage.resolve_from(state)
         before_model = rendered(state, label, renamed[0]) if renamed else None
         if "apps" in state.__dict__ and _relinks(operation, state, label):
             # Render afresh where the walk next needs a model instead.
@@ -987,7 +987,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                 storage.follow(before_model, after_model, renamed[2])
         if adds:
             # Named at the walk's next render, before anything can rename it.
-            storage.pending.append((operation, label, *adds))
+            storage.add(operation, label, adds)
 
     walked: set[tuple[str, str]] = set()
     # Native migrate applies its plan in the order of the full clean plan.
@@ -1006,7 +1006,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             + "; nothing was migrated"
         )
     shared = (
-        _shared_table_drops([removal for _, removal in removals], state, (using,), database=probe)
+        _shared_table_drops([removal for _, removal in removals], state, (using,), catalog=probe)
         if removals
         else []
     )
@@ -1230,7 +1230,7 @@ def retire_history(label: str, *, purge: bool = False) -> None:
                 graph=loader.graph, trim_to_apps={label}, migration_name=_PURGE
             )
             removals = tuple(_changed_removals(before, changes))
-            if shared := _shared_table_drops(removals, after, sorted(connections), database=True):
+            if shared := _shared_table_drops(removals, after, sorted(connections), catalog=True):
                 raise _unsafe(
                     "unsafe autodetected drop", ((remedy, refusal) for _, remedy, refusal in shared)
                 )

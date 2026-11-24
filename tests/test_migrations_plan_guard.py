@@ -730,44 +730,54 @@ assert columns() == ["id", "old"]
     )
 
 
-@pytest.mark.parametrize("database", ["fresh", "provisioning", "adopted"])
+@pytest.mark.parametrize("database", ["fresh", "provisioning", "populated", "adopted"])
 def test_an_alias_that_stores_nothing_is_not_probed_and_fake_initial_adoption_is(host, database):
     root, run = host
-    migration(root, "0002_drop", [REMOVE_OLD])
+    # Only custom SQL adds the column extra, so no probe can prove its removal safe.
+    sql = 'migrations.RunSQL("ALTER TABLE alpha_record ADD COLUMN extra varchar(40)")'
+    added = add_field("extra")
+    extra = f"migrations.SeparateDatabaseAndState(database_operations=[{sql}], state_operations=[{added}])"
+    migration(root, "0002_extra", [extra])
+    migration(root, "0003_drop", [remove_field("extra"), REMOVE_OLD], after="0002_extra")
     run(
         PRELUDE
         + f"""
+from django.db.migrations import state as native
 from django_compose.provision import ProvisionRecorder
 database = {database!r}
 if database == "provisioning":
     # provision records its run in its own table before it migrates.
     ProvisionRecorder(connection).ensure_schema()
-if database == "adopted":
+if database in {{"populated", "adopted"}}:
     seed(old="legacy data")
+if database == "adopted":
     MigrationRecorder(connection).migration_qs.filter(app="alpha").delete()
-    expect(CommandError, "alpha.0002_drop", lambda: migrate(fake_initial=True))
-    assert columns() == ["id", "old"]
-    assert not {{key for key in applied() if key[0] == "alpha"}}
-else:
-    from django.db.migrations import state as native
-    registries = []
-    construct = native.StateApps.__init__
-    def constructing(self, real_apps, states, *args, **kwargs):
-        if states:
-            registries.append(len(states))
-        construct(self, real_apps, states, *args, **kwargs)
-    judge = check_plan_drops
-    def counted(plan, *, using):
-        with patch.object(native.StateApps, "__init__", constructing):
-            judge(plan, using=using)
-    # A column drop cannot drop a table, so nothing is rendered or classified either.
-    with patch("django_compose.migrations._proofs", side_effect=AssertionError("probed")), patch(
-        "django_compose.migrations._guarded", side_effect=AssertionError("classified")
-    ), patch("django_compose.management.commands.migrate.check_plan_drops", counted):
+registries = []
+construct = native.StateApps.__init__
+def constructing(self, real_apps, states, *args, **kwargs):
+    if states:
+        registries.append(len(states))
+    construct(self, real_apps, states, *args, **kwargs)
+judge = check_plan_drops
+def counted(plan, *, using):
+    with patch.object(native.StateApps, "__init__", constructing):
+        judge(plan, using=using)
+with patch("django_compose.management.commands.migrate.check_plan_drops", counted):
+    if database in {{"fresh", "provisioning"}}:
+        # Nothing is stored, so nothing is probed, and column drops render nothing.
         migrate()
-    assert registries == [], registries
-    assert columns() == ["id"]
-    assert ("alpha", "0002_drop") in applied()
+        assert registries == [], registries
+        assert columns() == ["id"]
+    else:
+        # --fake-initial adoption finds tables, so the guard probes them.
+        refusal = {{
+            "populated": "(Remove field extra from record): alpha.record: cannot prove alpha_record.extra",
+            "adopted": "(Remove field old from record): alpha.record: alpha_record.old holds data",
+        }}[database]
+        fake = database == "adopted"
+        expect(CommandError, "alpha.0003_drop " + refusal, lambda: migrate(fake_initial=fake))
+        assert columns() == ["id", "old"]
+        assert ("alpha", "0002_extra") not in applied()
 """
     )
 
@@ -806,16 +816,23 @@ class Migration(migrations.Migration):
     ]
 """,
     )
+    # Neither history is the build record's, and an installed distribution owns alpha's.
+    write(root, "output/__init__.py", Receipt((), (), "plan-guard", {}, "compiler").source())
     run(
         PRELUDE
         + """
-from unittest.mock import Mock
-# beta's column drop drops no table, so beta needs no classifying. The rule refuses
-# alpha's deletion; were alpha's history its owners', that refusal would go.
-classify = Mock(return_value=frozenset())
-with patch("django_compose.migrations._guarded", classify):
+from django_compose.sources import SourceResolver
+asked = []
+native_names = SourceResolver.distribution_names
+def installed(self, path):
+    owner = path.relative_to(Path.cwd()).parts[:2] if path.is_relative_to(Path.cwd()) else ()
+    asked.append("/".join(owner))
+    return ("alpha-dist",) if owner == ("history", "alpha") else native_names(self, path)
+# The rule refuses alpha's deletion, but alpha's history belongs to its owner, so the
+# plan applies. beta's column drop drops no table, so beta's history is never classified.
+with patch.object(SourceResolver, "distribution_names", installed):
     migrate()
-classify.assert_called_once_with({"alpha"})
+assert "history/alpha" in asked and "history/beta" not in asked, asked
 assert ("alpha", "0003_drop") in applied()
 """
     )

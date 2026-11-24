@@ -529,16 +529,15 @@ At `migrate`:
 
 - **Nothing stored:** an alias whose only tables are Django's migration recorder and
   `provision`'s record, such as a fresh or test database on PostgreSQL or SQLite,
-  holds no data to lose, so the guard probes nothing and follows no rename there.
-  Only a complete inventory shows that: PostgreSQL's catalog across every schema, in
-  which a relation an extension owns, such as PostGIS's `spatial_ref_sys`, does not
-  count, or SQLite's main database with nothing attached; on other backends the guard
-  always probes. `--fake-initial` adoption finds tables, so it is probed. The
-  shared-table rule needs no data and still applies, from names alone, as authoring's
-  offline check does: names only a catalog could tell apart are refused. Only a
-  removal that can drop a table, a model deletion or a many-to-many field's removal,
-  is judged there, and an app's history is classified for scope only where the rule
-  refuses one of its removals.
+  holds no data to lose, so the guard probes nothing and follows no rename there. Only
+  a complete inventory shows that: PostgreSQL's catalog across every schema, in which
+  a relation an extension owns, such as PostGIS's `spatial_ref_sys`, does not count,
+  or SQLite's main database with nothing attached; on other backends the guard always
+  probes. `--fake-initial` adoption finds tables, so it is probed. The shared-table
+  rule needs no data and still applies, from names alone: names only a catalog could
+  tell apart are refused. Only a removal that can drop a table, a model deletion or a
+  many-to-many field's removal, is judged there, and an app's history is classified
+  for scope only where the rule refuses one of its removals.
 - **Scope:** the history the project owns: the build record's `HISTORY_LABELS` and
   every project-source app, one whose migration package no installed distribution
   owns, as the retained-import audit's resolver classifies it. Django's and installed

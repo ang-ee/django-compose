@@ -456,12 +456,12 @@ with connection.schema_editor() as editor:
     editor.create_model(model)
 # Even an empty shared table is protected independently of the row proof.
 expect(CommandError, "still owned", lambda: DropGuardAutodetector(before, after).changes(loader.graph))
-with patch.object(connection, "cursor", side_effect=AssertionError("offline binding queried")):
-    expected = "offline" if {active_table!r} == "ALPHA_RECORD" else "still owned"
+with patch.object(connection, "cursor", side_effect=AssertionError("catalog queried")):
+    expected = "from names alone" if {active_table!r} == "ALPHA_RECORD" else "still owned"
     changes = {{"alpha": [migrations.Migration("drop", "alpha")]}}
     changes["alpha"][0].operations = [migrations.DeleteModel("Record")]
     removals = list(_changed_removals(before, changes))
-    [(index, _, refusal)] = _shared_table_drops(removals, after, sorted(connections))
+    [(index, _, refusal)] = _shared_table_drops(removals, after, sorted(connections), catalog=False)
     assert index == 0 and expected in refusal, refusal
 assert model._base_manager.count() == 0
 """)
