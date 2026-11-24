@@ -985,6 +985,35 @@ else:
     )
 
 
+def test_a_model_owning_a_table_at_its_drop_moved_to_another_app_is_taken_for_a_new_owner(host):
+    root, run = host
+    # A stated limit: the identity of a model that owned a dropped table follows RenameModel
+    # only. Shadow owns alpha_record with Record; after Record's declared drop and Fresh's
+    # table under its name, Shadow moves to beta by state alone, as Django documents for
+    # moving a model, and is taken for a new owner of Fresh's table: its row is lost.
+    migration(root, "0002_shadow", [state_only(created("Shadow", db_table="alpha_record"))])
+    operations = [
+        'IntendedDeleteModel(name="Record")',
+        created("Fresh", db_table="alpha_record"),
+        state_only('migrations.DeleteModel(name="Shadow")'),
+    ]
+    migration(root, "0003_drop", operations, after="0002_shadow")
+    key = '("id", models.AutoField(primary_key=True))'
+    shadow = f'migrations.CreateModel(name="Shadow", fields=[{key}], options={{"db_table": "alpha_record"}})'
+    beta(root, "0001_moved", [state_only(shadow)], [("alpha", "0003_drop")])
+    run(
+        PRELUDE
+        + """
+Record = seed("0002_shadow")
+Record._base_manager.create(old="kept")
+migrate()
+with connection.cursor() as cursor:
+    cursor.execute("SELECT count(*) FROM alpha_record")
+    assert cursor.fetchone() == (0,)
+"""
+    )
+
+
 def test_a_model_deleted_and_created_again_takes_one_walk_on_a_fresh_database(host):
     root, run = host
     # Histories commonly delete a model and create it again: under its own label the
@@ -1016,21 +1045,37 @@ assert "alpha_record" in tables()
 
 
 @pytest.mark.parametrize("stored", ["fresh", "empty", "rows"])
-@pytest.mark.parametrize("shape", ["create", "rename", "retable"])
+@pytest.mark.parametrize(
+    "shape", ["create", "rename", "run_sql_create", "retable", "separate_create", "rename_retable"]
+)
 def test_a_deleted_models_label_given_its_table_by_state_alone_goes_unnoticed(host, shape, stored):
     root, run = host
     # A stated limit: after Record's deletion, state alone gives alpha.record its table
-    # again, and the model is taken for Record created again. Nothing is refused, and it is
-    # left without a table; rows the drop would lose are still refused by the probe.
+    # again, whichever operations do it, and the model is taken for Record created again.
+    # Nothing is refused, and it is left without a table; rows the drop would lose are
+    # still refused by the probe.
     before = "0001_origin"
-    if shape == "rename":
-        migration(root, "0002_other", [created("Other")])
+    if shape in {"rename", "rename_retable"}:
+        options = {"db_table": "alpha_other"} if shape == "rename_retable" else {}
+        migration(root, "0002_other", [created("Other", **options)])
         before = "0002_other"
+    elsewhere = (
+        f'migrations.CreateModel(name="Record", fields={FIELDS}, options={{"db_table": "alpha_moved"}})'
+    )
     again = {
         "create": [state_only(f'migrations.CreateModel(name="Record", fields={FIELDS})')],
         "rename": [state_only('migrations.RenameModel(old_name="Other", new_name="Record")')],
-        "retable": [
-            f'migrations.CreateModel(name="Record", fields={FIELDS}, options={{"db_table": "alpha_moved"}})',
+        "run_sql_create": [
+            "migrations.RunSQL(migrations.RunSQL.noop, state_operations=["
+            f'migrations.CreateModel(name="Record", fields={FIELDS})])'
+        ],
+        "retable": [elsewhere, state_only('migrations.AlterModelTable(name="record", table="alpha_record")')],
+        "separate_create": [
+            f"migrations.SeparateDatabaseAndState(database_operations=[{elsewhere}], "
+            f'state_operations=[migrations.CreateModel(name="Record", fields={FIELDS})])'
+        ],
+        "rename_retable": [
+            'migrations.RenameModel(old_name="Other", new_name="Record")',
             state_only('migrations.AlterModelTable(name="record", table="alpha_record")'),
         ],
     }[shape]

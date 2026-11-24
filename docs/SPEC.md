@@ -569,29 +569,33 @@ At `migrate`:
   either is present. Case does not tell table names apart where Django's
   `ignores_table_name_case` is set, as on SQLite, nor column names on SQLite and MySQL
   whatever MySQL's table-name setting, nor any name where the backend's quoting folds
-  case, as Oracle's does. SQLite and MySQL fold the case of ASCII letters only, and so
-  does the guard there; where quoting folds case, the guard compares names as Django
-  quotes them. Only SQLite and PostgreSQL have real-backend coverage. A name that an
-  earlier rename or removal of the plan vacated holds the plan's own storage only once a
-  native `CreateModel` or `AddField` fills it again, or a followed rename moves storage
-  under it, which is then probed under its name before the plan; storage under a vacated
-  name nothing native filled, such as a table a `RunSQL` renamed there, cannot be proved
-  empty and its removal is refused. Storage absent before the plan is the plan's own
-  only where a native creation of the plan adds it; any other absent storage cannot be
-  proved empty either. A table owned at the end of the plan is not deleted, even by a
-  declared drop, unless after the drop a native creation, or a followed rename, puts
-  storage under its name, as Django's removal and addition of a many-to-many field with
-  a new target does, and the owner did not own the table when it was dropped: a model
-  that comes to own the name after the drop owns that new storage, but one that owned
-  the table then, under whatever name a later `RenameModel` gives it, owned the dropped
-  rows. A model that a state-only operation gives the name after the drop owns no table,
-  and the drop stays refused. Under a deleted model's own label, though, a model that
-  did not own the table when it was dropped is taken for that model created again, as
-  histories commonly delete and create a model again, so three shapes that leave it
-  without a table go unnoticed: a state-only `CreateModel` under that label, a
-  state-only `RenameModel` into it, and a native creation under another table followed
-  by a state-only `AlterModelTable` back. Where the dropped table holds rows, the probe
-  still refuses an undeclared drop.
+  case, as Oracle's does. SQLite folds the case of ASCII letters only, and the guard
+  folds names that way on SQLite and on MySQL; for MySQL that is simulated, not verified
+  on a server, which may fold other letters too. Where quoting folds case, the guard
+  compares names as Django quotes them. Only SQLite and PostgreSQL have real-backend
+  coverage. A name that an earlier rename or removal of the plan vacated holds the
+  plan's own storage only once a native `CreateModel` or `AddField` fills it again, or a
+  followed rename moves storage under it, which is then probed under its name before the
+  plan; storage under a vacated name nothing native filled, such as a table a `RunSQL`
+  renamed there, cannot be proved empty and its removal is refused. Storage absent
+  before the plan is the plan's own only where a native creation of the plan adds it;
+  any other absent storage cannot be proved empty either. A table owned at the end of
+  the plan is not deleted, even by a declared drop, unless after the drop a native
+  creation, or a followed rename, puts storage under its name, as Django's removal and
+  addition of a many-to-many field with a new target does, and the owner did not own the
+  table when it was dropped: a model that comes to own the name after the drop owns that
+  new storage, but one that owned the table then owned the dropped rows. That identity
+  follows `RenameModel` only: a model that owned the table and moves to another app by
+  state-only operations after the drop, as Django documents for moving a model, is taken
+  for a new owner. A model that a state-only operation gives the name after the drop,
+  where nothing refilled the name, owns no table, and the drop stays refused. Under a
+  deleted model's own label, though, a model that did not own the table when it was
+  dropped is taken for that model created again, as histories commonly delete and create
+  a model again. So a model that state alone gives the deleted label's table is left
+  without one unnoticed, whichever operations do it: a state-only `CreateModel` or
+  `RenameModel` under that label, or a native creation or rename under another table
+  whose state a state-only operation then points at the deleted table. Where the dropped
+  table holds rows, the probe still refuses an undeclared drop.
 - **Snapshot:** every proof is taken at `pre_migrate`, before the first operation.
   Rows the plan itself writes, such as a `RunPython` that fills storage a later
   operation of the plan drops, are not protected.

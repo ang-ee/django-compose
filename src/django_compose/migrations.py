@@ -176,9 +176,10 @@ def _name_key(connection: BaseDatabaseWrapper, *, column: bool = False) -> Calla
     """How the backend tells two spellings of a table name, or of a column name, apart.
 
     Where ``quote_name`` folds case, as Oracle's upper-cases every name, a name is the
-    object Django quotes it as. SQLite, and MySQL where it ignores case, fold the case of
-    ASCII letters only: table names where Django's ``ignores_table_name_case`` says so,
-    and column names whatever that setting. Elsewhere spellings compare exactly.
+    object Django quotes it as. SQLite folds the case of ASCII letters only, and so do
+    names here on SQLite and on MySQL, where it ignores case, though a MySQL server may
+    fold other letters too: table names where Django's ``ignores_table_name_case`` says
+    so, and column names whatever that setting. Elsewhere spellings compare exactly.
     """
     quote = connection.ops.quote_name
     if quote("a") == quote("A"):
