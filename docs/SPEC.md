@@ -555,7 +555,10 @@ At `migrate`:
   produces, so a swapped model or one routed elsewhere renames nothing. A subclass
   that replaces Django's `database_forwards` runs custom database code, which is not
   followed. Where the backend ignores the case of table names, as SQLite does, a
-  rename that changes only the case of a table or column name moves nothing. Storage
+  rename that changes only the case of a table or column name moves nothing. MySQL
+  ignores the case of column names whatever its table-name setting, and this package
+  has no MySQL coverage: where it keeps table-name case, a case-only column rename is
+  treated as a rename, so the old spelling counts as a name the plan vacated. Storage
   under a name that an earlier rename or removal of the same plan vacated is the
   plan's own and skipped. Storage absent before the plan is the plan's own only where
   a native `CreateModel` or `AddField` of the plan creates it; any other absent
