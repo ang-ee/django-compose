@@ -250,9 +250,9 @@ SQLite checks use its native case and temporary-table visibility rules. Attached
 SQLite databases, unsupported quoting or namespaces, excessive identifier lengths
 and otherwise unprovable identity cannot prove a drop safe, and the refusal names
 the remedy: declare a drop whose rows are in question, or give a table that others
-may share a name the guard can resolve. Other backends retain native introspection
-with conservative refusal of uncertain identity; the real-backend regression
-coverage is SQLite and PostgreSQL.
+may share a name the guard can resolve. Other backends use native introspection,
+matching a name in any case where the backend ignores it; the real-backend
+regression coverage is SQLite and PostgreSQL.
 
 ### History cutoffs
 

@@ -1685,10 +1685,13 @@ assert "{table}" in tables()
 ON_OLD = 'models.CharField(max_length=40, default="", db_column="old")'
 
 
-@pytest.mark.parametrize("kind", ["table", "column"])
-def test_a_case_only_rename_frees_no_name_where_the_backend_ignores_case(host, kind):
+@pytest.mark.parametrize(
+    ("kind", "backend"), [("table", "sqlite"), ("column", "sqlite"), ("column", "mysql")]
+)
+def test_a_case_only_rename_frees_no_name_where_the_backend_ignores_case(host, kind, backend):
     root, run = host
-    # SQLite ignores the case of table and column names: the renamed storage keeps both.
+    # SQLite ignores the case of table and column names, and MySQL that of column names
+    # even where it keeps the case of table names: the renamed storage keeps both.
     if kind == "table":
         moved = 'migrations.AlterModelTable(name="record", table="ALPHA_RECORD")'
         adopted = adopt("Twin")
@@ -1703,14 +1706,69 @@ def test_a_case_only_rename_frees_no_name_where_the_backend_ignores_case(host, k
     migration(root, "0002_case", [moved])
     migration(root, "0003_adopt", [adopted], after="0002_case")
     migration(root, "0004_drop", drops, after="0003_adopt")
+    mysql = 'connection.vendor = "mysql"\nconnection.features.ignores_table_name_case = False'
     run(
         PRELUDE
         + f"""
 seed(old="kept")
+{mysql if backend == "mysql" else ""}
 expect(CommandError, "{refusal}", migrate)
 with connection.cursor() as cursor:
     cursor.execute("SELECT old FROM alpha_record")
     assert cursor.fetchall() == [("kept",)]
+"""
+    )
+
+
+# SQLite's connection serves every query; only what the guard reads of the backend changes.
+BACKENDS = {
+    "sqlite": "",
+    # MySQL with lower_case_table_names 1 or 2: no complete inventory, and names in any case.
+    "mysql": 'connection.vendor = "mysql"',
+    # Oracle quotes every name in upper case.
+    "oracle": 'connection.vendor = "oracle"\n'
+    "connection.ops.quote_name = lambda name: (name if name.startswith('\"') else f'\"{name}\"').upper()",
+}
+
+
+@pytest.mark.parametrize("vendor", ["sqlite", "mysql"])
+@pytest.mark.parametrize("kind", ["table", "column"])
+def test_where_the_backend_ignores_name_case_absent_storage_the_plan_creates_is_its_own(host, vendor, kind):
+    root, run = host
+    if kind == "table":
+        # On a fresh database the plan creates the table its removal drops a column of.
+        migration(root, "0002_drop", [REMOVE_OLD])
+    else:
+        migration(root, "0002_add", [add_field("spare")])
+        migration(root, "0003_drop", [remove_field("spare")], after="0002_add")
+    run(
+        PRELUDE
+        + f"""
+if {kind!r} == "column":
+    seed(old="kept")
+{BACKENDS[vendor]}
+assert connection.features.ignores_table_name_case
+migrate()
+assert columns() == ["id"] if {kind!r} == "table" else ["id", "old"]
+"""
+    )
+
+
+@pytest.mark.parametrize("vendor", ["sqlite", "mysql", "oracle"])
+def test_a_name_in_another_case_is_present_where_the_backend_ignores_case(host, vendor):
+    root, run = host
+    # The column, stored as "old", is spelled "OLD" when the plan removes it.
+    field = 'models.CharField(max_length=40, default="", db_column="OLD")'
+    spell = f'migrations.AlterField(model_name="record", name="old", field={field})'
+    migration(root, "0002_spell", [state_only(spell)])
+    migration(root, "0003_drop", [REMOVE_OLD], after="0002_spell")
+    run(
+        PRELUDE
+        + f"""
+seed(old="kept")
+{BACKENDS[vendor]}
+refusal = "alpha.0003_drop (Remove field old from record): alpha.record: alpha_record.OLD holds data"
+expect(CommandError, refusal, migrate)
 """
     )
 

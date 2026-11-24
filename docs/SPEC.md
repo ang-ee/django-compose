@@ -547,24 +547,25 @@ At `migrate`:
   still guards what it autodetects for them. That includes an editable install, such
   as `uv sync` or `pip install -e` makes, which records the project directory as PEP
   610 `dir_info`.
-- **Probe:** each removal is routed and defined by the plan's state at that
-  operation, and its storage is probed under the name it had before the plan. The
-  walk follows every rename the plan's database operations make, whoever owns them:
+- **Probe:** each removal is routed and defined by the plan's state at that operation,
+  and its storage is probed under the name it had before the plan. The walk follows
+  every rename the plan's database operations make, whoever owns them:
   `AlterModelTable`, `RenameModel`, `RenameField` and `AlterField`. It follows each
-  where Django applies it, on an alias that migrates the model the operation
-  produces, so a swapped model or one routed elsewhere renames nothing. A subclass
-  that replaces Django's `database_forwards` runs custom database code, which is not
-  followed. Where the backend ignores the case of table names, as SQLite does, a
-  rename that changes only the case of a table or column name moves nothing. MySQL
-  ignores the case of column names whatever its table-name setting, and this package
-  has no MySQL coverage: where it keeps table-name case, a case-only column rename is
-  treated as a rename, so the old spelling counts as a name the plan vacated. Storage
-  under a name that an earlier rename or removal of the same plan vacated is the
-  plan's own and skipped. Storage absent before the plan is the plan's own only where
-  a native `CreateModel` or `AddField` of the plan creates it; any other absent
-  storage, such as a table a `RunSQL` renamed, cannot be proved empty and its removal
-  is refused. A table owned at the end of the plan is not deleted, even by a declared
-  drop.
+  where Django applies it, on an alias that migrates the model the operation produces,
+  so a swapped model or one routed elsewhere renames nothing. A subclass that replaces
+  Django's `database_forwards` runs custom database code, which is not followed. Two
+  spellings of a name that the backend does not tell apart name the same storage: a
+  rename between them moves nothing, and storage under either is present. Case does
+  not tell table names apart where Django's `ignores_table_name_case` is set, as on
+  SQLite, nor column names on SQLite and MySQL whatever MySQL's table-name setting,
+  nor any name where the backend's quoting folds case, as Oracle's does. Python's
+  `casefold` stands in for the backend's folding of non-ASCII names. Only SQLite and
+  PostgreSQL have real-backend coverage. Storage under a name that an earlier rename
+  or removal of the same plan vacated is the plan's own and skipped. Storage absent
+  before the plan is the plan's own only where a native `CreateModel` or `AddField` of
+  the plan creates it; any other absent storage, such as a table a `RunSQL` renamed,
+  cannot be proved empty and its removal is refused. A table owned at the end of the
+  plan is not deleted, even by a declared drop.
 - **Snapshot:** every proof is taken at `pre_migrate`, before the first operation.
   Rows the plan itself writes, such as a `RunPython` that fills storage a later
   operation of the plan drops, are not protected.

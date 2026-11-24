@@ -166,6 +166,22 @@ def check_native_history(apps: Apps, *, labels: Iterable[str]) -> None:
         raise RuntimeError(f"native migration history does not match composed models: {operations}")
 
 
+def _name_key(connection: BaseDatabaseWrapper, *, column: bool = False) -> Callable[[str], str]:
+    """How the backend tells two spellings of a table name, or of a column name, apart.
+
+    Where it ignores their case, spellings that casefold alike name one object: table
+    names where Django's ``ignores_table_name_case`` says so, column names on SQLite and
+    MySQL whatever that setting, and both where ``quote_name`` folds case, as Oracle's
+    does. Python's ``casefold`` stands in for the backend's own folding, which may join
+    fewer non-ASCII spellings. Elsewhere spellings compare exactly.
+    """
+    quote = connection.ops.quote_name
+    folds = quote("a") == quote("A") or (
+        connection.vendor in {"sqlite", "mysql"} if column else connection.features.ignores_table_name_case
+    )
+    return str.casefold if folds else str
+
+
 def _storage_identifier(connection: BaseDatabaseWrapper, identifier: str) -> tuple[str, str]:
     """Interpret only native Django's simple or double-quoted identifiers.
 
@@ -220,13 +236,10 @@ def _storage_identity(connection: BaseDatabaseWrapper, table: str, cursor: Any) 
         )
         row = cursor.fetchone()
         return (row[0], row[1]) if row else None
-    convert = connection.introspection.identifier_converter
-    tables = {convert(item) for item in connection.introspection.table_names(cursor)}
-    if name in tables:
-        return namespace, name
-    if connection.features.ignores_table_name_case:
-        raise ImproperlyConfigured(f"cannot prove case-sensitive storage identity for {table!r}")
-    return None
+    # A name no table matches, even in another case, is absent.
+    convert, key = connection.introspection.identifier_converter, _name_key(connection)
+    tables = {key(convert(item)) for item in connection.introspection.table_names(cursor)}
+    return (namespace, key(name)) if key(name) in tables else None
 
 
 def _allows_migrate_model(operation: Operation, alias: str, model: Any, *, offline: bool) -> bool:
@@ -335,6 +348,7 @@ def _shared_table_drops(
             try:
                 if not _allows_migrate_model(operation, alias, model, offline=not database):
                     continue
+                key = _name_key(connection)
                 for storage in dropped:
                     table = storage._meta.db_table
                     identity = _storage_identifier(connection, table)
@@ -348,10 +362,8 @@ def _shared_table_drops(
                         other = _storage_identifier(connection, active_table)
                         if identity == other:
                             remaining.add(active_storage._meta.label_lower)
-                        elif identity[1] == other[1] or (
-                            connection.vendor in {"sqlite", "mysql"}
-                            and identity[1].casefold() == other[1].casefold()
-                        ):
+                        elif key(identity[1]) == key(other[1]):
+                            # Another namespace or case: only the catalog can tell them apart.
                             if not database:
                                 raise ImproperlyConfigured(
                                     f"cannot resolve shared storage {table!r} and {active_table!r} offline"
@@ -475,23 +487,21 @@ def _proofs(
                         )
                         present = cursor.fetchone() is not None
                     else:
-                        convert = connection.introspection.identifier_converter
                         if connection.vendor == "postgresql":
                             # Native PostgreSQL introspection only describes
                             # visible unqualified tables; the cursor owns the
                             # actual columns of this fully quoted relation.
                             cursor.execute(f"SELECT * FROM {connection.ops.quote_name(table)} LIMIT 0")
-                            columns = {convert(field[0]) for field in cursor.description}
+                            names = [field[0] for field in cursor.description]
                         else:
-                            columns = {
-                                convert(field.name)
-                                for field in connection.introspection.get_table_description(
-                                    cursor, split_identifier(table)[1]
-                                )
-                            }
-                        present = name in columns
-                        if not present and connection.vendor == "mysql":
-                            raise ImproperlyConfigured(f"cannot prove column identity for {column!r}")
+                            description = connection.introspection.get_table_description(
+                                cursor, split_identifier(table)[1]
+                            )
+                            names = [field.name for field in description]
+                        # A name no column matches, even in another case, is absent.
+                        convert = connection.introspection.identifier_converter
+                        key = _name_key(connection, column=True)
+                        present = key(name) in {key(convert(item)) for item in names}
             held = rows(alias).using(alias) if present else None
             count = held.count() if held is not None and held.exists() else 0
         except (DatabaseError, ImproperlyConfigured) as error:
@@ -571,9 +581,8 @@ class _Storage:
     storage to its new name and a drop ends it. A name either of them vacates maps
     to ``None``: storage under it is storage the plan itself creates. ``created``
     holds the names before the plan of storage a native creation adds: storage
-    absent before the plan is the plan's own only under one of them. Where the
-    backend ignores the case of table names, a rename that changes only the case of
-    a table or column name moves no storage.
+    absent before the plan is the plan's own only under one of them. A rename between
+    two spellings the backend does not tell apart moves no storage; see ``_name_key``.
     """
 
     def __init__(self, connection: BaseDatabaseWrapper) -> None:
@@ -582,10 +591,12 @@ class _Storage:
         self.created: set[tuple[str, str | None]] = set()
         self.pending: list[tuple[Operation, str, str, str | None]] = []
         self.alias = connection.alias
-        self.ignores_case = connection.features.ignores_table_name_case
+        self.table_key = _name_key(connection)
+        self.column_key = _name_key(connection, column=True)
 
-    def _moves(self, old: str, new: str) -> bool:
-        return old != new and not (self.ignores_case and old.lower() == new.lower())
+    def _moves(self, old: str, new: str, *, column: bool = False) -> bool:
+        key = self.column_key if column else self.table_key
+        return key(old) != key(new)
 
     def table(self, name: str) -> str | None:
         return self.tables.get(name, name)
@@ -620,7 +631,7 @@ class _Storage:
                 field.concrete
                 and now.concrete
                 and table is not None
-                and self._moves(field.column, now.column)
+                and self._moves(field.column, now.column, column=True)
             ):
                 self.columns[table, now.column] = self.columns.get((table, field.column), field.column)
                 self.columns[table, field.column] = None
