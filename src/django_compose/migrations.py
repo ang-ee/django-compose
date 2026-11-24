@@ -36,7 +36,7 @@ from django.db.migrations.recorder import MigrationRecorder
 from django.db.migrations.state import ProjectState
 from django.db.migrations.utils import field_is_referenced, get_references
 from django.db.migrations.writer import MigrationWriter
-from django.db.models import QuerySet
+from django.db.models import ManyToManyField, QuerySet
 from django.db.models.expressions import DatabaseDefault
 from django.utils.module_loading import module_dir
 
@@ -913,11 +913,28 @@ def _relinks(operation: Operation, state: ProjectState, label: str) -> bool:
     )
 
 
+def _named(field: Any) -> tuple[Any, ...]:
+    """What names the storage of an unrendered ``field`` as Django's schema editor reads it:
+    its column, and for a many-to-many field its through model and, where Django creates
+    that through itself, its table name.
+
+    Only a ``ManyToManyField`` without a through gets an auto-created one, named by its
+    ``db_table``; ``alter_field`` renames only such a table and leaves a relation through an
+    explicit model alone, whatever the field's class, as for django-taggit's managers.
+    """
+    if not field.many_to_many:
+        return (field.column,)
+    through = field.remote_field.through
+    created = through is None and isinstance(field, ManyToManyField)
+    return field.column, through, field.db_table if created else None
+
+
 def _renamed(operation: Operation, state: ProjectState, label: str) -> tuple[str, str, dict[str, str]] | None:
     """The model whose storage a native operation may rename: before, after, renamed fields.
 
     An ``AlterField`` keeps its model's table, and its field's column or many-to-many
-    table unless what names it changes, which ``state`` shows without rendering.
+    table unless what names it changes, which ``state`` shows without rendering; see
+    ``_named``.
     """
     if isinstance(operation, RenameModel):
         return operation.old_name, operation.new_name, {}
@@ -932,8 +949,7 @@ def _renamed(operation: Operation, state: ProjectState, label: str) -> tuple[str
             for definition in (model.fields[operation.name], operation.field):
                 field: Any = definition.clone()
                 field.set_attributes_from_name(operation.name)
-                through = (field.db_table, field.remote_field.through) if field.many_to_many else None
-                names.append((field.column, through))
+                names.append(_named(field))
             if names[0] == names[1]:
                 return None
         return operation.model_name, operation.model_name, {}

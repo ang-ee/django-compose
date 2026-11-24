@@ -3158,3 +3158,112 @@ else:
     assert "tag_id" not in [column.name for column in described]
 """
     )
+
+
+TAGS_FIELD = '''
+from django.db.models.fields.related import ManyToManyRel, RelatedField, lazy_related_operation
+
+
+class Tags(RelatedField):
+    """A many-to-many relation through an explicit model that is not a ManyToManyField,
+    as django-taggit's TaggableManager is: it has no table name of its own."""
+
+    many_to_many = True
+    many_to_one = one_to_many = one_to_one = False
+
+    def __init__(self, to, through, **kwargs):
+        kwargs.update(rel=ManyToManyRel(self, to, through=through), null=True, serialize=False)
+        super().__init__(**kwargs)
+
+    def deconstruct(self):
+        name, path, args, kwargs = super().deconstruct()
+        for forced in ("null", "serialize"):
+            kwargs.pop(forced, None)
+        for attribute in ("model", "through"):
+            value = getattr(self.remote_field, attribute)
+            kwargs["to" if attribute == "model" else attribute] = (
+                value if isinstance(value, str) else value._meta.label_lower
+            )
+        return name, path, args, kwargs
+
+    def contribute_to_class(self, cls, name, **kwargs):
+        self.set_attributes_from_name(name)
+        self.model = cls
+        cls._meta.add_field(self)
+        for attribute in ("model", "through"):
+            if isinstance(getattr(self.remote_field, attribute), str):
+                def resolve(cls, model, field, attribute=attribute):
+                    setattr(field.remote_field, attribute, model)
+                lazy_related_operation(resolve, cls, getattr(self.remote_field, attribute), field=self)
+
+    def get_internal_type(self):
+        return "ManyToManyField"
+
+    def db_type(self, connection):
+        return None
+'''
+
+
+@pytest.mark.parametrize("change", ["alter", "rename", "remove"])
+def test_a_many_to_many_field_without_a_table_name_of_its_own_is_followed(host, change):
+    root, run = host
+    # As makemigrations writes it when a TaggableManager's help text changes, the plan
+    # alters, renames or removes a many-to-many relation through an explicit model that is
+    # not a ManyToManyField, then removes an empty column, on a database that stores data.
+    write(root, "alpha/fields.py", TAGS_FIELD)
+    link = '("{0}", models.ForeignKey("alpha.{0}", models.CASCADE))'
+    tags = 'alpha.fields.Tags(to="alpha.tag", through="alpha.link"{})'
+    migration(
+        root,
+        "0002_tags",
+        [
+            created("Tag"),
+            f'migrations.CreateModel(name="Link", fields=[{KEY}, {link.format("record")}, '
+            f"{link.format('tag')}])",
+            add_field("tags", tags.format("")),
+        ],
+        preamble="import alpha.fields",
+    )
+    operation = {
+        "alter": 'migrations.AlterField(model_name="record", name="tags", field={})'.format(
+            tags.format(", help_text='Topics'")
+        ),
+        "rename": 'migrations.RenameField(model_name="record", old_name="tags", new_name="labels")',
+        "remove": remove_field("tags"),
+    }[change]
+    migration(root, "0003_plan", [operation, REMOVE_OLD], after="0002_tags", preamble="import alpha.fields")
+    run(
+        PRELUDE
+        + """
+seed("0002_tags", old="")
+migrate()
+assert ("alpha", "0003_plan") in applied()
+assert columns() == ["id"]
+"""
+    )
+
+
+@pytest.mark.parametrize("rows", [0, 1])
+def test_a_many_to_many_table_an_alter_field_renames_is_probed_under_its_name_before_the_plan(host, rows):
+    root, run = host
+    # The plan names Record.links' auto-created through table, then removes the field.
+    links = 'models.ManyToManyField("alpha.Tag", related_name="+"{})'
+    migration(root, "0002_links", [created("Tag"), add_field("links", links.format(""))])
+    alter = 'migrations.AlterField(model_name="record", name="links", field={})'
+    renamed = alter.format(links.format(', db_table="alpha_links"'))
+    migration(root, "0003_plan", [renamed, remove_field("links")], after="0002_links")
+    run(
+        PRELUDE
+        + f"""
+seed("0002_links", old="")
+if {rows}:
+    with connection.cursor() as cursor:
+        cursor.execute("INSERT INTO alpha_tag (id) VALUES (1)")
+        cursor.execute("INSERT INTO alpha_record_links (record_id, tag_id) VALUES (1, 1)")
+    refusal = "(Remove field links from record): alpha.record: alpha_record_links.* holds data in 1 rows"
+    expect(CommandError, refusal, migrate)
+else:
+    migrate()
+    assert not {{"alpha_record_links", "alpha_links"}} & tables()
+"""
+    )
