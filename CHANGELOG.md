@@ -17,6 +17,8 @@
   system check `django_compose.E002`; `provision` refuses a shadowing `migrate`, the one
   it runs, before any database work.
 - `retire_history --purge` applies only the retired label's own migrations.
+- `django_compose.provision.TABLE` is gone: the provision record's table name is
+  `ProvisionRecorder.Record._meta.db_table`, read from the model that owns it.
 - The drop guard proves storage empty with one EXISTS query and counts rows only for a
   refusal. On a database that stores data it walks and renders the whole pending plan
   before the first operation, so `migrate` there takes seconds longer on a large plan:
