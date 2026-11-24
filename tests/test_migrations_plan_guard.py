@@ -1403,6 +1403,73 @@ assert ("alpha", "0003_untag") not in applied()
     )
 
 
+TAGGED = 'models.ForeignKey("alpha.Tag", models.SET_NULL, null=True, db_constraint=False)'
+ITEM = """
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    operations = [migrations.CreateModel(name="Item", fields=[
+        ("id", models.AutoField(primary_key=True, serialize=False)),
+        ("spare", models.CharField(max_length=40, default=""))])]
+"""
+
+
+@pytest.mark.parametrize("database", ["populated", "fresh", "later"])
+def test_a_state_the_walk_cannot_render_in_history_it_does_not_judge_stops_its_following(host, database):
+    root, run = host
+    # alpha's history is an installed distribution's. Its plan deletes Tag while Record.tag
+    # still points at it, which native migrate applies in place, while a fresh render of
+    # the state fails until the state-only removal of tag: at the column drop where data
+    # is stored, at the deletion of Spare where nothing is.
+    migration(root, "0002_tag", [created("Tag"), created("Spare"), add_field("tag", TAGGED)])
+    plan = [
+        'migrations.DeleteModel(name="Tag")',
+        add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)'),
+        REMOVE_OLD,
+        'migrations.DeleteModel(name="Spare")',
+        state_only(remove_field("tag")),
+    ]
+    migration(root, "0003_plan", plan, after="0002_tag")
+    write(root, "history/beta/0001_item.py", ITEM)
+    # beta's removals come later in the plan; with "later", one drops storage the walk
+    # no longer follows.
+    field = "models.CharField(max_length=4, null=True)"
+    extra = f'migrations.AddField(model_name="item", name="extra", field={field})'
+    removals = ['migrations.RemoveField(model_name="item", name="spare")']
+    if database == "later":
+        removals = [extra, *removals, 'migrations.RemoveField(model_name="item", name="extra")']
+    write(
+        root,
+        "history/beta/0002_drop.py",
+        f"""
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    dependencies = [("beta", "0001_item"), ("alpha", "0003_plan")]
+    operations = [{", ".join(removals)}]
+""",
+    )
+    run(
+        PRELUDE
+        + f"""
+import django_compose.migrations as guard
+guard._guarded = lambda labels: frozenset(labels) - {{"alpha"}}
+if {database!r} != "fresh":
+    seed("0002_tag")
+    MigrationExecutor(connection).migrate([("beta", "0001_item")])
+if {database!r} == "later":
+    refusal = (
+        "beta.0002_drop (Remove field extra from item): beta.item: cannot prove beta_item.extra empty on "
+        "'default' (the walk follows no name since it cannot render the migration state ("
+    )
+    expect(CommandError, refusal, migrate)
+    expect(CommandError, "at alpha.0003_plan)", migrate)
+    assert ("alpha", "0003_plan") not in applied()
+else:
+    migrate()
+    assert ("beta", "0002_drop") in applied()
+"""
+    )
+
+
 def test_table_renamed_after_a_state_only_adoption_keeps_its_rows_protected(host):
     root, run = host
     migration(root, "0002_adopt", [adopt("Ledger", delete_record=True)])

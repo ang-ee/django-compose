@@ -48,7 +48,10 @@ choices behind it.
   the plan's own was rejected: a `RunSQL` rename then left the renamed, populated
   storage to a later native drop unprobed. Custom SQL that moves storage under a name
   that held other storage before the plan, such as a swap of two tables, is not
-  detected: that needs parsing SQL.
+  detected: that needs parsing SQL. A state the walk cannot render in history the guard
+  does not judge stops its following instead of refusing the plan: the refusal named a
+  migration the project cannot edit, and a project without guarded drops must migrate
+  as it did before the guard.
 - **Render in place until a relation changes.** The walk keeps its state unrendered
   until it first needs a model, at a guarded removal or a rename that can change a
   storage name, renders it there in place, and lets Django's incremental reload keep

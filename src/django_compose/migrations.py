@@ -515,6 +515,7 @@ def _proofs(
     *,
     declared: bool,
     created: bool,
+    absent: str = _ABSENT,
 ) -> Iterator[tuple[str, str | None]]:
     """Yield each alias the operation drops ``dropped`` on, with a refusal if it holds data.
 
@@ -522,8 +523,8 @@ def _proofs(
     ``routed``, while ``model`` describes the storage as the database holds it now.
     A declared drop is routed but not probed. Absent storage holds nothing when
     ``created``; otherwise nothing accounts for its absence, so it cannot be proved
-    empty. One EXISTS query proves present storage empty; only storage holding data
-    is counted.
+    empty, for the reason ``absent`` gives. One EXISTS query proves present storage
+    empty; only storage holding data is counted.
     """
     table, column, rows = dropped
 
@@ -569,7 +570,7 @@ def _proofs(
             yield alias, None if declared else _unproved(model, dropped, alias, error)
             continue
         if not present and not created:
-            yield alias, _unproved(model, dropped, alias, _ABSENT)
+            yield alias, _unproved(model, dropped, alias, absent)
         elif count:
             yield (
                 alias,
@@ -1056,10 +1057,31 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         removals: list[tuple[Migration, _Removal]] = []
         # The models, by label, owning each table-dropping removal's table as it drops it.
         holding: list[set[str]] = []
+        # Whether the walk still follows names, and where it stopped if not.
+        following, stop = follow, ""
 
-        def rendered(state: ProjectState, label: str, name: str) -> Any:
-            storage.resolve_from(state)
-            return state.apps.get_model(label, name)
+        def rendered(migration: Migration, operation: Operation, state: ProjectState, name: str = "") -> Any:
+            """Name what held creations added, from ``state`` rendered in place where the walk
+            reads it at ``operation``, and return the model ``name`` of the app, if any.
+
+            Where Django cannot render the state afresh, though native ``migrate``, keeping
+            its rendering current in place, may apply the plan, history the guard judges is
+            refused; in other history the walk follows no name from there on, and ``None``
+            is returned.
+            """
+            nonlocal following, stop
+            label = migration.app_label
+            try:
+                if following:
+                    storage.resolve_from(state)
+                return state.apps.get_model(label, name) if name else None
+            except ValueError as error:
+                cause = f"cannot render the migration state ({error})"
+                if label in _guarded({label}):
+                    refuse(migration, operation, cause, _RENDER)
+                    raise _Unrendered from error
+                following, stop = False, f"it {cause} at {label}.{migration.name}"
+                return None
 
         def prove(
             migration: Migration,
@@ -1073,9 +1095,11 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                 return
             origin = storage.stored(dropped.table, dropped.column)
             declared = isinstance(operation, _INTENDED)
+            # Past where the walk stopped following names, it cannot account for storage.
+            unfollowed = f"the walk follows no name since {stop}" if stop else ""
             if origin is _VACATED:
                 if not declared and operation.allow_migrate_model(using, routed):
-                    refuse(migration, operation, _unproved(routed, dropped, using, _VACANT))
+                    refuse(migration, operation, _unproved(routed, dropped, using, unfollowed or _VACANT))
             elif origin is not None:
                 model, proof = routed, dropped
                 renamed = (origin.table, origin.column) != (dropped.table, dropped.column)
@@ -1085,7 +1109,14 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                     # Only names changed, never the field's kind, so the same storage is dropped.
                     proof = cast(_Dropped, _dropped(model, removed[1], policies, redefined=origin.redefined))
                 for _, refusal in _proofs(
-                    operation, routed, model, proof, (using,), declared=declared, created=origin.added
+                    operation,
+                    routed,
+                    model,
+                    proof,
+                    (using,),
+                    declared=declared,
+                    created=origin.added,
+                    absent=unfollowed or _ABSENT,
                 ):
                     if refusal is not None:
                         refuse(migration, operation, refusal)
@@ -1101,8 +1132,8 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                 try:
                     step(migration, operation, state, database=database)
                 except ValueError as error:
-                    # Django cannot render the state where the walk reads a model; nothing
-                    # after this operation can be followed.
+                    # Django cannot progress the state through this operation; nothing after
+                    # it can be followed.
                     refuse(migration, operation, f"cannot render the migration state ({error})", _RENDER)
                     raise _Unrendered from error
 
@@ -1113,7 +1144,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                     # Database operations progress their own state, as Django applies them.
                     progressed = state.clone()
                     judge(migration, operation.database_operations, progressed)
-                    storage.resolve_from(progressed)
+                    rendered(migration, operation, progressed)
                 judge(migration, operation.state_operations, state, database=False)
                 return
             if (
@@ -1122,10 +1153,10 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                 and type(operation).state_forwards is RunSQL.state_forwards
             ):
                 # Its SQL is not followed; RunSQL applies its state operations one by one.
-                storage.resolve_from(state)
+                rendered(migration, operation, state)
                 judge(migration, operation.state_operations, state, database=False)
                 return
-            if follow and isinstance(operation, RenameModel):
+            if following and isinstance(operation, RenameModel):
                 # A model that owned a dropped table keeps that claim under its new name.
                 old, new = (f"{label}.{name.lower()}" for name in (operation.old_name, operation.new_name))
                 for held in holding:
@@ -1138,32 +1169,38 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                 # Every routed removal the walk follows ends what it drops, whoever owns
                 # it, and where data is stored a judged one is proved; otherwise only the
                 # shared-table rule judges a removal that can drop a table.
-                if follow or drops_table:
-                    routed = rendered(state, label, removed[0])
+                routed = (
+                    rendered(migration, operation, state, removed[0])
+                    if following or drops_table or probe and judged
+                    else None
+                )
+                if routed is not None:
                     if drops_table:
                         removals.append((migration, (operation, routed, removed[1])))
                         # Only a followed walk asks whether a native operation filled the name.
-                        holding.append(_holders(state, routed, removed[1], connection) if follow else set())
+                        holding.append(
+                            _holders(state, routed, removed[1], connection) if following else set()
+                        )
                     if probe and judged:
                         prove(migration, operation, state, routed, removed)
-                    if follow and operation.allow_migrate_model(using, routed):
+                    if following and operation.allow_migrate_model(using, routed):
                         storage.end(routed, removed[1])
             # Custom database code, such as RunSQL or a subclass replacing Django's
             # database_forwards, is not followed. Storage it moves under a vacated name, or
             # under one absent before the plan that no native operation creates, cannot be
             # proved; under a name that held other storage before the plan, the walk probes
             # that storage instead, which only parsing the custom code could detect.
-            native = follow and database and _native(operation)
+            native = following and database and _native(operation)
             renamed = _renamed(operation, state, label) if native else None
             adds = _created(operation) if native else None
             if not native and not _leaves_state(operation):
                 # Name what earlier creations added before an operation the walk does
                 # not follow can rename it.
-                storage.resolve_from(state)
-            before_model = rendered(state, label, renamed[0]) if renamed else None
+                rendered(migration, operation, state)
+            before_model = rendered(migration, operation, state, renamed[0]) if renamed else None
             # Where data is stored, an alteration in any form may redefine what reads as
             # empty in a column; see _empty_changes.
-            altered = operation if probe and follow and isinstance(operation, AlterField) else None
+            altered = operation if probe and following and isinstance(operation, AlterField) else None
             before_field = None if altered is None else _field(state, label, altered)
             if "apps" in state.__dict__ and _relinks(operation, state, label):
                 # Render afresh where the walk next needs a model instead.
@@ -1174,11 +1211,11 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                 storage.add(altered, label, (altered.model_name, altered.name))
             # Django changes storage only where the operation migrates the model it
             # produces: never for a swapped model, nor on an alias routed away.
-            if renamed:
-                after_model = rendered(state, label, renamed[1])
-                if operation.allow_migrate_model(using, after_model):
+            if renamed and following:
+                after_model = rendered(migration, operation, state, renamed[1])
+                if after_model is not None and operation.allow_migrate_model(using, after_model):
                     storage.follow(before_model, after_model, renamed[2])
-            if adds:
+            if adds and following:
                 # Named at the walk's next render, before anything can rename it.
                 storage.add(operation, label, adds)
 
@@ -1200,15 +1237,25 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             )
         if not removals:
             return []
-        # Name what the plan's last creations added before asking what fills a name.
-        storage.resolve_from(state)
-        drops = [removal for _, removal in removals]
-        refilled = storage.refilled if follow else None
-        return [
-            (removals[index][0], removals[index][1][0], remedy, refusal)
-            for index, remedy, refusal in _shared_table_drops(
-                drops, state, (using,), catalog=probe, planned=True, refilled=refilled, holders=holding
+        try:
+            if following:
+                # Name what the plan's last creations added before asking what fills a name.
+                storage.resolve_from(state)
+            shared = _shared_table_drops(
+                [removal for _, removal in removals],
+                state,
+                (using,),
+                catalog=probe,
+                planned=True,
+                refilled=storage.refilled if following else None,
+                holders=holding,
             )
+        except ValueError as error:
+            # Without the end state, the rule cannot tell who still owns a dropped table.
+            cause = f"cannot render the migration state at the end of the plan ({error})"
+            return [(migration, operation, _RENDER, cause) for migration, (operation, _, _) in removals]
+        return [
+            (removals[index][0], removals[index][1][0], remedy, refusal) for index, remedy, refusal in shared
         ]
 
     shared = walk(follow=probe)

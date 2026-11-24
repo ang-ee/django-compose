@@ -523,8 +523,12 @@ It runs at two points on these rules:
   `--skip-checks`, through `migrations.check_plan_drops(plan, *, using)`. It judges a
   forward plan on the alias being migrated, on the graph native `migrate` planned with,
   including for a squash-replaced target, in the order the executor applies it. A
-  planned migration the walk cannot follow is refused by name, and so is an operation
-  where Django cannot render the migration state the walk reads.
+  planned migration the walk cannot follow is refused by name. Where the walk cannot
+  render afresh the migration state it reads at an operation, though native `migrate`,
+  which keeps its rendering current in place, may apply it, that operation is refused
+  in the history the guard judges; in other history the walk follows no name from that
+  operation on, so a later judged removal of storage it cannot account for is refused
+  as unproved.
 
 At `migrate`:
 
