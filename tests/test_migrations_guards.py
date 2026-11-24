@@ -461,8 +461,10 @@ with patch.object(connection, "cursor", side_effect=AssertionError("catalog quer
     changes = {{"alpha": [migrations.Migration("drop", "alpha")]}}
     changes["alpha"][0].operations = [migrations.DeleteModel("Record")]
     removals = list(_changed_removals(before, changes))
-    [(index, _, refusal)] = _shared_table_drops(removals, after, sorted(connections), catalog=False)
+    [(index, _, refusal, unsafe)] = _shared_table_drops(removals, after, sorted(connections), catalog=False)
     assert index == 0 and expected in refusal, refusal
+    # Names only the catalog could tell apart are not proved distinct, not known shared.
+    assert unsafe is (expected == "still owned"), refusal
 assert model._base_manager.count() == 0
 """)
 

@@ -351,17 +351,19 @@ _RESOLVE = (
 )
 
 
-def _unsafe(prefix: str, refusals: Iterable[tuple[str, str]], outcome: str = "") -> CommandError:
-    """One error naming every ``(remedy, refusal)``, then each distinct remedy once, in order."""
+def _refused(drop: str, refusals: Iterable[tuple[str, str, bool]], outcome: str = "") -> CommandError:
+    """One error naming every ``(remedy, refusal, unsafe)``, then each distinct remedy once,
+    in order: under "unsafe ``drop``" those that would destroy stored data or a table another
+    model owns, and under "cannot prove ``drop`` safe" those the guard cannot judge."""
     refusals = tuple(refusals)
-    remedies = dict.fromkeys(remedy for remedy, _ in refusals)
-    return CommandError(
-        f"{prefix}: "
-        + "; ".join(refusal for _, refusal in refusals)
-        + f".{outcome} To proceed, "
-        + "; ".join(remedies)
-        + "."
-    )
+    remedies = dict.fromkeys(remedy for remedy, _, _ in refusals)
+    headings = ((True, f"unsafe {drop}"), (False, f"cannot prove {drop} safe"))
+    parts = [
+        f"{heading}: " + "; ".join(refusal for _, refusal, unsafe in refusals if unsafe is kind)
+        for kind, heading in headings
+        if any(unsafe is kind for _, _, unsafe in refusals)
+    ]
+    return CommandError(". ".join(parts) + f".{outcome} To proceed, " + "; ".join(remedies) + ".")
 
 
 def _identities(connection: BaseDatabaseWrapper, table: str) -> tuple[tuple[str, str], tuple[str, str]]:
@@ -410,8 +412,9 @@ def _shared_table_drops(
     catalog: bool,
     planned: bool = False,
     refilled: Callable[[str], bool] | None = None,
-) -> list[tuple[int, str, str]]:
-    """Each removal, by position, that would drop a table a model of ``after`` still owns.
+) -> list[tuple[int, str, str, bool]]:
+    """Each removal, by position, that would drop a table a model of ``after`` still owns,
+    and whether it is known to, rather than not proved not to.
 
     Each comes with its remedy: declaring the drop cannot help a table that is not the
     removed model's alone, and storage whose identity cannot be resolved needs a name
@@ -428,7 +431,7 @@ def _shared_table_drops(
     """
     owners = tuple(_owners(after))
     aliases = tuple(aliases)
-    refusals: list[tuple[int, str, str]] = []
+    refusals: list[tuple[int, str, str, bool]] = []
     for index, (operation, model, field, owners_then) in enumerate(removals):
         dropped = tuple(_model_storage(model, removed_field=field))
         if not dropped:
@@ -480,10 +483,12 @@ def _shared_table_drops(
                                 index,
                                 _KEEP_SHARED,
                                 f"table {table!r} is still owned by {owners_text} on {alias!r}",
+                                True,
                             )
                         )
             except (DatabaseError, ImproperlyConfigured) as error:
-                refusals.append((index, _RESOLVE, f"cannot prove shared storage safe on {alias!r}: {error}"))
+                refusal = f"cannot prove shared storage safe on {alias!r}: {error}"
+                refusals.append((index, _RESOLVE, refusal, False))
     return refusals
 
 
@@ -579,9 +584,9 @@ def _proofs(
     *,
     added: bool,
     absent: str = _ABSENT,
-) -> Iterator[tuple[str | None, str]]:
+) -> Iterator[tuple[str | None, str, bool]]:
     """Yield a refusal for each alias the operation drops ``dropped`` on where it may hold
-    data, after the remedy it has of its own, if any.
+    data, after the remedy it has of its own, if any, and before whether it is known to.
 
     Routing is decided here, once per alias: Django routes the operation with
     ``routed``, the model it removes, while ``dropped`` names the storage as the
@@ -632,16 +637,16 @@ def _proofs(
             data = rows(alias) if present else None
             count = data.using(alias).count() if data is not None and data.using(alias).exists() else 0
         except _Undefined as error:
-            yield error.remedy, _unproved(routed, table, column, alias, error)
+            yield error.remedy, _unproved(routed, table, column, alias, error), False
             continue
         except Exception as error:
-            yield None, _unproved(routed, table, column, alias, f"{type(error).__name__}: {error}")
+            yield None, _unproved(routed, table, column, alias, f"{type(error).__name__}: {error}"), False
             continue
         if not present and not added:
-            yield None, _unproved(routed, table, column, alias, absent)
+            yield None, _unproved(routed, table, column, alias, absent), False
         elif count:
             storage = f"{table}.{column or '*'}"
-            yield None, f"{routed._meta.label_lower}: {storage} holds data in {count} rows on {alias!r}"
+            yield None, f"{routed._meta.label_lower}: {storage} holds data in {count} rows on {alias!r}", True
 
 
 _AUTHOR = "declare a reviewed cutover migration before native makemigrations"
@@ -670,18 +675,20 @@ class DropGuardAutodetector(MigrationAutodetector):
         aliases = sorted(connections)
         policies = _policies()
         refusals = [
-            (_AUTHOR, refusal)
+            (_AUTHOR, refusal, unsafe)
             for operation, model, field, _ in removals
             if (dropped := _dropped(model, field, policies)) is not None
             # A database that lags the history holds nothing in storage it lacks.
-            for _, refusal in _proofs(operation, model, dropped, aliases, added=True)
+            for _, refusal, unsafe in _proofs(operation, model, dropped, aliases, added=True)
         ]
         refusals.extend(
-            (remedy, refusal)
-            for _, remedy, refusal in _shared_table_drops(removals, self.to_state, aliases, catalog=True)
+            (remedy, refusal, unsafe)
+            for _, remedy, refusal, unsafe in _shared_table_drops(
+                removals, self.to_state, aliases, catalog=True
+            )
         )
         if refusals:
-            raise _unsafe("unsafe autodetected drop", refusals)
+            raise _refused("autodetected drop", refusals)
         return changes
 
 
@@ -695,11 +702,28 @@ _DECLARE = (
 )
 
 
-_RENDER = "order the history so that its state renders at every operation, each relation's target defined"
-_ADOPT = (
-    "migrate to the migration that adopts that storage first, for example "
-    "migrate <app> 0001 --fake-initial, then migrate"
+_RENDER = (
+    "order the history so that the migration state renders at each removal named here, each "
+    "relation's target defined, for example by making its migration depend on one past where "
+    "the drop guard stopped"
 )
+
+
+def _initial(migration: Migration) -> bool:
+    """Whether ``--fake-initial`` adopts the tables ``migration`` creates: an initial
+    migration, as ``MigrationExecutor.detect_soft_applied`` tells one."""
+    if migration.initial is None:
+        return not any(app == migration.app_label for app, _ in migration.dependencies)
+    return bool(migration.initial)
+
+
+def _adopt(creating: Migration | None) -> str:
+    """The remedy for stored rows that the state before the plan defines no field for:
+    migrate first to ``creating``, the migration whose native creation of the plan names
+    that storage, with ``--fake-initial`` where it adopts existing tables."""
+    if creating is None or not _initial(creating):
+        return "migrate first to the migration that gives that storage its model, then migrate"
+    return f"migrate {creating.app_label} {creating.name} --fake-initial first, then migrate"
 
 
 class _End(Exception):
@@ -713,10 +737,27 @@ class _End(Exception):
         super().__init__(f"cannot {doing} the migration state at {where} ({type(error).__name__}: {error})")
         self.migration = migration
 
+    def remedy(self, refused: Migration | None = None) -> str:
+        """The remedy for a removal of ``refused`` that the walk meets past where it stopped:
+        migrate there first, then the rest, from a state native ``migrate`` renders afresh.
+        Where nothing follows it in the plan, nothing but the order of the history helps a
+        removal of where it stopped, nor one before it."""
+        if self.migration is None or refused is None or refused is self.migration:
+            return _RENDER
+        label, name = self.migration.app_label, self.migration.name
+        return f"migrate {label} {name} first, where the drop guard stopped reading the history, then migrate"
 
-# A refused removal: its migration and operation, the remedy where the refusal
-# has one of its own (see _refusal), and the refusal.
-type _Refused = tuple[Migration, Operation, str | None, str]
+
+class _Refused(NamedTuple):
+    """A refused removal: its migration and operation, the remedy where the refusal has one
+    of its own (see ``_refusal``), the refusal, and whether the removal is known to destroy
+    stored data or a table another model owns, rather than not proved not to."""
+
+    migration: Migration
+    operation: Operation
+    remedy: str | None
+    refusal: str
+    unsafe: bool = False
 
 
 class _Vacated(Enum):
@@ -735,8 +776,10 @@ class _Origin(NamedTuple):
 
     table: str
     column: str | None
-    # Whether a native creation of the plan adds that storage, should it be absent before it.
+    # Whether a native creation of the plan adds that storage, should it be absent before
+    # it, and the migration of that creation.
     added: bool
+    creating: Migration | None = None
 
 
 class _Storage:
@@ -754,10 +797,10 @@ class _Storage:
     def __init__(self, connection: BaseDatabaseWrapper) -> None:
         self._tables: dict[str, _Before] = {}
         self._columns: dict[tuple[str, str | None], _Before] = {}
-        # The names before the plan of storage a native creation adds.
-        self._added: set[tuple[str, str | None]] = set()
+        # The names before the plan of storage a native creation adds, and its migration.
+        self._added: dict[tuple[str, str | None], Migration] = {}
         # Native creations the walk passed, whose storage it names at its next render.
-        self._unnamed: list[tuple[Operation, str, str, str | None]] = []
+        self._unnamed: list[tuple[Migration, Operation, str, str | None]] = []
         self._alias = connection.alias
         self._table_key = _name_key(connection)
         self._column_key = _name_key(connection, column=True)
@@ -806,9 +849,9 @@ class _Storage:
                 self._columns[self.key(table, now.column)] = self._column(after._meta.db_table, field.column)
                 self._columns[self.key(table, field.column)] = _VACATED
 
-    def creating(self, operation: Operation, label: str, named: tuple[str, str | None]) -> None:
+    def creating(self, migration: Migration, operation: Operation, named: tuple[str, str | None]) -> None:
         """Note the native creation of the model and field ``named``; see ``name_created``."""
-        self._unnamed.append((operation, label, *named))
+        self._unnamed.append((migration, operation, *named))
 
     def name_created(self, state: ProjectState) -> None:
         """Name the storage each creation noted since added, from ``state`` rendered since.
@@ -819,17 +862,18 @@ class _Storage:
         """
         if not self._unnamed:
             return
-        for operation, label, name, field in self._unnamed:
+        for migration, operation, name, field in self._unnamed:
             try:
-                model = state.apps.get_model(label, name)
+                model = state.apps.get_model(migration.app_label, name)
                 if operation.allow_migrate_model(self._alias, model):
-                    self._create(model, field)
+                    self._create(migration, model, field)
             except LookupError, FieldDoesNotExist:
                 continue
         self._unnamed.clear()
 
-    def _create(self, model: Any, field: str | None) -> None:
-        """Record the storage a native creation adds: a model's tables, or a field's table or column.
+    def _create(self, migration: Migration, model: Any, field: str | None) -> None:
+        """Record the storage a native creation of ``migration`` adds: a model's tables, or a
+        field's table or column.
 
         A vacated name it fills holds the plan's own storage from then on.
         """
@@ -844,13 +888,13 @@ class _Storage:
                 if origin is _VACATED:
                     self._tables[self._table_key(table)] = None
                 elif origin is not None:
-                    self._added.add(self.key(origin, None))
+                    self._added.setdefault(self.key(origin, None), migration)
             elif isinstance(origin, str):
                 before = self._column(table, column)
                 if before is _VACATED:
                     self._columns[self.key(origin, column)] = None
                 elif before is not None:
-                    self._added.add(self.key(origin, before))
+                    self._added.setdefault(self.key(origin, before), migration)
 
     def end(self, model: Any, field: str | None) -> None:
         """Record what a native removal drops: a deleted model's tables, its implicit
@@ -877,8 +921,8 @@ class _Storage:
         if not isinstance(before, str):
             return before
         names = (cast(str, self._table(table)), None if column is None else before)
-        added = not self._added.isdisjoint({self.key(names[0], None), self.key(*names)})
-        return _Origin(*names, added)
+        creating = self._added.get(self.key(*names)) or self._added.get(self.key(names[0], None))
+        return _Origin(*names, creating is not None, creating)
 
 
 def _as_stored(state: ProjectState, label: str, removed: tuple[str, str | None], table: str) -> Any:
@@ -1182,7 +1226,7 @@ class _Walk:
                 self._judge(migration, operations, state)
             shared = self._shared(state)
         except _End as end:
-            return [*self.refused, *self._ended(planned, str(end))]
+            return [*self.refused, *self._ended(planned, end)]
         return [*self.refused, *shared]
 
     def _shared(self, state: ProjectState) -> list[_Refused]:
@@ -1205,23 +1249,26 @@ class _Walk:
                 refilled=self.storage.refilled if self.following else None,
             )
         return [
-            (self.drops[index][0], self.drops[index][1].operation, remedy, refusal)
-            for index, remedy, refusal in shared
+            _Refused(self.drops[index][0], self.drops[index][1].operation, remedy, refusal, unsafe)
+            for index, remedy, refusal, unsafe in shared
         ]
 
-    def _ended(self, planned: Sequence[Migration], cause: str) -> list[_Refused]:
-        """Each judged removal the walk cannot read since it ended, for ``cause``, and each
+    def _ended(self, planned: Sequence[Migration], end: _End) -> list[_Refused]:
+        """Each judged removal the walk cannot read since it ended at ``end``, and each
         judged table drop it met, whose owners at the end of the plan it cannot tell."""
         removals = [
             (migration, operation)
             for migration in planned
             for operation in _database_removals(migration.operations)
         ]
-        unowned = f"cannot tell who owns its table at the end of the plan: the walk {cause}"
+        unowned = f"cannot tell who owns its table at the end of the plan: the walk {end}"
         return [
-            *((migration, removal.operation, _RENDER, unowned) for migration, removal in self.drops),
             *(
-                (migration, operation, _RENDER, cause)
+                _Refused(migration, removal.operation, end.remedy(), unowned)
+                for migration, removal in self.drops
+            ),
+            *(
+                _Refused(migration, operation, end.remedy(migration), str(end))
                 for migration, operation in removals[self.passed :]
                 if migration.app_label in self.judged
             ),
@@ -1281,7 +1328,7 @@ class _Walk:
         origin = self.storage.stored(table, column)
         if origin is _VACATED:
             self.refused.append(
-                (migration, operation, None, _unproved(routed, table, column, using, _UNFILLED))
+                _Refused(migration, operation, None, _unproved(routed, table, column, using, _UNFILLED))
             )
             return
         if origin is None:
@@ -1290,18 +1337,18 @@ class _Walk:
         if origin.column is not None:
             # Its rows were written under the definition its column had before the plan,
             # read only where the column is present.
-            before = (origin.table, origin.column)
-            proof = _Dropped(*before, lambda alias: self._written(*before))
+            before, creating = (origin.table, origin.column), origin.creating
+            proof = _Dropped(*before, lambda alias: self._written(*before, creating))
         elif origin.table != table:
             # Only the table's name changed, never what it holds.
             model = _as_stored(state, migration.app_label, removed, origin.table)
             proof = _dropped(model, field, self.policies)
         if proof is None:
             return
-        for remedy, refusal in _proofs(operation, routed, proof, (using,), added=origin.added):
-            self.refused.append((migration, operation, remedy, refusal))
+        for remedy, refusal, unsafe in _proofs(operation, routed, proof, (using,), added=origin.added):
+            self.refused.append(_Refused(migration, operation, remedy, refusal, unsafe))
 
-    def _written(self, table: str, column: str) -> QuerySet[Any] | None:
+    def _written(self, table: str, column: str, creating: Migration | None) -> QuerySet[Any] | None:
         """The rows holding data in column ``column`` of table ``table``, named as before the
         plan, judged by the definition they were written under: the field that the state
         before the plan stores in it, on a model that migrates on the alias.
@@ -1310,7 +1357,8 @@ class _Walk:
         ``None`` is returned. A field without a database type stores nothing in it. Every
         field stored in the column must agree on what reads as empty in it. Where none is,
         or they disagree, the rows cannot be judged, and ``_Undefined`` says why and, where
-        it differs from declaring the drop, what to do instead. This runs inside the proof
+        it differs from declaring the drop, what to do instead: where no field defines the
+        column, migrate first to ``creating``, see ``_adopt``. This runs inside the proof
         that ``_proofs`` reads, which also turns whatever resolving a field or evaluating a
         default raises into a column that cannot be proved empty.
         """
@@ -1322,7 +1370,7 @@ class _Walk:
             and field.db_parameters(connection=self.connection)["type"] is not None
         ]
         if not definitions:
-            raise _Undefined("the state before the plan defines no field stored in it", _ADOPT)
+            raise _Undefined("the state before the plan defines no field stored in it", _adopt(creating))
         empty = [(field.generated, None if field.generated else _empty(field)) for _, field in definitions]
         if any(type(value[1]) is not type(empty[0][1]) or value != empty[0] for value in empty):
             raise _Undefined(
@@ -1418,7 +1466,7 @@ class _Walk:
                 self.storage.follow(before_model, after_model, renamed[2])
         if creation:
             # Named at the walk's next render, before anything can rename it.
-            self.storage.creating(operation, label, creation)
+            self.storage.creating(migration, operation, creation)
 
     def _read(
         self, migration: Migration, operation: Operation, state: ProjectState, removed: tuple[str, str | None]
@@ -1439,8 +1487,10 @@ class _Walk:
             return
         routed = self._rendered(migration, state, removed[0])
         if routed is None:
-            if drops_table or self.probe and judged and not isinstance(operation, _INTENDED):
-                self.refused.append((migration, operation, _RENDER, str(self.blind)))
+            if self.blind and (drops_table or self.probe and judged and not isinstance(operation, _INTENDED)):
+                self.refused.append(
+                    _Refused(migration, operation, self.blind.remedy(migration), str(self.blind))
+                )
             return
         holders = _holders(state, routed, removed[1], self.connection) if drops_table else frozenset()
         if self.probe and judged:
@@ -1495,11 +1545,11 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                 guarded |= _guarded(unclassified)
         refused = [refusal for refusal in refused if refusal[0].app_label in guarded]
     if refused:
-        raise _unsafe(
-            "unsafe migration drop",
+        raise _refused(
+            "migration drop",
             (
-                _refusal(migration, operation, refusal, remedy)
-                for migration, operation, remedy, refusal in refused
+                (*_refusal(migration, operation, refusal, remedy), unsafe)
+                for migration, operation, remedy, refusal, unsafe in refused
             ),
             " Nothing was migrated.",
         )
@@ -1716,9 +1766,7 @@ def retire_history(label: str, *, purge: bool = False) -> None:
             )
             removals = tuple(_changed_removals(before, changes))
             if shared := _shared_table_drops(removals, after, sorted(connections), catalog=True):
-                raise _unsafe(
-                    "unsafe autodetected drop", ((remedy, refusal) for _, remedy, refusal in shared)
-                )
+                raise _refused("autodetected drop", (refusal[1:] for refusal in shared))
             for migration in changes.get(label, ()):
                 writer = MigrationWriter(migration, include_header=False)
                 path = Path(writer.path)

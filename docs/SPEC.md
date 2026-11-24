@@ -619,17 +619,27 @@ At `migrate`:
   operation of the plan drops, are not protected.
 - **Refusal:** one `CommandError` names every refused migration, operation, model,
   column or table and row count, shared tables included, and nothing is migrated, then
-  each remedy once. The remedy for a shared table is to keep it or change that owner
-  first, since declaring the drop cannot help; authoring and `retire_history --purge`
-  refuse it in the same words. Shared storage whose identity cannot be resolved needs
-  a name that can be. A column no field of the state before the plan is stored in
-  needs the plan to start after the migration that adopts it: migrate to that
-  migration first, such as `migrate <app> 0001 --fake-initial` for a table
-  `--fake-initial` adopts, then migrate. A plan that starts between the two halves of
+  each remedy once. Removals that would destroy stored data, or delete a table another
+  model still owns, come under `unsafe migration drop`, and those the guard cannot judge
+  under `cannot prove migration drop safe`. The remedy for a shared table is to keep it
+  or change that owner first, since declaring the drop cannot help; authoring and
+  `retire_history --purge` refuse it in the same words. Shared storage whose identity
+  cannot be resolved needs a name that can be. A column no field of the state before
+  the plan is stored in needs the plan to start after the migration that gives it one:
+  where a native creation of the plan names that storage, the refusal names its
+  migration, as `migrate <app> <migration> --fake-initial` where that is an initial
+  migration, whose tables `--fake-initial` adopts, and otherwise asks for the migration
+  that gives the storage its model. A plan that starts between the two halves of
   Django's documented move of a model between apps, after the old app's state-only
   deletion and before the new app's state-only creation, meets such columns too, and
-  the new app's creation is the migration to apply first. A state that cannot be
-  rendered or resolved needs the history ordered so that it can be.
+  the new app's creation is the migration to apply first. Where the walk stops
+  rendering or following the history, the refusal of a later migration names where it
+  stopped: `migrate <app> <migration>` first, then `migrate`, judges the rest from the
+  state native `migrate` renders afresh where it starts, which has to render there.
+  A removal of the migration where the walk stopped, or before it, and every refusal
+  where the end of the plan leaves the state unreadable, needs the history ordered so
+  that the state renders at that removal, for example by making its migration depend
+  on one past where the walk stopped.
 
 A migration declares a drop it intends with `IntendedRemoveField` or
 `IntendedDeleteModel` from `django_compose.operations`: native subclasses applied and

@@ -1647,7 +1647,9 @@ expect(CommandError, "alpha.0005_drop (Remove field old from record): " + ended,
 # Without the state at the end of the plan, no table drop can be told from a kept table.
 unowned = "alpha.0003_untag (Delete model Tag): cannot tell who owns its table at the end of the plan"
 expect(CommandError, unowned, migrate)
-expect(CommandError, "To proceed, order the history so that its state renders at every operation", migrate)
+# Migrating first to where the walk stopped would migrate the removal it refuses there.
+reorder = "To proceed, order the history so that the migration state renders at each removal"
+expect(CommandError, reorder, migrate)
 assert ("alpha", "0003_untag") not in applied()
 """
     )
@@ -1722,12 +1724,19 @@ else:
     else:
         raise AssertionError("expected a refusal")
     blind = "cannot render the migration state at alpha.0003_plan (ValueError: "
+    assert refusal.startswith("cannot prove migration drop safe: beta.0002_drop "), refusal
     assert "beta.0002_drop (Remove field spare from item): " + blind in refusal, refusal
     if {database!r} == "later":
         assert "beta.0002_drop (Remove field extra from item): " + blind in refusal, refusal
-    # alpha's history is not the project's to change, so none of its removals is refused.
+    # alpha's history is not the project's to change, so none of its removals is refused,
+    # and the remedy is to migrate past where the walk stopped first.
     assert "alpha.0003_plan (Delete" not in refusal and "alpha.0003_plan (Remove" not in refusal, refusal
+    remedy = "To proceed, migrate alpha 0003_plan first, where the drop guard stopped reading the history"
+    assert remedy in refusal, refusal
     assert ("alpha", "0003_plan") not in applied()
+    migrate("alpha", "0003_plan")
+    migrate()
+    assert ("beta", "0002_drop") in applied()
 """
     )
 
@@ -3041,7 +3050,9 @@ except RuntimeError as error:
     assert "does not match composed models" in str(error), error
 if {ends!r}:
     refusal = "alpha.0002_drop (Remove field old from record): cannot follow the migration state at "
-    expect(CommandError, refusal + "beta.0002_held ({error}: ", migrate)
+    heading = "cannot prove migration drop safe: "
+    expect(CommandError, heading + refusal + "beta.0002_held ({error}: ", migrate)
+    expect(CommandError, "To proceed, migrate beta 0002_held first", migrate)
     assert ("beta", "0002_held") not in applied()
 else:
     migrate()
@@ -3139,10 +3150,10 @@ with connection.cursor() as cursor:
     cursor.execute("CREATE TABLE legacy (id integer PRIMARY KEY AUTOINCREMENT, note varchar(10) NOT NULL)")
     cursor.execute("INSERT INTO legacy (note) VALUES ('')")
 refusal = (
-    "beta.0002_drop (Remove field note from legacy): beta.legacy: cannot prove legacy.note empty on "
-    "'default' (the state before the plan defines no field stored in it). Nothing was migrated. "
-    "To proceed, migrate to the migration that adopts that storage first, for example "
-    "migrate <app> 0001 --fake-initial, then migrate."
+    "cannot prove migration drop safe: beta.0002_drop (Remove field note from legacy): beta.legacy: "
+    "cannot prove legacy.note empty on 'default' (the state before the plan defines no field stored "
+    "in it). Nothing was migrated. To proceed, migrate beta 0001_initial --fake-initial first, then "
+    "migrate."
 )
 expect(CommandError, refusal, lambda: migrate(fake_initial=True))
 assert ("beta", "0001_initial") not in applied()
@@ -3365,5 +3376,44 @@ if {rows}:
 else:
     migrate()
     assert not {{"alpha_record_links", "alpha_links"}} & tables()
+"""
+    )
+
+
+def test_a_plan_starting_inside_a_move_between_apps_adopts_the_moved_table_first(host):
+    root, run = host
+    # As Django documents for moving a model between apps: alpha's half, applied before the
+    # plan, renames Record's table and deletes Record from its state; beta's half, in the
+    # plan, creates Record by state alone over that table, and a later migration removes a
+    # column of it. Before the plan no field is stored in that column, and no native
+    # creation of the plan names it, so the remedy is to migrate to the adoption first.
+    moved = state_only('migrations.DeleteModel(name="Record")').replace(
+        "state_operations=",
+        'database_operations=[migrations.AlterModelTable(name="record", table="moved")], state_operations=',
+    )
+    migration(root, "0002_move_out", [moved])
+    record = f'migrations.CreateModel(name="Record", fields={FIELDS}, options={{"db_table": "moved"}})'
+    beta(root, "0001_move_in", [state_only(record)], [("alpha", "0002_move_out")])
+    beta(
+        root,
+        "0002_drop",
+        ['migrations.RemoveField(model_name="record", name="old")'],
+        [("beta", "0001_move_in")],
+    )
+    run(
+        PRELUDE
+        + """
+seed(old="")
+MigrationExecutor(connection).migrate([("alpha", "0002_move_out")])
+refusal = (
+    "beta.0002_drop (Remove field old from record): beta.record: cannot prove moved.old empty on "
+    "'default' (the state before the plan defines no field stored in it)"
+)
+expect(CommandError, refusal, migrate)
+remedy = "To proceed, migrate first to the migration that gives that storage its model, then migrate."
+expect(CommandError, remedy, migrate)
+migrate("beta", "0001_move_in")
+migrate()
+assert ("beta", "0002_drop") in applied()
 """
     )
