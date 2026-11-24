@@ -42,15 +42,17 @@ choices behind it.
   the plan adds it. Treating all absent storage as the plan's own was rejected: a
   `RunSQL` rename then left the renamed, populated storage to a later native drop
   unprobed.
-- **Render where a model is needed.** The walk keeps its state unrendered and renders
-  a full copy of it at each guarded removal, before and after each rename that can
-  change a storage name, and once at the end. An `AlterField` that changes no column
-  or many-to-many table name is read from the unrendered state. Keeping one state
-  rendered, as native `migrate` does, was rejected: Django's incremental reload then
-  re-renders, at each operation that changes a relation, every model related to the
-  one it changes, which where models share a hub is nearly the whole state at nearly
-  every operation. The cost is two full renders per storage rename, so a plan of many
-  renames renders more than native `migrate`.
+- **Render in place until a relation changes.** The walk keeps its state unrendered
+  until it first needs a model, at a guarded removal or a rename that can change a
+  storage name, renders it there in place, and lets Django's incremental reload keep
+  it current. Before an operation that creates a model with a relational field, or
+  adds, removes or alters one, it drops the rendering and renders afresh at its next
+  need, since Django would re-render every related model recursively, which where
+  models share a hub is nearly the whole state. An `AlterField` that changes no column
+  or many-to-many table name is read from the unrendered state. Rendering a fresh copy
+  at each use was rejected because every rename then cost two full renders; keeping
+  one rendering throughout was rejected because a composed host's history then cost
+  twenty times as much.
 - **Nothing stored, nothing probed.** An alias with no table but the recorders holds
   no data, so it is not probed; the shared-table rule needs no data and applies there
   from names alone. Skipping the whole walk was rejected: a plan refused on every

@@ -1430,8 +1430,8 @@ with override_settings(DATABASE_ROUTERS=[Disjoint()]):
     )
 
 
-@pytest.mark.parametrize("plan", ["renames", "widening"])
-def test_the_walk_renders_the_state_only_where_it_needs_a_model(host, plan):
+@pytest.mark.parametrize("plan", ["renames", "widening", "relation"])
+def test_the_walk_renders_its_state_in_place_until_a_relation_changes(host, plan):
     root, run = host
 
     def alter(**options):
@@ -1439,13 +1439,17 @@ def test_the_walk_renders_the_state_only_where_it_needs_a_model(host, plan):
         field = f'models.CharField(max_length=80, default=""{extra})'
         return f'migrations.AlterField(model_name="record", name="old", field={field})'
 
-    if plan == "renames":
-        operations = [
+    rename = 'migrations.RenameField(model_name="record", old_name="old", new_name="kept")'
+    operations = {
+        "renames": [alter(db_column="legacy"), rename],
+        "widening": [alter(), alter(), alter()],
+        # A relational field makes Django re-render related models recursively.
+        "relation": [
             alter(db_column="legacy"),
-            'migrations.RenameField(model_name="record", old_name="old", new_name="kept")',
-        ]
-    else:
-        operations = [alter(), alter(), alter()]
+            add_field("parent", 'models.ForeignKey("alpha.Record", models.CASCADE, null=True)'),
+            rename,
+        ],
+    }[plan]
     migration(root, "0002_spare", [add_field("spare")])
     migration(root, "0003_drop", [*operations, remove_field("spare")], after="0002_spare")
     run(
@@ -1470,12 +1474,13 @@ def counted(plan, *, using):
         judge(plan, using=using)
 with patch("django_compose.management.commands.migrate.check_plan_drops", counted):
     migrate()
-# Each full render renders the whole state, here one model. A widening AlterField
-# renders nothing; each storage rename renders before and after it; the removal and
-# the end of the plan once each.
-assert registries == [1] * {{"renames": 6, "widening": 2}}[{plan!r}], registries
-assert len(models) == len(registries), models
-assert columns() == ["id", "legacy" if {plan!r} == "renames" else "old"]
+# One full render serves every later rename and removal while Django keeps it current
+# cheaply, re-rendering only the changed model. A widening AlterField renders nothing
+# before the removal. A relational field would make Django re-render related models
+# recursively, so the walk drops its rendering there and renders afresh at its next need.
+full, rendered = {{"renames": (1, 4), "widening": (1, 2), "relation": (2, 5)}}[{plan!r}]
+assert registries == [1] * full, registries
+assert models == ["Record"] * rendered, models
 """
     )
 

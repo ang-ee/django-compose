@@ -699,15 +699,22 @@ class _Storage:
         return model, cast(_Dropped, _dropped(model, field, policies)), created
 
 
-def _rendered(state: ProjectState) -> Apps:
-    """The models of ``state``, from a full render of a clone, so ``state`` stays unrendered.
+def _relinks(operation: Operation, state: ProjectState, label: str) -> bool:
+    """Whether Django re-renders, recursively, every model related to the one ``operation`` changes.
 
-    A rendered state stays current through Django's incremental reload, which at each
-    operation that changes a relation re-renders every model related to the one it
-    changes: where models share a hub, nearly the whole state at nearly every
-    operation. Each call here costs one full render instead.
+    ``ProjectState`` delays re-rendering relations except where an operation creates a
+    model with a relational field, or adds, removes or alters a relational field. Where
+    models share a hub, that re-renders nearly the whole state.
     """
-    return state.clone().apps
+    if isinstance(operation, CreateModel):
+        return any(field.is_relation for _, field in operation.fields)
+    if isinstance(operation, AddField | AlterField):
+        return bool(operation.field.is_relation)
+    if isinstance(operation, RemoveField):
+        model = state.models.get((label, operation.model_name_lower))
+        field = None if model is None else model.fields.get(operation.name)
+        return field is not None and bool(field.is_relation)
+    return False
 
 
 def _renamed(operation: Operation, state: ProjectState, label: str) -> tuple[str, str, dict[str, str]] | None:
@@ -826,14 +833,15 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
     walk probes nothing and follows no rename, and only the shared-table rule, which
     needs no data, applies, offline.
 
-    The walk keeps its state unrendered and renders a full copy of it where it needs
-    a model: at each guarded removal, before and after each rename that can change a
-    storage name, and once at the end. An ``AlterField`` that changes no column or
-    many-to-many table name is read from the unrendered state. Storage a native
-    creation adds is named at the next of those renders, or at one made before an
-    operation the walk does not follow. A plan of many storage renames therefore
-    renders more than native ``migrate`` does. The
-    pre-plan state is the one native ``migrate`` builds, through the private
+    The walk renders its own state in place where it needs a model: at a guarded
+    removal, at a rename that can change a storage name, and at the end. Django's
+    incremental reload then keeps the rendering current while it is cheap, and the
+    walk drops it before an operation that changes a relation, where Django would
+    re-render every related model recursively; see ``_relinks``. An ``AlterField``
+    that changes no column or many-to-many table name is read from the state without
+    rendering it. Storage a native creation adds is named where the walk next renders,
+    or before an operation the walk does not follow. The pre-plan state is the one
+    native ``migrate`` builds, through the private
     ``MigrationExecutor._create_project_state``, on the graph native ``migrate``
     planned with: re-check both on each Django upgrade.
     """
@@ -864,9 +872,8 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         refusals.append((remedy or _DECLARE, f"{label}.{migration.name} ({operation.describe()}): {refusal}"))
 
     def rendered(state: ProjectState, label: str, name: str) -> Any:
-        apps = _rendered(state)
-        storage.resolve(apps)
-        return apps.get_model(label, name)
+        storage.resolve(state.apps)
+        return state.apps.get_model(label, name)
 
     def judge(
         migration: Migration, operations: Iterable[Operation], state: ProjectState, *, database: bool = True
@@ -879,7 +886,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                     progressed = state.clone()
                     judge(migration, operation.database_operations, progressed)
                     if storage.pending:
-                        storage.resolve(_rendered(progressed))
+                        storage.resolve(progressed.apps)
                 judge(migration, operation.state_operations, state, database=False)
                 continue
             removed = _removal(operation)
@@ -910,8 +917,11 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             if storage.pending and not native and not _leaves_state(operation):
                 # Name what earlier creations added before an operation the walk does
                 # not follow can rename it.
-                storage.resolve(_rendered(state))
+                storage.resolve(state.apps)
             before_model = rendered(state, label, renamed[0]) if renamed else None
+            if "apps" in state.__dict__ and _relinks(operation, state, label):
+                # Render afresh where the walk next needs a model instead.
+                del state.apps
             operation.state_forwards(label, state)
             # Django changes storage only where the operation migrates the model it
             # produces: never for a swapped model, nor on an alias routed away.
