@@ -671,11 +671,15 @@ class _Storage:
             if before is not None and (column is None or (column := self.column(table, column)) is not None):
                 self.created.add((before, column))
 
-    def end(self, dropped: _Dropped) -> None:
-        if dropped.column is None:
-            self.tables[dropped.table] = None
-        elif (table := self.table(dropped.table)) is not None:
-            self.columns[table, dropped.column] = None
+    def end(self, model: Any, field: str | None) -> None:
+        """Record what a native removal drops: a deleted model's tables, its implicit
+        many-to-many tables among them, or a removed field's column or many-to-many table."""
+        if field is not None and not (definition := model._meta.get_field(field)).many_to_many:
+            if definition.concrete and (table := self.table(model._meta.db_table)) is not None:
+                self.columns[table, definition.column] = None
+            return
+        for storage in _model_storage(model, removed_field=field):
+            self.tables[storage._meta.db_table] = None
 
     def stored(
         self,
@@ -963,7 +967,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                 ):
                     if refusal is not None:
                         refuse(migration, operation, refusal)
-                    storage.end(dropped)
+                    storage.end(routed, removed[1])
         # Custom database code, such as RunSQL or a subclass replacing Django's
         # database_forwards, is not followed: storage it renames or creates is absent
         # before the plan under a name no native operation accounts for.

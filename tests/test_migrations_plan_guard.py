@@ -943,6 +943,29 @@ assert "alpha_record" not in tables()
     )
 
 
+def test_a_deleted_models_many_to_many_table_is_ended_with_it(host):
+    root, run = host
+    tags = 'models.ManyToManyField("alpha.Tag")'
+    tag = 'migrations.CreateModel(name="Tag", fields=[("id", models.AutoField(primary_key=True))])'
+    migration(root, "0002_tags", [tag, add_field("tags", tags)])
+    # The declared deletion drops alpha_record and its implicit alpha_record_tags; the new
+    # Record's tags table is the plan's own, created where that deletion freed the name.
+    fields = f'("id", models.AutoField(primary_key=True)), ("tags", {tags})'
+    again = f'migrations.CreateModel(name="Record", fields=[{fields}])'
+    migration(root, "0003_again", ['IntendedDeleteModel(name="Record")', again], after="0002_tags")
+    migration(root, "0004_untag", [remove_field("tags")], after="0003_again")
+    run(
+        PRELUDE
+        + """
+Record = seed("0002_tags", old="dropped as declared")
+Tag = Record._meta.get_field("tags").related_model
+Record._base_manager.get().tags.add(Tag._base_manager.create())
+migrate()
+assert "alpha_record_tags" not in tables()
+"""
+    )
+
+
 @pytest.mark.parametrize("declared", [False, True])
 def test_table_owned_at_the_end_of_the_plan_is_not_deleted(host, declared):
     root, run = host
