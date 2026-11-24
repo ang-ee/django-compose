@@ -547,7 +547,11 @@ At `migrate`:
   as `uv sync` or `pip install -e` makes, which records the project directory as PEP
   610 `dir_info`.
 - **Probe:** each removal is routed and defined by the plan's state at that operation,
-  and its storage is probed under the name it had before the plan. The walk follows
+  and its storage is probed under the name it had before the plan. Its rows were
+  written under the definition the field had then, which the guard does not keep:
+  where an `AlterField` of the plan, in any form, changes the field's class, `null`,
+  `default` or `db_default`, from which Django derives its default, only NULL is empty
+  in that column. The walk follows
   every rename the plan's database operations make, whoever owns them:
   `AlterModelTable`, `RenameModel`, `RenameField` and `AlterField`. It follows each
   where Django applies it, on an alias that migrates the model the operation produces,

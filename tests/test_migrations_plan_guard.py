@@ -436,6 +436,35 @@ else:
     )
 
 
+@pytest.mark.parametrize("alteration", ["native", "state_only", "run_sql", "widening"])
+def test_a_column_the_plan_redefines_is_empty_only_at_null(host, alteration):
+    root, run = host
+    # old's rows hold "kept" under its default "". Judged by a default the plan changes to
+    # "kept", they would read as empty; a widening changes nothing that reads as empty.
+    default = "kept" if alteration != "widening" else ""
+    field = f'models.CharField(max_length={80 if alteration == "widening" else 40}, default="{default}")'
+    alter = f'migrations.AlterField(model_name="record", name="old", field={field})'
+    wrapped = {
+        "native": alter,
+        "widening": alter,
+        "state_only": state_only(alter),
+        "run_sql": f"migrations.RunSQL(migrations.RunSQL.noop, state_operations=[{alter}])",
+    }[alteration]
+    migration(root, "0002_drop", [wrapped, REMOVE_OLD])
+    run(
+        PRELUDE
+        + f"""
+seed(old="kept")
+if {alteration!r} == "widening":
+    # A widening leaves "" as old's empty value: only "kept" holds data.
+    seed(old="")
+refusal = "(Remove field old from record): alpha.record: alpha_record.old holds data in 1 rows"
+expect(CommandError, refusal, migrate)
+assert columns() == ["id", "old"]
+"""
+    )
+
+
 def test_storage_the_plan_creates_is_absent_before_it_and_skipped(host):
     root, run = host
     migration(

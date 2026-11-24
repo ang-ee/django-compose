@@ -74,6 +74,21 @@ CASES = {
         ["kept"],
         "table 'alpha_record' is still owned by alpha.shadow on 'default'",
     ),
+    # Rows hold "kept" under old's default "": judged by the default the plan gives old
+    # before removing it, they would read as empty.
+    "default_change": _Case(
+        [
+            [_create("Record")],
+            [
+                'migrations.AlterField(model_name="record", name="old", '
+                'field=models.CharField(max_length=40, default="kept"))',
+                'migrations.RemoveField(model_name="record", name="old")',
+            ],
+        ],
+        1,
+        ["kept"],
+        "alpha.record: alpha_record.old holds data in 1 rows on 'default'",
+    ),
 }
 
 

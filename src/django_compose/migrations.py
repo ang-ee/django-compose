@@ -448,10 +448,13 @@ def _policies() -> tuple[MigrationPolicy, ...]:
     )
 
 
-def _dropped(model: Any, field: str | None, policies: tuple[MigrationPolicy, ...]) -> _Dropped | None:
+def _dropped(
+    model: Any, field: str | None, policies: tuple[MigrationPolicy, ...], *, redefined: bool = False
+) -> _Dropped | None:
     """Apply the shared emptiness rules to a deleted model or one removed field.
 
-    Null columns are empty at NULL; non-null columns use their native default.
+    Null columns are empty at NULL; non-null columns use their native default, unless
+    the column was ``redefined`` since its rows were written: then only NULL is empty.
     A database default cannot prove emptiness. Explicit through models and
     generated columns own no independently dropped storage. ``policies`` may
     explicitly retire rows of a deleted table; other rows remain protected.
@@ -474,7 +477,7 @@ def _dropped(model: Any, field: str | None, policies: tuple[MigrationPolicy, ...
         return _Dropped(through._meta.db_table, None, lambda alias: QuerySet(through))
     if not removed.concrete or removed.generated:
         return None
-    empty = None if removed.null else removed.get_default()
+    empty = None if removed.null or redefined else removed.get_default()
     query: QuerySet[Any] = QuerySet(model)
     if empty is None:
         query = query.exclude(**{f"{removed.attname}__isnull": True})
@@ -643,6 +646,8 @@ class _Origin(NamedTuple):
     column: str | None
     # Whether a native creation of the plan adds that storage, should it be absent before it.
     added: bool
+    # Whether an alteration of the plan changed what reads as empty in that column.
+    redefined: bool
 
 
 class _Storage:
@@ -662,6 +667,8 @@ class _Storage:
         self._columns: dict[tuple[str, str | None], _Before] = {}
         # The names before the plan of storage a native creation adds.
         self._added: set[tuple[str, str | None]] = set()
+        # The names before the plan of columns an alteration redefined; see _empty_changes.
+        self._redefined: set[tuple[str, str | None]] = set()
         self._held: list[tuple[Operation, str, str, str | None]] = []
         self._alias = connection.alias
         self._table = _name_key(connection)
@@ -711,26 +718,40 @@ class _Storage:
                 self._columns[self._key(table, field.column)] = _VACATED
 
     def add(self, operation: Operation, label: str, created: tuple[str, str | None]) -> None:
-        """Hold the native creation of the model and field ``created`` names until ``resolve_from``."""
+        """Hold the native creation, or the ``AlterField``, of the model and field
+        ``created`` names until ``resolve_from``."""
         self._held.append((operation, label, *created))
 
     def resolve_from(self, state: ProjectState) -> None:
-        """Name the storage each held creation added, from ``state`` rendered since.
+        """Name the storage each held creation added, or alteration redefined, from
+        ``state`` rendered since.
 
         Nothing is rendered while nothing is held. Django creates storage only where the
-        operation migrates the model. A model or field removed in between is left
-        unnamed, so its absent storage stays refused.
+        operation migrates the model; an alteration redefines the column wherever its
+        rows lie. A model or field removed in between is left unnamed, so its absent
+        storage stays refused.
         """
         if not self._held:
             return
         for operation, label, name, field in self._held:
             try:
                 model = state.apps.get_model(label, name)
-                if operation.allow_migrate_model(self._alias, model):
+                if isinstance(operation, AlterField):
+                    self._redefine(model, cast(str, field))
+                elif operation.allow_migrate_model(self._alias, model):
                     self._create(model, field)
             except LookupError, FieldDoesNotExist:
                 continue
         self._held.clear()
+
+    def _redefine(self, model: Any, field: str) -> None:
+        """Record that an alteration redefined the column of ``model``'s ``field``."""
+        definition = model._meta.get_field(field)
+        origin = self.table(model._meta.db_table)
+        if definition.concrete and isinstance(origin, str):
+            before = self.column(model._meta.db_table, definition.column)
+            if isinstance(before, str):
+                self._redefined.add(self._key(origin, before))
 
     def _create(self, model: Any, field: str | None) -> None:
         """Record the storage a native creation adds: a model's tables, or a field's table or column.
@@ -781,7 +802,8 @@ class _Storage:
         if not isinstance(before, str):
             return before
         names = (cast(str, self.table(table)), None if column is None else before)
-        return _Origin(*names, not self._added.isdisjoint({self._key(names[0], None), self._key(*names)}))
+        added = not self._added.isdisjoint({self._key(names[0], None), self._key(*names)})
+        return _Origin(*names, added, column is not None and self._key(*names) in self._redefined)
 
 
 def _as_stored(state: ProjectState, label: str, removed: tuple[str, str | None], origin: _Origin) -> Any:
@@ -859,6 +881,23 @@ def _renamed(operation: Operation, state: ProjectState, label: str) -> tuple[str
                 return None
         return operation.model_name, operation.model_name, {}
     return None
+
+
+def _field(state: ProjectState, label: str, operation: AlterField) -> Any:
+    """The field an ``AlterField`` alters as ``state`` defines it, or ``None``."""
+    model = state.models.get((label, operation.model_name_lower))
+    return None if model is None else model.fields.get(operation.name)
+
+
+def _empty_changes(before: Any, after: Any) -> bool:
+    """Whether altering field ``before`` into ``after`` can change what reads as empty in
+    its column: Django derives a field's default from its class, ``null``, ``default``
+    and ``db_default``. The guard keeps no definition from before the plan, so a column
+    so redefined is empty only at NULL; see ``_dropped``."""
+    return before is not None and (
+        type(before) is not type(after)
+        or any(getattr(before, name) != getattr(after, name) for name in ("null", "default", "db_default"))
+    )
 
 
 def _created(operation: Operation) -> tuple[str, str | None] | None:
@@ -963,11 +1002,11 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
     removal, at a rename that can change a storage name, and at the end. Django's
     incremental reload then keeps the rendering current while it is cheap, and the
     walk drops it before an operation where Django would re-render every related
-    model recursively; see ``_relinks``. An ``AlterField``
-    that changes no column or many-to-many table name is read from the state without
-    rendering it. Storage a native creation adds is named where the walk next renders,
-    or before an operation the walk does not follow. The pre-plan state is the one
-    native ``migrate`` builds, through the private
+    model recursively; see ``_relinks``. An ``AlterField`` that changes no column or
+    many-to-many table name is read from the state without rendering it. Storage a
+    native creation adds, and a column an alteration redefines, are named where the walk
+    next renders, or before an operation the walk does not follow. The pre-plan state is
+    the one native ``migrate`` builds, through the private
     ``MigrationExecutor._create_project_state``, on the graph native ``migrate``
     planned with. Re-check on each Django upgrade: that private call, that graph,
     ``_relinks`` against ``ProjectState``'s reload rule, and the cached ``apps``
@@ -1029,10 +1068,12 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                     refuse(migration, operation, _unproved(routed, dropped, using, _VACANT))
             elif origin is not None:
                 model, proof = routed, dropped
-                if (origin.table, origin.column) != (dropped.table, dropped.column):
+                renamed = (origin.table, origin.column) != (dropped.table, dropped.column)
+                if renamed:
                     model = _as_stored(state, migration.app_label, removed, origin)
+                if renamed or origin.redefined:
                     # Only names changed, never the field's kind, so the same storage is dropped.
-                    proof = cast(_Dropped, _dropped(model, removed[1], policies))
+                    proof = cast(_Dropped, _dropped(model, removed[1], policies, redefined=origin.redefined))
                 for _, refusal in _proofs(
                     operation, routed, model, proof, (using,), declared=declared, created=origin.added
                 ):
@@ -1110,10 +1151,17 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                 # not follow can rename it.
                 storage.resolve_from(state)
             before_model = rendered(state, label, renamed[0]) if renamed else None
+            # Where data is stored, an alteration in any form may redefine what reads as
+            # empty in a column; see _empty_changes.
+            altered = operation if probe and follow and isinstance(operation, AlterField) else None
+            before_field = None if altered is None else _field(state, label, altered)
             if "apps" in state.__dict__ and _relinks(operation, state, label):
                 # Render afresh where the walk next needs a model instead.
                 del state.apps
             operation.state_forwards(label, state)
+            if altered and _empty_changes(before_field, _field(state, label, altered)):
+                # Named at the walk's next render, like a creation.
+                storage.add(altered, label, (altered.model_name, altered.name))
             # Django changes storage only where the operation migrates the model it
             # produces: never for a swapped model, nor on an alias routed away.
             if renamed:
