@@ -356,6 +356,9 @@ def _environment(tmp_path: Path) -> dict[str, str]:
     environment = dict(os.environ)
     environment.pop("DJANGO_SETTINGS_MODULE", None)
     environment.pop("DJANGO_COMPOSE_MODE", None)
+    # A source a test rewrites at the same size within the same second would otherwise
+    # be served from the bytecode cached for its earlier content.
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["PYTHONPATH"] = os.pathsep.join(
         filter(None, (str(tmp_path), str(source_root / "src"), environment.get("PYTHONPATH", "")))
     )
