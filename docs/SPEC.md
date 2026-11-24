@@ -527,10 +527,14 @@ It runs at two points on these rules:
   forward plan on the alias being migrated, on the graph native `migrate` planned with,
   including for a squash-replaced target, in the order the executor applies it. A
   planned migration the walk cannot follow is refused by name. Where the walk cannot
-  render afresh the migration state it reads at an operation, though native `migrate`,
-  which keeps its rendering current in place, may apply it, the walk follows no name
-  from that operation on, whichever history left the state so; only a judged removal
-  it then cannot render, or whose storage it cannot account for, is refused.
+  render afresh the migration state it reads, though native `migrate`, which keeps its
+  rendering current in place, may apply it, or cannot copy an operation or move that
+  state forward through it, the walk ends there, whichever history left it so. From there
+  on every removal in the history the guard judges is refused, however empty, and so
+  is every such table drop the walk met, whose owners at the end of the plan it cannot
+  tell; a plan without one applies as native `migrate` applies it. Without the state,
+  a field's removal cannot be told from a many-to-many table's, so on a database that
+  stores nothing a column removal is refused there too.
 
 At `migrate`:
 
@@ -624,15 +628,14 @@ command.
 Faked and backwards plans are not judged. `RunSQL` and other custom database code are
 not parsed: a drop they make is not judged, and the walk follows no rename they make.
 Beside the storage the probe refuses, under a vacated name or one absent before the
-plan, storage they move under a name the walk accounts for is not detected: under a
-name that held other storage before the plan, the guard probes that other storage, and
-under one a native operation of the plan created or filled, it takes the storage for
-the plan's own and probes nothing. That includes a `RunSQL` that swaps two tables
-present before the plan, and the plan's operations after a state the walk cannot
-render, which it follows no further. Two native drops predate the guard and are not
-judged: `AlterOrderWithRespectTo` to `None` removes the `_order` column, and a model
-deletion drops its implicit many-to-many tables unprobed, which can lose rows only
-when the field sets `db_constraint=False`.
+plan, storage they move under a name the walk accounts for is not detected: under a name
+that held other storage before the plan, the guard probes that other storage, and under
+one a native operation of the plan created or filled, it takes the storage for the
+plan's own and probes nothing. That includes a `RunSQL` that swaps two tables present
+before the plan. Two native drops predate the guard and are not judged:
+`AlterOrderWithRespectTo` to `None` removes the `_order` column, and a model deletion
+drops its implicit many-to-many tables unprobed, which can lose rows only when the field
+sets `db_constraint=False`.
 
 Native dispatch must resolve this package's `makemigrations` and `migrate`, or a
 subclass of each. `ComposeConfig` is last in `INSTALLED_APPS`, so a same-named command

@@ -8,7 +8,7 @@ import importlib.util
 import stat
 import string
 import sys
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from enum import Enum
 from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple, cast
@@ -174,7 +174,11 @@ def check_native_history(apps: Apps, *, labels: Iterable[str]) -> None:
         return
     loader = MigrationLoader(None, ignore_no_migrations=True)
     for migration in loader.graph.nodes.values():
-        migration.operations = _own(migration.operations)
+        try:
+            migration.operations = _own(migration.operations)
+        except TypeError, copy.Error:
+            # An operation that cannot be copied stays shared, as Django shares it.
+            continue
     before, after = effective_states(loader, apps)
     changes = MigrationAutodetector(before, after).changes(
         graph=loader.graph,
@@ -313,7 +317,15 @@ def _removal(operation: Operation) -> tuple[str, str | None] | None:
     return None
 
 
-type _Removal = tuple[Operation, Any, str | None]
+class _Removal(NamedTuple):
+    """A native removal, the model it drops storage from, and its removed field, if any."""
+
+    operation: Operation
+    model: Any
+    field: str | None
+    # Where the migrate walk meets one that can drop a table: the models, by label,
+    # owning that table as it drops it, under their later names.
+    holders: frozenset[str] = frozenset()
 
 
 def _changed_removals(state: ProjectState, changes: Mapping[str, list[Migration]]) -> Iterator[_Removal]:
@@ -322,7 +334,7 @@ def _changed_removals(state: ProjectState, changes: Mapping[str, list[Migration]
         for migration in migrations:
             for operation in migration.operations:
                 if (removed := _removal(operation)) is not None:
-                    yield operation, state.apps.get_model(label, removed[0]), removed[1]
+                    yield _Removal(operation, state.apps.get_model(label, removed[0]), removed[1])
 
 
 _KEEP_SHARED = "keep a table another model may still own, or first change that owner"
@@ -359,7 +371,9 @@ def _owners(state: ProjectState) -> Iterator[tuple[Any, Any]]:
             yield owner, storage
 
 
-def _holders(state: ProjectState, model: Any, field: str | None, connection: BaseDatabaseWrapper) -> set[str]:
+def _holders(
+    state: ProjectState, model: Any, field: str | None, connection: BaseDatabaseWrapper
+) -> frozenset[str]:
     """The labels of the models of ``state`` that own a table the removal of ``model``,
     or of its ``field``, drops, besides that storage itself, under a name the backend
     does not tell apart from it."""
@@ -373,11 +387,11 @@ def _holders(state: ProjectState, model: Any, field: str | None, connection: Bas
 
     dropped = tuple(_model_storage(model, removed_field=field))
     names = {name(storage) for storage in dropped} - {None}
-    return {
+    return frozenset(
         owner._meta.label_lower
         for owner, storage in _owners(state)
         if storage not in dropped and name(storage) in names
-    }
+    )
 
 
 def _shared_table_drops(
@@ -388,7 +402,6 @@ def _shared_table_drops(
     catalog: bool,
     planned: bool = False,
     refilled: Callable[[str], bool] | None = None,
-    holders: Sequence[Collection[str]] = (),
 ) -> list[tuple[int, str, str]]:
     """Each removal, by position, that would drop a table a model of ``after`` still owns.
 
@@ -401,18 +414,17 @@ def _shared_table_drops(
     operation put storage under a dropped table's name after the drop, as Django's
     ``RemoveField`` and ``AddField`` for a retargeted many-to-many field do: a model
     owning that name at the end owns the new storage, not the dropped table, unless it
-    is among the removal's ``holders``, the models that owned the table when it was
-    dropped, and so owned the dropped rows. A model under a deleted model's own label
-    is taken for that model created again, unless it is among those holders.
+    is among the removal's holders, the models that owned the table when it was dropped,
+    and so owned the dropped rows. A model under a deleted model's own label is taken
+    for that model created again, unless it is among those holders.
     """
     owners = tuple(_owners(after))
     aliases = tuple(aliases)
     refusals: list[tuple[int, str, str]] = []
-    for index, (operation, model, field) in enumerate(removals):
+    for index, (operation, model, field, owners_then) in enumerate(removals):
         dropped = tuple(_model_storage(model, removed_field=field))
         if not dropped:
             continue
-        owners_then = holders[index] if holders else ()
         for alias in aliases:
             connection = connections[alias]
             try:
@@ -637,7 +649,7 @@ class DropGuardAutodetector(MigrationAutodetector):
         policies = _policies()
         refusals = [
             (_AUTHOR, refusal)
-            for operation, model, field in removals
+            for operation, model, field, _ in removals
             if (dropped := _dropped(model, field, policies)) is not None
             # A database that lags the history holds nothing in storage it lacks.
             for refusal in _proofs(operation, model, dropped, aliases, added=True)
@@ -664,9 +676,17 @@ _DECLARE = (
 _RENDER = "order the history so that its state renders at every operation, each relation's target defined"
 
 
-class _Halted(Exception):
-    """Django cannot progress the walk's migration state through an operation; nothing after
-    it can be judged."""
+class _End(Exception):
+    """The walk cannot render its migration state, or move it forward, from here on."""
+
+
+# What Django raises where it cannot render a migration state, read a model or field from
+# it, or move it forward through an operation.
+_STUCK = (ValueError, LookupError, FieldDoesNotExist)
+
+# A judged removal: the migration and operation refused, the remedy where the refusal
+# has one of its own (see _refusal), and the refusal.
+type _Refused = tuple[Migration, Operation, str | None, str]
 
 
 class _Vacated(Enum):
@@ -1003,25 +1023,18 @@ def _refusal(
     return remedy or _DECLARE, f"{label}.{migration.name} ({operation.describe()}): {refusal}"
 
 
-class _TableDrop(NamedTuple):
-    """A judged removal that can drop a table, as the walk meets it."""
-
-    migration: Migration
-    removal: _Removal
-    # The models, by label, owning its table as it drops it, under their later names.
-    holders: set[str]
-
-
 class _Walk:
     """One walk of a forward plan as ``migrate`` applies it, on the alias it migrates.
 
     The walk owns what it progresses and learns: the storage names it follows, the
-    table-dropping removals it meets, and its refusals. Where data is stored, it proves
-    each judged removal; where it follows, it follows the names the plan's native
-    operations change, create and drop, until a state it cannot render stops it, in
-    whatever history; that refuses only a judged removal it cannot read for it. A column
-    that existed before the plan is judged by the definition the state before the plan
-    gives it, reached through the names it follows.
+    table-dropping removals it meets, and what it refuses. Where data is stored, it
+    proves each judged removal; where it follows, it follows the names the plan's native
+    operations change, create and drop. A column that existed before the plan is judged
+    by the definition the state before the plan gives it, reached through the names it
+    follows. Where the walk cannot render its state, or move it forward through an
+    operation, in whatever history, it ends: every judged removal from there on cannot be
+    read, and no judged table drop can be told apart from a table a model still owns at
+    the end of the plan.
 
     It renders its own state in place where it needs a model: at every removal it
     follows, and otherwise at a judged removal it proves or that can drop a table; at a
@@ -1050,7 +1063,7 @@ class _Walk:
         self,
         executor: MigrationExecutor,
         forwards: Mapping[tuple[str, str], Migration],
-        guarded: frozenset[str],
+        judged: frozenset[str],
         *,
         probe: bool,
         follow: bool,
@@ -1059,98 +1072,105 @@ class _Walk:
         self.executor = executor
         self.connection = executor.connection
         self.forwards = forwards
-        self.guarded = guarded
+        self.judged = judged
         self.probe = probe
+        self.following = follow
         self.policies = policies
         self.storage = _Storage(self.connection)
-        self.drops: list[_TableDrop] = []
-        self.refusals: list[tuple[str, str]] = []
-        # Whether the walk still follows names, and where it stopped if not.
-        self.following = follow
-        self.stop = ""
-        # Why the walk last could not render its state, and each judged removal it could
-        # not read for that, with its remedy; like the shared-table rule's refusals, they
-        # are returned for their history to be classified.
-        self.unrendered = ""
-        self.unread: list[tuple[Migration, Operation, str, str]] = []
+        # The judged removals met that can drop a table, and the removals refused.
+        self.drops: list[tuple[Migration, _Removal]] = []
+        self.refused: list[_Refused] = []
+        # How many of the plan's database removals, in its order, the walk has passed.
+        self.passed = 0
         # The state before the plan, kept where data is stored, and the fields it stores
         # in each column, or why it cannot be rendered; see _written.
         self.before: ProjectState
         self._written_by: dict[tuple[str, str | None], list[tuple[Any, Any]]] | None = None
         self._unwritten = ""
 
-    def run(self) -> list[tuple[Migration, Operation, str, str]]:
-        """Walk the plan; return the judged removals it could not render and those the
-        shared-table rule refuses, each with its remedy."""
-        state = _own_fields(self.executor._create_project_state(with_applied_migrations=True))  # type: ignore[attr-defined]
-        # The walk's own state until its first operation changes it.
-        self.before = state
-        walked: set[tuple[str, str]] = set()
+    def run(self) -> list[_Refused]:
+        """Walk the plan; return each removal it refuses.
+
+        Where the walk ends, every judged removal from there on, and every judged table
+        drop it met, is refused for the reason it ended.
+        """
         # Native migrate applies its plan in the order of the full clean plan.
-        try:
+        planned = [
+            self.forwards[key]
             for migration, _ in self.executor.migration_plan(
                 self.executor.loader.graph.leaf_nodes(), clean_start=True
-            ):
-                key = (migration.app_label, migration.name)
-                if key in self.forwards:
-                    walked.add(key)
-                    # Native migrate applies the planned operations after the walk.
-                    self._judge(self.forwards[key], _own(self.forwards[key].operations), state)
-        except _Halted:
-            raise _unsafe("unsafe migration drop", self.refusals, " Nothing was migrated.") from None
-        if unwalked := sorted(self.forwards.keys() - walked):
+            )
+            if (key := (migration.app_label, migration.name)) in self.forwards
+        ]
+        if unwalked := sorted(self.forwards.keys() - {(m.app_label, m.name) for m in planned}):
             raise CommandError(
                 "the drop guard cannot follow migrate's plan through "
                 + ", ".join(f"{label}.{name}" for label, name in unwalked)
                 + "; nothing was migrated"
             )
+        state = _own_fields(self.executor._create_project_state(with_applied_migrations=True))  # type: ignore[attr-defined]
+        # The walk's own state until its first operation changes it.
+        self.before = state
+        try:
+            for migration in planned:
+                try:
+                    # Native migrate applies the planned operations after the walk.
+                    operations = _own(migration.operations)
+                except (TypeError, copy.Error) as error:
+                    raise _End(f"cannot copy {migration.app_label}.{migration.name} ({error})") from error
+                self._judge(migration, operations, state)
+            shared = self._shared(state)
+        except _End as end:
+            return [*self.refused, *self._ended(planned, str(end))]
+        return [*self.refused, *shared]
+
+    def _shared(self, state: ProjectState) -> list[_Refused]:
+        """The judged table drops the shared-table rule refuses at the end of the plan."""
         if not self.drops:
-            return self.unread
+            return []
         try:
             if self.following:
                 # Name what the plan's last creations added before asking what fills a name.
                 self.storage.name_created(state)
             shared = _shared_table_drops(
-                [drop.removal for drop in self.drops],
+                [removal for _, removal in self.drops],
                 state,
                 (self.connection.alias,),
                 catalog=self.probe,
                 planned=True,
                 refilled=self.storage.refilled if self.following else None,
-                holders=[drop.holders for drop in self.drops],
             )
-        except ValueError as error:
-            # Without the end state, the rule cannot tell who still owns a dropped table.
-            cause = f"cannot render the migration state at the end of the plan ({error})"
-            return [*self.unread, *((drop.migration, drop.removal[0], _RENDER, cause) for drop in self.drops)]
+        except _STUCK as error:
+            raise _End(f"cannot render the migration state at the end of the plan ({error})") from error
         return [
-            *self.unread,
+            (self.drops[index][0], self.drops[index][1].operation, remedy, refusal)
+            for index, remedy, refusal in shared
+        ]
+
+    def _ended(self, planned: Sequence[Migration], cause: str) -> list[_Refused]:
+        """Each judged removal the walk cannot read since it ended, for ``cause``, and each
+        judged table drop it met, whose owners at the end of the plan it cannot tell."""
+        removals = [
+            (migration, operation)
+            for migration in planned
+            for operation in _database_removals(migration.operations)
+        ]
+        unowned = f"cannot tell who owns its table at the end of the plan: the walk {cause}"
+        return [
+            *((migration, removal.operation, _RENDER, unowned) for migration, removal in self.drops),
             *(
-                (self.drops[index].migration, self.drops[index].removal[0], remedy, refusal)
-                for index, remedy, refusal in shared
+                (migration, operation, _RENDER, cause)
+                for migration, operation in removals[self.passed :]
+                if migration.app_label in self.judged
             ),
         ]
 
-    def _rendered(
-        self, migration: Migration, operation: Operation, state: ProjectState, name: str = ""
-    ) -> Any:
+    def _rendered(self, migration: Migration, state: ProjectState, name: str = "") -> Any:
         """Name what noted creations added, from ``state`` rendered in place where the walk
-        reads it at ``operation``, and return the model ``name`` of the app, if any.
-
-        Where Django cannot render the state afresh, though native ``migrate``, keeping
-        its rendering current in place, may apply the plan, the walk follows no name from
-        there on, whichever history left the state so, and ``None`` is returned.
-        """
-        label = migration.app_label
-        try:
-            if self.following:
-                self.storage.name_created(state)
-            return state.apps.get_model(label, name) if name else None
-        except ValueError as error:
-            self.unrendered = f"cannot render the migration state ({error})"
-            if self.following:
-                self.following, self.stop = False, f"it {self.unrendered} at {label}.{migration.name}"
-            return None
+        reads it, and return the model ``name`` of the migration's app, if any."""
+        if self.following:
+            self.storage.name_created(state)
+        return state.apps.get_model(migration.app_label, name) if name else None
 
     def _prove(
         self,
@@ -1184,15 +1204,13 @@ class _Walk:
                 table, column = dropped.table, None
         except (FieldDoesNotExist, LookupError, ValueError) as error:
             reason = f"cannot resolve what the plan removes ({error})"
-            refusal = _unproved(routed, table, column, using, reason)
-            self.refusals.append(_refusal(migration, operation, refusal))
+            self.refused.append((migration, operation, None, _unproved(routed, table, column, using, reason)))
             return
         origin = self.storage.stored(table, column)
-        # Past where the walk stopped following names, it cannot account for storage.
-        unfollowed = f"the walk follows no name since {self.stop}" if self.stop else ""
         if origin is _VACATED:
-            refusal = _unproved(routed, table, column, using, unfollowed or _UNFILLED)
-            self.refusals.append(_refusal(migration, operation, refusal))
+            self.refused.append(
+                (migration, operation, None, _unproved(routed, table, column, using, _UNFILLED))
+            )
             return
         if origin is None:
             return
@@ -1208,9 +1226,8 @@ class _Walk:
             proof = _dropped(model, field, self.policies)
         if proof is None:
             return
-        absent = unfollowed or _ABSENT
-        for refusal in _proofs(operation, routed, proof, (using,), added=origin.added, absent=absent):
-            self.refusals.append(_refusal(migration, operation, refusal))
+        for refusal in _proofs(operation, routed, proof, (using,), added=origin.added):
+            self.refused.append((migration, operation, None, refusal))
 
     def _written(self, table: str, column: str) -> QuerySet[Any] | None:
         """The rows holding data in column ``column`` of table ``table``, named as before the
@@ -1279,13 +1296,9 @@ class _Walk:
         for operation in operations:
             try:
                 self._step(migration, operation, state, database=database)
-            except ValueError as error:
-                # Django cannot progress the state through this operation; nothing after
-                # it can be followed.
-                self.refusals.append(
-                    _refusal(migration, operation, f"cannot render the migration state ({error})", _RENDER)
-                )
-                raise _Halted from error
+            except _STUCK as error:
+                where = f"{migration.app_label}.{migration.name}"
+                raise _End(f"cannot render the migration state at {where} ({error})") from error
 
     def _step(
         self, migration: Migration, operation: Operation, state: ProjectState, *, database: bool
@@ -1297,7 +1310,7 @@ class _Walk:
                 # Database operations progress their own state, as Django applies them.
                 progressed = state.clone()
                 self._judge(migration, operation.database_operations, progressed)
-                self._rendered(migration, operation, progressed)
+                self._rendered(migration, progressed)
             self._judge(migration, operation.state_operations, state, database=False)
             return
         if (
@@ -1306,40 +1319,22 @@ class _Walk:
             and type(operation).state_forwards is RunSQL.state_forwards
         ):
             # Its SQL is not followed; RunSQL applies its state operations one by one.
-            self._rendered(migration, operation, state)
+            self._rendered(migration, state)
             self._judge(migration, operation.state_operations, state, database=False)
             return
         if isinstance(operation, RenameModel):
             # A model that owned a dropped table keeps that claim under its new name.
             old, new = (f"{label}.{name.lower()}" for name in (operation.old_name, operation.new_name))
-            for drop in self.drops:
-                if old in drop.holders:
-                    drop.holders.add(new)
+            self.drops = [
+                (dropping, removal._replace(holders=removal.holders | {new}))
+                if old in removal.holders
+                else (dropping, removal)
+                for dropping, removal in self.drops
+            ]
         removed = _removal(operation) if database else None
         if removed is not None:
-            judged = label in self.guarded
-            drops_table = judged and _drops_table(state, label, removed)
-            # Every routed removal the walk follows ends what it drops, whoever owns
-            # it, and where data is stored a judged one is proved; otherwise only the
-            # shared-table rule judges a removal that can drop a table.
-            routed = (
-                self._rendered(migration, operation, state, removed[0])
-                if self.following or drops_table or self.probe and judged
-                else None
-            )
-            if routed is None and (
-                drops_table or self.probe and judged and not isinstance(operation, _INTENDED)
-            ):
-                # A judged removal the walk must read but cannot render cannot be proved.
-                self.unread.append((migration, operation, _RENDER, self.unrendered))
-            if routed is not None:
-                if drops_table:
-                    holders = _holders(state, routed, removed[1], self.connection)
-                    self.drops.append(_TableDrop(migration, (operation, routed, removed[1]), holders))
-                if self.probe and judged:
-                    self._prove(migration, operation, state, routed, removed)
-                if self.following and operation.allow_migrate_model(using, routed):
-                    self.storage.end(routed, removed[1])
+            self._read(migration, operation, state, removed)
+            self.passed += 1
         # Custom database code, such as RunSQL or a subclass replacing Django's
         # database_forwards, is not followed; the specification's "Drop guard" section
         # states what that leaves undetected.
@@ -1349,8 +1344,8 @@ class _Walk:
         if not native and not _leaves_state(operation):
             # Name what earlier creations added before an operation the walk does
             # not follow can rename it.
-            self._rendered(migration, operation, state)
-        before_model = self._rendered(migration, operation, state, renamed[0]) if renamed else None
+            self._rendered(migration, state)
+        before_model = self._rendered(migration, state, renamed[0]) if renamed else None
         if self.probe and self.before is state:
             # The walk's state changes from here on; a clone keeps any rendering it has.
             self.before = _own_fields(state.clone())
@@ -1358,16 +1353,40 @@ class _Walk:
             # Render afresh where the walk next needs a model instead; after a followed
             # rename it needs one at once, and a fresh render would cost every model.
             del state.apps
-        operation.state_forwards(label, state)
+        try:
+            operation.state_forwards(label, state)
+        except _STUCK as error:
+            where = f"{label}.{migration.name}"
+            raise _End(f"cannot move the migration state forward through {where} ({error})") from error
         # Django changes storage only where the operation migrates the model it
         # produces: never for a swapped model, nor on an alias routed away.
-        if renamed and self.following:
-            after_model = self._rendered(migration, operation, state, renamed[1])
-            if after_model is not None and operation.allow_migrate_model(using, after_model):
+        if renamed:
+            after_model = self._rendered(migration, state, renamed[1])
+            if operation.allow_migrate_model(using, after_model):
                 self.storage.follow(before_model, after_model, renamed[2])
-        if creation and self.following:
+        if creation:
             # Named at the walk's next render, before anything can rename it.
             self.storage.creating(operation, label, creation)
+
+    def _read(
+        self, migration: Migration, operation: Operation, state: ProjectState, removed: tuple[str, str | None]
+    ) -> None:
+        """Read a removal: where the walk follows names, end what it drops, whoever owns
+        it; where data is stored, prove a judged one; and keep a judged one that can drop
+        a table for the shared-table rule. Otherwise the walk does not render here."""
+        label = migration.app_label
+        judged = label in self.judged
+        drops_table = judged and _drops_table(state, label, removed)
+        if not (self.following or drops_table or self.probe and judged):
+            return
+        routed = self._rendered(migration, state, removed[0])
+        holders = _holders(state, routed, removed[1], self.connection) if drops_table else frozenset()
+        if self.probe and judged:
+            self._prove(migration, operation, state, routed, removed)
+        if self.following and operation.allow_migrate_model(self.connection.alias, routed):
+            self.storage.end(routed, removed[1])
+        if drops_table:
+            self.drops.append((migration, _Removal(operation, routed, removed[1], holders)))
 
 
 def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> None:
@@ -1375,14 +1394,15 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
 
     ``migrate`` calls this from ``pre_migrate`` with the plan and alias it is about
     to apply, before any operation runs. The specification's "Drop guard" section
-    defines the rule; ``_Walk`` walks the plan. An alias that stores nothing holds no
-    data to prove: there the walk probes nothing, follows no rename and renders only at
-    a judged removal that can drop a table and at the end, and only the shared-table
-    rule, which needs no data, applies, from names alone. Only where that rule keeps a
-    table, or the walk cannot render a removal it judges, is an app's history
-    classified, for the removals named. Only for history the guard judges does the walk
-    then run again, following the plan's names to see whether a native operation filled
-    the dropped table's name.
+    defines the rule; ``_Walk`` walks the plan. Where data is stored, the walk judges
+    only the history the guard judges. An alias that stores nothing holds no data to
+    prove: there the walk judges every app's removals, probes nothing, follows no
+    rename and renders only at a removal that can drop a table and at the end, and only
+    the shared-table rule, which needs no data, applies, from names alone. Only the
+    apps whose removals it refuses are then classified, and only the history the guard
+    judges is refused. Only where that history is refused does the walk run again,
+    following the plan's names to see whether a native operation filled a dropped
+    table's name.
     """
     forwards = {
         (migration.app_label, migration.name): migration for migration, backwards in plan if not backwards
@@ -1392,8 +1412,8 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         return
     connection = connections[using]
     probe = not _stores_nothing(connection)
-    guarded = _guarded(labels) if probe else frozenset(labels)
-    if not guarded:
+    judged = _guarded(labels) if probe else frozenset(labels)
+    if not judged:
         return
     executor = MigrationExecutor(connection)
     if not forwards.keys() <= executor.loader.graph.nodes.keys():
@@ -1401,26 +1421,26 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         executor.loader.replace_migrations = False  # type: ignore[attr-defined]
         executor.loader.build_graph()
     policies = _policies() if probe else ()
-    walk = _Walk(executor, forwards, guarded, probe=probe, follow=probe, policies=policies)
-    unproved = walk.run()
-    refusals = walk.refusals
-    if unproved and not probe:
-        # Only the history the guard judges is refused, so classify it first.
-        classified = {migration.app_label for migration, *_ in unproved}
-        judged, guarded = guarded, _guarded(classified)
-        if any(migration.app_label in guarded for migration, *_ in unproved):
+    refused = _Walk(executor, forwards, judged, probe=probe, follow=probe, policies=policies).run()
+    if refused and not probe:
+        classified = {migration.app_label for migration, *_ in refused}
+        guarded = _guarded(classified)
+        if any(migration.app_label in guarded for migration, *_ in refused):
             # Follow the plan's names to see whether a native operation filled the
             # name of a table that names alone keep owned at the end.
-            walk = _Walk(executor, forwards, judged, probe=probe, follow=True, policies=policies)
-            unproved = walk.run()
-            refusals = [*refusals, *walk.refusals]
-            if unclassified := {migration.app_label for migration, *_ in unproved} - classified:
+            refused = _Walk(executor, forwards, judged, probe=probe, follow=True, policies=policies).run()
+            if unclassified := {migration.app_label for migration, *_ in refused} - classified:
                 guarded |= _guarded(unclassified)
-    for migration, operation, remedy, refusal in unproved:
-        if migration.app_label in guarded:
-            refusals.append(_refusal(migration, operation, refusal, remedy))
-    if refusals:
-        raise _unsafe("unsafe migration drop", refusals, " Nothing was migrated.")
+        refused = [refusal for refusal in refused if refusal[0].app_label in guarded]
+    if refused:
+        raise _unsafe(
+            "unsafe migration drop",
+            (
+                _refusal(migration, operation, refusal, remedy)
+                for migration, operation, remedy, refusal in refused
+            ),
+            " Nothing was migrated.",
+        )
 
 
 def _forget_history(labels: Iterable[str], *, packages: Mapping[str, Path] | None = None) -> None:
