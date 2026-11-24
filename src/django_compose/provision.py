@@ -26,7 +26,6 @@ from django.db.models.signals import post_migrate
 from django.utils.functional import classproperty
 from django.utils.timezone import now
 
-from django_compose.apps import PROVISION_TABLE as TABLE
 from django_compose.management import unguarded_commands
 from django_compose.serving import receipt_lease, verified_receipt
 
@@ -54,11 +53,11 @@ class ProvisionRecorder:
 
                 class Meta:
                     apps = Apps()
-                    app_label = TABLE
-                    db_table = TABLE
+                    db_table = "django_compose_provision"
+                    app_label = db_table
                     managed = False
                     constraints = [
-                        models.CheckConstraint(condition=models.Q(id=1), name=f"{TABLE}_singleton")
+                        models.CheckConstraint(condition=models.Q(id=1), name=f"{db_table}_singleton")
                     ]
 
             cls._record_class = Record
@@ -74,7 +73,7 @@ class ProvisionRecorder:
     def validate_tables(self) -> set[str]:
         tables = self.tables()
         if LEGACY_TABLE in tables:
-            if TABLE in tables:
+            if self.Record._meta.db_table in tables:
                 raise CommandError(
                     "Both provision tables exist; resolve the ambiguous state before provisioning"
                 )
@@ -90,7 +89,7 @@ class ProvisionRecorder:
 
     def ensure_schema(self, upgrade_from: str | None = None) -> None:
         tables = self.tables()
-        if TABLE in tables and LEGACY_TABLE in tables:
+        if self.Record._meta.db_table in tables and LEGACY_TABLE in tables:
             self.validate_tables()
         if LEGACY_TABLE in tables and upgrade_from == LEGACY_TABLE:
             # Commit invalidation before publishing the new name: readiness readers
@@ -135,14 +134,18 @@ class ProvisionRecorder:
                     ("in_progress",),
                 )
             with self.connection.schema_editor() as editor:
-                editor.alter_db_table(self.Record, LEGACY_TABLE, TABLE)
+                editor.alter_db_table(self.Record, LEGACY_TABLE, self.Record._meta.db_table)
             return
-        if TABLE not in self.validate_tables():
+        if self.Record._meta.db_table not in self.validate_tables():
             with self.connection.schema_editor() as editor:
                 editor.create_model(self.Record)
 
     def read(self) -> Any:
-        return self.records.filter(pk=1).first() if TABLE in self.validate_tables() else None
+        return (
+            self.records.filter(pk=1).first()
+            if self.Record._meta.db_table in self.validate_tables()
+            else None
+        )
 
     def write(self, state: str, digest: str, compiler: str) -> None:
         if self.connection.in_atomic_block or not self.connection.get_autocommit():

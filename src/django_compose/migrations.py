@@ -39,13 +39,13 @@ from django.db.models import QuerySet
 from django.db.models.expressions import DatabaseDefault
 from django.utils.module_loading import module_dir
 
-from django_compose.apps import PROVISION_TABLE
 from django_compose.artifacts import atomic_write, receipt_lock, update_receipt
 from django_compose.declarations import MigrationPolicy, resolve_integrations
 from django_compose.management import require_serving_mode as require_serving_mode
 from django_compose.migration_imports import HistoricalImport as HistoricalImport
 from django_compose.migration_imports import historical_imports as historical_imports
 from django_compose.operations import IntendedDeleteModel, IntendedRemoveField
+from django_compose.provision import ProvisionRecorder
 from django_compose.serving import Receipt, read_receipt, verified_receipt
 from django_compose.sources import SourceResolver
 
@@ -950,7 +950,7 @@ def _stores_nothing(connection: BaseDatabaseWrapper) -> bool:
     extension owns, such as PostGIS's ``spatial_ref_sys``, holds the extension's data
     and does not count.
     """
-    recorders = [MigrationRecorder.Migration._meta.db_table, PROVISION_TABLE]
+    recorders = [MigrationRecorder.Migration._meta.db_table, ProvisionRecorder.Record._meta.db_table]
     with connection.cursor() as cursor:
         if connection.vendor == "postgresql":
             # Schema-qualified storage is invisible to native table introspection.
