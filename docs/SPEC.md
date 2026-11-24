@@ -586,12 +586,13 @@ At `migrate`:
   that comes to own the name after the drop owns that new storage, but one that owned
   the table then, under whatever name a later `RenameModel` gives it, owned the dropped
   rows. A model that a state-only operation gives the name after the drop owns no table,
-  and the drop stays refused. Under a deleted model's own label, though, a model is
-  taken for that model created again, as histories commonly delete and create a model
-  again, so three shapes that leave it without a table go unnoticed: a state-only
-  `CreateModel` under that label, a state-only `RenameModel` into it, and a native
-  creation under another table followed by a state-only `AlterModelTable` back. Where
-  the dropped table holds rows, the probe still refuses the drop.
+  and the drop stays refused. Under a deleted model's own label, though, a model that
+  did not own the table when it was dropped is taken for that model created again, as
+  histories commonly delete and create a model again, so three shapes that leave it
+  without a table go unnoticed: a state-only `CreateModel` under that label, a
+  state-only `RenameModel` into it, and a native creation under another table followed
+  by a state-only `AlterModelTable` back. Where the dropped table holds rows, the probe
+  still refuses an undeclared drop.
 - **Snapshot:** every proof is taken at `pre_migrate`, before the first operation.
   Rows the plan itself writes, such as a `RunPython` that fills storage a later
   operation of the plan drops, are not protected.

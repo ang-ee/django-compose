@@ -374,7 +374,8 @@ def _shared_table_drops(
     ``RemoveField`` and ``AddField`` for a retargeted many-to-many field do: a model
     owning that name at the end owns the new storage, not the dropped table, unless it
     is among the removal's ``holders``, the models that owned the table when it was
-    dropped, and so owned the dropped rows.
+    dropped, and so owned the dropped rows. A model under a deleted model's own label
+    is taken for that model created again, unless it is among those holders.
     """
     owners = tuple(_owners(after))
     aliases = tuple(aliases)
@@ -383,23 +384,25 @@ def _shared_table_drops(
         dropped = tuple(_model_storage(model, removed_field=field))
         if not dropped:
             continue
+        held = holders[index] if holders else ()
         for alias in aliases:
             connection = connections[alias]
             try:
                 if not operation.allow_migrate_model(alias, model):
                     continue
                 key = _name_key(connection)
-                held = holders[index] if holders else ()
                 for storage in dropped:
                     table = storage._meta.db_table
                     identity = _storage_identifier(connection, table)
                     filled = refilled is not None and refilled(table)
                     remaining = set()
                     for owner, active_storage in owners:
-                        # An owner under a deleted model's own label is taken for that model
-                        # created again; the specification names the shapes this misses.
+                        # The specification names what taking a model for the deleted one
+                        # created again misses.
                         if (
-                            field is None and owner._meta.label_lower == model._meta.label_lower
+                            field is None
+                            and owner._meta.label_lower == model._meta.label_lower
+                            and owner._meta.label_lower not in held
                         ) or not operation.allow_migrate_model(alias, owner):
                             continue
                         active_table = active_storage._meta.db_table
@@ -983,7 +986,7 @@ class _TableDrop(NamedTuple):
 
     migration: Migration
     removal: _Removal
-    # The models, by label, owning its table as it drops it; only a following walk asks.
+    # The models, by label, owning its table as it drops it, under their later names.
     holders: set[str]
 
 
@@ -1232,7 +1235,7 @@ class _Walk:
             self._rendered(migration, operation, state)
             self._judge(migration, operation.state_operations, state, database=False)
             return
-        if self.following and isinstance(operation, RenameModel):
+        if isinstance(operation, RenameModel):
             # A model that owned a dropped table keeps that claim under its new name.
             old, new = (f"{label}.{name.lower()}" for name in (operation.old_name, operation.new_name))
             for drop in self.drops:
@@ -1252,13 +1255,8 @@ class _Walk:
             )
             if routed is not None:
                 if drops_table:
-                    self.drops.append(
-                        _TableDrop(
-                            migration,
-                            (operation, routed, removed[1]),
-                            _holders(state, routed, removed[1], self.connection) if self.following else set(),
-                        )
-                    )
+                    holders = _holders(state, routed, removed[1], self.connection)
+                    self.drops.append(_TableDrop(migration, (operation, routed, removed[1]), holders))
                 if self.probe and judged:
                     self._prove(migration, operation, state, routed, removed)
                 if self.following and operation.allow_migrate_model(using, routed):

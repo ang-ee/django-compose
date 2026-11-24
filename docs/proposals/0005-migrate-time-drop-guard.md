@@ -81,16 +81,18 @@ choices behind it.
   field's new target, is not kept: the rule asks at the end of the plan whether a
   native creation or followed rename filled the table's name after the drop. Judging
   ownership at the removal instead was rejected: a model that a state-only operation
-  gives the name after the drop would be left without a table. Each such removal
-  records the models owning its table as it drops it, and they never own the new
-  storage: taking every owner of a filled name for its owner lost the rows of a model
-  that owned the table beside the removed one. Where nothing is
-  stored, the walk follows names only once names alone keep a table, so a fresh
-  database pays for following them only then. An owner under a deleted model's own
-  label is taken for that model created again, as histories commonly delete and
-  re-create a model: telling a state-only re-adoption under that label apart made a
-  composed host's every fresh database follow the plan's names, several times the
-  cost.
+  gives the name after the drop would be left without a table. Each walk records the
+  models owning a dropped table as it drops it, and follows them through
+  `RenameModel`; they never own the new storage: taking every owner of a filled name
+  for its owner lost the rows of a model that owned the table beside the removed one.
+  Where nothing is stored, the walk follows names only once names alone keep a table,
+  so a fresh database pays for following them only then. An owner under a deleted
+  model's own label that did not own the table when it was dropped is taken for that
+  model created again, as histories commonly delete and re-create a model: telling a
+  state-only re-adoption under that label apart made a composed host's every fresh
+  database follow the plan's names, several times the cost. Exempting every owner
+  under that label lost the rows of a model that owned the table and was renamed into
+  it.
   An empty pre-plan state was rejected as the test, because `--fake-initial`
   and state-only adoption give existing tables a model the plan introduces. Native
   table introspection was rejected as the inventory, because on PostgreSQL it lists

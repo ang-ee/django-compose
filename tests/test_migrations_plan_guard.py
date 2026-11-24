@@ -957,6 +957,34 @@ assert list(Record._base_manager.values_list("old", flat=True)) == kept
     )
 
 
+@pytest.mark.parametrize("database", ["fresh", "populated"])
+@pytest.mark.parametrize("rename", ["native", "state_only"])
+def test_a_model_owning_a_table_at_its_drop_is_not_taken_for_the_deleted_model_again(host, rename, database):
+    root, run = host
+    # Shadow owns alpha_record with Record before the plan. Renamed into the deleted model's
+    # label after Record's declared drop, it is the model that owned the dropped rows, not
+    # Record created again, and it would be left without a table; its explicit table keeps
+    # even the native rename off storage.
+    migration(root, "0002_shadow", [state_only(created("Shadow", db_table="alpha_record"))])
+    into = 'migrations.RenameModel(old_name="Shadow", new_name="Record")'
+    operations = ['IntendedDeleteModel(name="Record")', into if rename == "native" else state_only(into)]
+    migration(root, "0003_drop", operations, after="0002_shadow")
+    run(
+        PRELUDE
+        + f"""
+if {database!r} == "populated":
+    Record = seed("0002_shadow")
+    Record._base_manager.create(old="kept")
+refusal = "alpha.0003_drop (Delete model Record): table 'alpha_record' is still owned by alpha.record on"
+expect(CommandError, refusal, migrate)
+if {database!r} == "populated":
+    assert list(Record._base_manager.values_list("old", flat=True)) == ["kept"]
+else:
+    assert not applied()
+"""
+    )
+
+
 def test_a_model_deleted_and_created_again_takes_one_walk_on_a_fresh_database(host):
     root, run = host
     # Histories commonly delete a model and create it again: under its own label the

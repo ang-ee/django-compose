@@ -115,6 +115,21 @@ CASES = {
         ["kept"],
         "table 'alpha_record' is still owned by alpha.shadow on 'default'",
     ),
+    # Shadow owns alpha_record with Record before the plan. Renamed into Record's label
+    # after Record's declared drop, it is the model that owned the row, not Record again.
+    "holder_into_label": _Case(
+        [
+            [_create("Record")],
+            [_state_only(_create("Shadow", "alpha_record"))],
+            [
+                'IntendedDeleteModel(name="Record")',
+                'migrations.RenameModel(old_name="Shadow", new_name="Record")',
+            ],
+        ],
+        2,
+        ["kept"],
+        "table 'alpha_record' is still owned by alpha.record on 'default'",
+    ),
     # Rows hold "kept" under old's default "": judged by the default the plan gives old
     # before removing it, they would read as empty.
     "default_change": _Case(
