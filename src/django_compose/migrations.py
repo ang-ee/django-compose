@@ -396,7 +396,8 @@ def _shared_table_drops(
                     filled = refilled is not None and refilled(table)
                     remaining = set()
                     for owner, active_storage in owners:
-                        # An owner under a deleted model's own label is that model created again.
+                        # An owner under a deleted model's own label is taken for that model
+                        # created again; the specification names the shapes this misses.
                         if (
                             field is None and owner._meta.label_lower == model._meta.label_lower
                         ) or not operation.allow_migrate_model(alias, owner):

@@ -922,6 +922,73 @@ assert list(Record._base_manager.values_list("old", flat=True)) == kept
     )
 
 
+def test_a_model_deleted_and_created_again_takes_one_walk_on_a_fresh_database(host):
+    root, run = host
+    # Histories commonly delete a model and create it again: under its own label the
+    # new model is taken for the deleted one created again, so names alone keep nothing
+    # and the walk need not follow them.
+    migration(root, "0002_drop", [DELETE_RECORD])
+    migration(
+        root, "0003_again", [f'migrations.CreateModel(name="Record", fields={FIELDS})'], after="0002_drop"
+    )
+    run(
+        PRELUDE
+        + """
+from django.db.migrations.executor import MigrationExecutor as Executor
+walks = []
+create_state = Executor._create_project_state
+def creating(self, *args, **kwargs):
+    walks.append(1)
+    return create_state(self, *args, **kwargs)
+judge = check_plan_drops
+def counted(plan, *, using):
+    with patch.object(Executor, "_create_project_state", creating):
+        judge(plan, using=using)
+with patch("django_compose.management.commands.migrate.check_plan_drops", counted):
+    migrate()
+assert len(walks) == 1, walks
+assert "alpha_record" in tables()
+"""
+    )
+
+
+@pytest.mark.parametrize("stored", ["fresh", "empty", "rows"])
+@pytest.mark.parametrize("shape", ["create", "rename", "retable"])
+def test_a_deleted_models_label_given_its_table_by_state_alone_goes_unnoticed(host, shape, stored):
+    root, run = host
+    # A stated limit: after Record's deletion, state alone gives alpha.record its table
+    # again, and the model is taken for Record created again. Nothing is refused, and it is
+    # left without a table; rows the drop would lose are still refused by the probe.
+    before = "0001_origin"
+    if shape == "rename":
+        migration(root, "0002_other", [created("Other")])
+        before = "0002_other"
+    again = {
+        "create": [state_only(f'migrations.CreateModel(name="Record", fields={FIELDS})')],
+        "rename": [state_only('migrations.RenameModel(old_name="Other", new_name="Record")')],
+        "retable": [
+            f'migrations.CreateModel(name="Record", fields={FIELDS}, options={{"db_table": "alpha_moved"}})',
+            state_only('migrations.AlterModelTable(name="record", table="alpha_record")'),
+        ],
+    }[shape]
+    migration(root, "0003_drop", [DELETE_RECORD, *again], after=before)
+    run(
+        PRELUDE
+        + f"""
+if {stored!r} != "fresh":
+    Record = seed({before!r})
+if {stored!r} == "rows":
+    Record._base_manager.create(old="kept")
+    refusal = "alpha.0003_drop (Delete model Record): alpha.record: alpha_record.* holds data"
+    expect(CommandError, refusal, migrate)
+    assert "alpha_record" in tables()
+else:
+    migrate()
+    assert "alpha_record" not in tables()
+"""
+    )
+
+
 def test_where_nothing_is_stored_only_a_refused_app_is_classified(host):
     root, run = host
     migration(root, "0002_twin", [adopt("Twin")])
