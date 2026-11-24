@@ -562,8 +562,9 @@ At `migrate`:
   rename between them moves nothing, and storage under either is present. Case does
   not tell table names apart where Django's `ignores_table_name_case` is set, as on
   SQLite, nor column names on SQLite and MySQL whatever MySQL's table-name setting,
-  nor any name where the backend's quoting folds case, as Oracle's does. Python's
-  `casefold` stands in for the backend's folding of non-ASCII names. Only SQLite and
+  nor any name where the backend's quoting folds case, as Oracle's does. SQLite and
+  MySQL fold the case of ASCII letters only, and so does the guard there; where quoting
+  folds case, the guard compares names as Django quotes them. Only SQLite and
   PostgreSQL have real-backend coverage. A name that an earlier rename or removal of
   the plan vacated holds the plan's own storage only once a native `CreateModel` or
   `AddField` fills it again, or a followed rename moves storage under it, which is

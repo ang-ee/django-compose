@@ -2059,6 +2059,27 @@ BACKENDS = {
 }
 
 
+@pytest.mark.parametrize("database", ["fresh", "populated"])
+def test_names_the_backend_folds_apart_stay_apart(host, database):
+    root, run = host
+    # SQLite folds the case of ASCII letters only: alpha_straße and alpha_strasse are two
+    # tables, though Python's casefold joins them. Fresh's table fills nothing Shadow then
+    # adopts, so Shadow would be left without one.
+    migration(root, "0002_gone", [created("Gone", db_table="alpha_straße")])
+    adopted = state_only(created("Shadow", db_table="alpha_straße"))
+    drop = ['migrations.DeleteModel(name="Gone")', created("Fresh", db_table="alpha_strasse"), adopted]
+    migration(root, "0003_drop", drop, after="0002_gone")
+    run(
+        PRELUDE
+        + f"""
+if {database!r} == "populated":
+    seed("0002_gone")
+owner = "table 'alpha_straße' is still owned by alpha.shadow on 'default'"
+expect(CommandError, "alpha.0003_drop (Delete model Gone): " + owner, migrate)
+"""
+    )
+
+
 @pytest.mark.parametrize("vendor", ["sqlite", "mysql"])
 @pytest.mark.parametrize("kind", ["table", "column"])
 def test_where_the_backend_ignores_name_case_absent_storage_the_plan_creates_is_its_own(host, vendor, kind):

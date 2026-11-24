@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import stat
+import string
 import sys
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from enum import Enum
@@ -168,20 +169,23 @@ def check_native_history(apps: Apps, *, labels: Iterable[str]) -> None:
         raise RuntimeError(f"native migration history does not match composed models: {operations}")
 
 
+_ASCII_LOWER: Final = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
 def _name_key(connection: BaseDatabaseWrapper, *, column: bool = False) -> Callable[[str], str]:
     """How the backend tells two spellings of a table name, or of a column name, apart.
 
-    Where it ignores their case, spellings that casefold alike name one object: table
-    names where Django's ``ignores_table_name_case`` says so, column names on SQLite and
-    MySQL whatever that setting, and both where ``quote_name`` folds case, as Oracle's
-    does. Python's ``casefold`` stands in for the backend's own folding, which may join
-    fewer non-ASCII spellings. Elsewhere spellings compare exactly.
+    Where ``quote_name`` folds case, as Oracle's upper-cases every name, a name is the
+    object Django quotes it as. SQLite, and MySQL where it ignores case, fold the case of
+    ASCII letters only: table names where Django's ``ignores_table_name_case`` says so,
+    and column names whatever that setting. Elsewhere spellings compare exactly.
     """
     quote = connection.ops.quote_name
-    folds = quote("a") == quote("A") or (
-        connection.vendor in {"sqlite", "mysql"} if column else connection.features.ignores_table_name_case
-    )
-    return str.casefold if folds else str
+    if quote("a") == quote("A"):
+        return quote
+    if connection.vendor in {"sqlite", "mysql"} if column else connection.features.ignores_table_name_case:
+        return lambda name: name.translate(_ASCII_LOWER)
+    return str
 
 
 def _storage_identifier(connection: BaseDatabaseWrapper, identifier: str) -> tuple[str, str]:
