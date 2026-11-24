@@ -31,6 +31,7 @@ from django.db.migrations.operations.models import AlterModelTable, CreateModel,
 from django.db.migrations.operations.special import RunPython, RunSQL, SeparateDatabaseAndState
 from django.db.migrations.recorder import MigrationRecorder
 from django.db.migrations.state import ProjectState
+from django.db.migrations.utils import field_is_referenced, get_references
 from django.db.migrations.writer import MigrationWriter
 from django.db.models import QuerySet
 from django.db.models.expressions import DatabaseDefault
@@ -714,18 +715,32 @@ def _relinks(operation: Operation, state: ProjectState, label: str) -> bool:
     """Whether Django re-renders, recursively, every model related to the one ``operation`` changes.
 
     ``ProjectState`` delays re-rendering relations except where an operation creates a
-    model with a relational field, or adds, removes or alters a relational field. Where
-    models share a hub, that re-renders nearly the whole state.
+    model with a relational field, adds or removes one, alters a field into one or alters
+    a field that another field references, or renames a referenced field. Where models
+    share a hub, that re-renders nearly the whole state. This is the ``delay`` that
+    ``add_model``, ``add_field``, ``remove_field``, ``alter_field`` and ``rename_field``
+    pass to ``reload_model``, asked of the state before the operation through Django's
+    own ``get_references``.
     """
     if isinstance(operation, CreateModel):
         return any(field.is_relation for _, field in operation.fields)
-    if isinstance(operation, AddField | AlterField):
+    if isinstance(operation, AddField):
         return bool(operation.field.is_relation)
+    if not isinstance(operation, RemoveField | AlterField | RenameField):
+        return False
+    key = (label, operation.model_name_lower)
+    model = state.models.get(key)
+    if isinstance(operation, RenameField):
+        field = None if model is None else model.fields.get(operation.old_name)
+        return field is not None and field_is_referenced(state, key, (operation.old_name, field))
     if isinstance(operation, RemoveField):
-        model = state.models.get((label, operation.model_name_lower))
         field = None if model is None else model.fields.get(operation.name)
         return field is not None and bool(field.is_relation)
-    return False
+    # Django asks after the change; before it, only the altered field itself differs.
+    return bool(operation.field.is_relation) or any(
+        not (owner is model and name == operation.name)
+        for owner, name, _, _ in get_references(state, key, (operation.name, operation.field))
+    )
 
 
 def _renamed(operation: Operation, state: ProjectState, label: str) -> tuple[str, str, dict[str, str]] | None:
@@ -861,7 +876,9 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
     or before an operation the walk does not follow. The pre-plan state is the one
     native ``migrate`` builds, through the private
     ``MigrationExecutor._create_project_state``, on the graph native ``migrate``
-    planned with: re-check both on each Django upgrade.
+    planned with. Re-check on each Django upgrade: that private call, that graph,
+    ``_relinks`` against ``ProjectState``'s reload rule, and the cached ``apps``
+    property the walk tests and deletes to drop its rendering.
     """
     forwards = {
         (migration.app_label, migration.name): migration for migration, backwards in plan if not backwards

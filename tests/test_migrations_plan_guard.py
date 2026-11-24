@@ -1477,7 +1477,14 @@ with override_settings(DATABASE_ROUTERS=[Disjoint()]):
     )
 
 
-@pytest.mark.parametrize("plan", ["renames", "widening", "relation"])
+def linked(name, target):
+    """A model with a foreign key to ``target``."""
+    key = '("id", models.AutoField(primary_key=True, serialize=False))'
+    up = f'("up", models.ForeignKey("alpha.{target}", models.CASCADE, null=True))'
+    return f'migrations.CreateModel(name="{name}", fields=[{key}, {up}])'
+
+
+@pytest.mark.parametrize("plan", ["renames", "widening", "hub"])
 def test_the_walk_renders_its_state_in_place_until_a_relation_changes(host, plan):
     root, run = host
 
@@ -1486,18 +1493,21 @@ def test_the_walk_renders_its_state_in_place_until_a_relation_changes(host, plan
         field = f'models.CharField(max_length=80, default=""{extra})'
         return f'migrations.AlterField(model_name="record", name="old", field={field})'
 
+    def key(kind):
+        field = f"models.{kind}(primary_key=True, serialize=False)"
+        return f'migrations.AlterField(model_name="record", name="id", field={field})'
+
     rename = 'migrations.RenameField(model_name="record", old_name="old", new_name="kept")'
     operations = {
         "renames": [alter(db_column="legacy"), rename],
         "widening": [alter(), alter(), alter()],
-        # A relational field makes Django re-render related models recursively.
-        "relation": [
-            alter(db_column="legacy"),
-            add_field("parent", 'models.ForeignKey("alpha.Record", models.CASCADE, null=True)'),
-            rename,
-        ],
+        # Altering a key other models reference makes Django re-render them recursively.
+        "hub": [alter(db_column="legacy"), *map(key, ["BigAutoField", "AutoField", "BigAutoField"]), rename],
     }[plan]
-    migration(root, "0002_spare", [add_field("spare")])
+    # In the hub plan Record is referenced by three spokes, each referenced by two leaves.
+    spokes = [linked(f"Spoke{i}", "Record") for i in range(3)] if plan == "hub" else []
+    leaves = [linked(f"Leaf{i}{j}", f"Spoke{i}") for i in range(len(spokes)) for j in range(2)]
+    migration(root, "0002_spare", [add_field("spare"), *spokes, *leaves])
     migration(root, "0003_drop", [*operations, remove_field("spare")], after="0002_spare")
     run(
         PRELUDE
@@ -1522,12 +1532,13 @@ def counted(plan, *, using):
 with patch("django_compose.management.commands.migrate.check_plan_drops", counted):
     migrate()
 # One full render serves every later rename and removal while Django keeps it current
-# cheaply, re-rendering only the changed model. A widening AlterField renders nothing
-# before the removal. A relational field would make Django re-render related models
-# recursively, so the walk drops its rendering there and renders afresh at its next need.
-full, rendered = {{"renames": (1, 4), "widening": (1, 2), "relation": (2, 5)}}[{plan!r}]
-assert registries == [1] * full, registries
-assert models == ["Record"] * rendered, models
+# cheaply, re-rendering only the changed model and those that point at it. A widening
+# AlterField renders nothing before the removal. Each key alteration in the hub plan
+# would re-render all ten models, so the walk drops its rendering before the first and
+# renders afresh at the rename: two full renders and 32 models, against 52 kept current.
+full, size, rendered = {{"renames": (1, 1, 4), "widening": (1, 1, 2), "hub": (2, 10, 32)}}[{plan!r}]
+assert registries == [size] * full, registries
+assert len(models) == rendered, models
 """
     )
 
