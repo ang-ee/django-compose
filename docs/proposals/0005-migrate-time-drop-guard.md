@@ -54,14 +54,20 @@ choices behind it.
   the plan's own was rejected: a `RunSQL` rename then left the renamed, populated
   storage to a later native drop unprobed. Custom SQL that moves storage under a name
   the walk accounts for is not detected, since that needs parsing SQL; the
-  specification states that class. A state the walk cannot render afresh, or move
-  forward, ends the walk, in whatever history: every judged removal from there on is
-  refused, and classified as every other refusal is, so a project without guarded
-  drops there migrates as it did before the guard. Following on past it without
-  following names was rejected: a native rename after it moved stored data under a
-  name the walk probed as it was before the plan. Refusing the operation where the walk
-  ended was rejected too: it named a migration the project cannot edit, blamed the
-  project's own history for another app's, and refused a plan without guarded drops.
+  specification states that class. A state the walk cannot render afresh, in whatever
+  history, leaves it blind: it moves the unrendered state on, follows no name and
+  proves nothing, and refuses every judged removal that would need either, any table
+  drop and, where data is stored, any undeclared removal. One it cannot copy or move
+  forward ends it, and every judged removal from there on is refused. Both are
+  classified as every other refusal is, so a project without guarded drops there
+  migrates as it did before the guard. Judging on past a render failure by the names
+  before the plan was rejected: a native rename after it moved stored data under a
+  name the walk probed as it was before the plan. Ending the walk at a render failure
+  was rejected too: it refused declared drops, and column removals where nothing is
+  stored, which need neither a rendering nor a proof, on every test database. Refusing
+  the operation where the walk stopped was rejected: it named a migration the project
+  cannot edit, blamed the project's own history for another app's, and refused a plan
+  without guarded drops.
 - **Render in place until a relation changes.** The walk keeps its state unrendered
   until it first needs a model, at a guarded removal or a rename that can change a
   storage name, renders it there in place, and lets Django's incremental reload keep

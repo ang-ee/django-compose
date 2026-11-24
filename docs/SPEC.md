@@ -528,14 +528,19 @@ It runs at two points on these rules:
   including for a squash-replaced target, in the order the executor applies it. A
   planned migration the walk cannot follow is refused by name. Where the walk cannot
   render afresh the migration state it reads, though native `migrate`, which keeps its
-  rendering current in place, may apply it, or where whatever it runs raises while it
-  copies an operation, reads a field's naming or moves that state forward, the walk ends
-  there, whichever history left it so, and its refusals name what was raised. From there
-  on every removal in the history the guard judges is refused, however empty, and so
-  is every such table drop the walk met, whose owners at the end of the plan it cannot
-  tell; a plan without one applies as native `migrate` applies it. Without the state,
-  a field's removal cannot be told from a many-to-many table's, so on a database that
-  stores nothing a column removal is refused there too.
+  rendering current in place, may apply it, the walk stops rendering there, whichever
+  history left the state so: it follows no name and proves nothing from there on, and
+  moves the unrendered state on, which still tells whether a removal drops a table.
+  From there on it refuses every removal in the history the guard judges that can drop
+  a table, and, where data is stored, every undeclared one, however empty; a declared
+  column drop needs no proof and applies, and where nothing is stored a column removal
+  is not refused. Where whatever the walk runs raises while it copies an operation that
+  can change the state, reads a field's naming or moves the state forward, the walk
+  ends there instead, and every removal in the history the guard judges from there on
+  is refused, since without the state a field's removal cannot be told from a
+  many-to-many table's. Either way every such table drop the walk met before is refused
+  too, since its owners at the end of the plan cannot be told, the refusals name what
+  was raised, and a plan with no such removal applies as native `migrate` applies it.
 
 At `migrate`:
 

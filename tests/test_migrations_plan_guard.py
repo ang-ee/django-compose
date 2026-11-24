@@ -1642,7 +1642,7 @@ def test_a_state_the_walk_cannot_render_ends_it_and_refuses_what_it_judges(host)
         PRELUDE
         + """
 seed("0002_tag")
-ended = "cannot follow the migration state at alpha.0005_drop (ValueError: The field"
+ended = "cannot render the migration state at alpha.0005_drop (ValueError: The field"
 expect(CommandError, "alpha.0005_drop (Remove field old from record): " + ended, migrate)
 # Without the state at the end of the plan, no table drop can be told from a kept table.
 unowned = "alpha.0003_untag (Delete model Tag): cannot tell who owns its table at the end of the plan"
@@ -1663,14 +1663,19 @@ class Migration(migrations.Migration):
 """
 
 
+@pytest.mark.parametrize("declared", [False, True])
 @pytest.mark.parametrize("database", ["populated", "fresh", "later"])
-def test_a_guarded_removal_after_the_walk_ends_in_history_it_does_not_judge_is_refused(host, database):
+def test_a_guarded_removal_after_the_walk_goes_blind_is_refused_only_where_it_needs_a_rendering(
+    host, database, declared
+):
     root, run = host
     # alpha's history is an installed distribution's. Its plan deletes Tag while Record.tag
     # still points at it, which native migrate applies in place, while a fresh render of
     # the state fails until the state-only removal of tag: where data is stored, at the
     # column drop the walk follows, where nothing is, at the deletion of Spare. The walk
-    # ends there, and every removal it judges from there on is refused, however empty.
+    # goes blind there. Where data is stored it refuses every undeclared removal it judges
+    # from there on, however empty, as it cannot prove one; a declared column drop needs
+    # no proof, and where nothing is stored a column removal can lose nothing.
     migration(root, "0002_tag", [created("Tag"), created("Spare"), add_field("tag", TAGGED)])
     plan = [
         'migrations.DeleteModel(name="Tag")',
@@ -1683,14 +1688,16 @@ def test_a_guarded_removal_after_the_walk_ends_in_history_it_does_not_judge_is_r
     write(root, "history/beta/0001_item.py", ITEM)
     field = "models.CharField(max_length=4, null=True)"
     extra = f'migrations.AddField(model_name="item", name="extra", field={field})'
-    removals = ['migrations.RemoveField(model_name="item", name="spare")']
+    remove = "IntendedRemoveField" if declared else "migrations.RemoveField"
+    removals = [f'{remove}(model_name="item", name="spare")']
     if database == "later":
-        removals = [extra, *removals, 'migrations.RemoveField(model_name="item", name="extra")']
+        removals = [extra, *removals, f'{remove}(model_name="item", name="extra")']
     write(
         root,
         "history/beta/0002_drop.py",
         f"""
 from django.db import migrations, models
+from django_compose.operations import IntendedRemoveField
 class Migration(migrations.Migration):
     dependencies = [("beta", "0001_item"), ("alpha", "0003_plan")]
     operations = [{", ".join(removals)}]
@@ -1704,20 +1711,23 @@ guard._guarded = lambda labels: frozenset(labels) - {{"alpha"}}
 if {database!r} != "fresh":
     seed("0002_tag")
     MigrationExecutor(connection).migrate([("beta", "0001_item")])
-try:
+if {database!r} == "fresh" or {declared!r}:
     migrate()
-except CommandError as error:
-    refusal = str(error)
+    assert ("beta", "0002_drop") in applied()
 else:
-    raise AssertionError("expected a refusal")
-ended = "cannot follow the migration state at alpha.0003_plan (ValueError: "
-assert "beta.0002_drop (Remove field spare from item): " + ended in refusal, refusal
-if {database!r} == "later":
-    assert "beta.0002_drop (Remove field extra from item): " + ended in refusal, refusal
-assert "To proceed, order the history so that its state renders at every operation" in refusal, refusal
-# alpha's history is not the project's to change, so none of its removals is refused.
-assert "alpha.0003_plan (Delete" not in refusal and "alpha.0003_plan (Remove" not in refusal, refusal
-assert ("alpha", "0003_plan") not in applied()
+    try:
+        migrate()
+    except CommandError as error:
+        refusal = str(error)
+    else:
+        raise AssertionError("expected a refusal")
+    blind = "cannot render the migration state at alpha.0003_plan (ValueError: "
+    assert "beta.0002_drop (Remove field spare from item): " + blind in refusal, refusal
+    if {database!r} == "later":
+        assert "beta.0002_drop (Remove field extra from item): " + blind in refusal, refusal
+    # alpha's history is not the project's to change, so none of its removals is refused.
+    assert "alpha.0003_plan (Delete" not in refusal and "alpha.0003_plan (Remove" not in refusal, refusal
+    assert ("alpha", "0003_plan") not in applied()
 """
     )
 
@@ -1756,8 +1766,8 @@ seed("0002_tag")
 MigrationExecutor(connection).migrate([("beta", "0001_item")])
 with connection.cursor() as cursor:
     cursor.execute("INSERT INTO beta_item (spare, kept) VALUES ('', 'precious')")
-ended = "cannot follow the migration state at alpha.0003_plan (ValueError: "
-expect(CommandError, "beta.0002_drop (Remove field spare from item): " + ended, migrate)
+blind = "cannot render the migration state at alpha.0003_plan (ValueError: "
+expect(CommandError, "beta.0002_drop (Remove field spare from item): " + blind, migrate)
 with connection.cursor() as cursor:
     cursor.execute("SELECT spare, kept FROM beta_item")
     assert cursor.fetchall() == [("", "precious")]
@@ -2023,7 +2033,7 @@ except CommandError as error:
     refusal = str(error)
 else:
     raise AssertionError("expected a refusal")
-removal = "beta.0002_rename (Remove field later from item): cannot follow the migration state at "
+removal = "beta.0002_rename (Remove field later from item): cannot render the migration state at "
 assert removal + "beta.0002_rename (" in refusal, refusal
 assert "Rename field" not in refusal and "alpha.0" not in refusal, refusal
 assert ("beta", "0002_rename") not in applied()
@@ -2976,7 +2986,14 @@ class Holding(migrations.RunPython):
 """
 
 
-@pytest.mark.parametrize("held", ["sys", "Delegating(migrations.RunPython.noop)"])
+@pytest.mark.parametrize(
+    "held",
+    [
+        "Holding(sys)",
+        "Holding(Delegating(migrations.RunPython.noop))",
+        "migrations.RunPython(Delegating(migrations.RunPython.noop))",
+    ],
+)
 @pytest.mark.parametrize("removal", [False, True])
 def test_an_operation_the_walk_cannot_copy_ends_it(host, removal, held):
     root, run = host
@@ -2984,7 +3001,8 @@ def test_an_operation_the_walk_cannot_copy_ends_it(host, removal, held):
     # copy, so cannot progress without changing what native migrate applies: copying a
     # module raises TypeError, a delegating wrapper RecursionError. On a database that
     # stores nothing, the walk judges beta's deletion of Spare and ends there; only a
-    # removal of alpha's own history after it is refused.
+    # removal of alpha's own history after it is refused. A RunPython changes no state,
+    # so the walk shares it uncopied, as native migrate does.
     beta(root, "0001_spare", [f'migrations.CreateModel(name="Spare", fields=[{KEY}])'])
     write(
         root,
@@ -2994,7 +3012,7 @@ from django.db import migrations
 {HOLDING}
 class Migration(migrations.Migration):
     dependencies = [("beta", "0001_spare")]
-    operations = [migrations.DeleteModel(name="Spare"), Holding({held})]
+    operations = [migrations.DeleteModel(name="Spare"), {held}]
 """,
     )
     if removal:
@@ -3008,7 +3026,8 @@ class Migration(migrations.Migration):
     operations = [{REMOVE_OLD}]
 """,
         )
-    error = "TypeError" if held == "sys" else "RecursionError"
+    error = "TypeError" if "sys" in held else "RecursionError"
+    ends = removal and held.startswith("Holding")
     run(
         PRELUDE
         + f"""
@@ -3020,7 +3039,7 @@ try:
     check_native_history(apps, labels=("alpha", "beta"))
 except RuntimeError as error:
     assert "does not match composed models" in str(error), error
-if {removal!r}:
+if {ends!r}:
     refusal = "alpha.0002_drop (Remove field old from record): cannot follow the migration state at "
     expect(CommandError, refusal + "beta.0002_held ({error}: ", migrate)
     assert ("beta", "0002_held") not in applied()
