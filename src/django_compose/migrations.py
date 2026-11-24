@@ -354,6 +354,7 @@ def _shared_table_drops(
     aliases: Iterable[str],
     *,
     catalog: bool,
+    planned: bool = False,
     refilled: Callable[[str], bool] | None = None,
     holders: Sequence[Collection[str]] = (),
 ) -> list[tuple[int, str, str]]:
@@ -362,7 +363,9 @@ def _shared_table_drops(
     Each comes with its remedy: declaring the drop cannot help a table that is not the
     removed model's alone, and storage whose identity cannot be resolved needs a name
     that can be. Without the ``catalog``, names are compared alone, and two that only
-    the catalog could tell apart cannot be resolved. ``refilled`` tells whether a native
+    the catalog could tell apart cannot be resolved. A catalog read before a ``planned``
+    run, whose operations may create a name it lacks, tells two apart only where it
+    holds both. ``refilled`` tells whether a native
     operation put storage under a dropped table's name after the drop, as Django's
     ``RemoveField`` and ``AddField`` for a retargeted many-to-many field do: a model
     owning that name at the end owns the new storage, not the dropped table, unless it
@@ -407,16 +410,19 @@ def _shared_table_drops(
                             remaining.add(active_storage._meta.label_lower)
                         elif key(identity[1]) == key(other[1]):
                             # Another namespace or case: only the catalog can tell them apart.
-                            if not catalog:
+                            physical: set[tuple[str, str] | None] = {None}
+                            if catalog:
+                                with connection.cursor() as cursor:
+                                    physical = {
+                                        _storage_identity(connection, name, cursor)
+                                        for name in (table, active_table)
+                                    }
+                            if not catalog or planned and None in physical:
                                 raise ImproperlyConfigured(
                                     f"cannot tell {table!r} from {active_table!r} from names alone"
                                 )
-                            with connection.cursor() as cursor:
-                                physical = _storage_identity(connection, table, cursor)
-                                if physical is not None and physical == _storage_identity(
-                                    connection, active_table, cursor
-                                ):
-                                    remaining.add(active_storage._meta.label_lower)
+                            if len(physical) == 1 and None not in physical:
+                                remaining.add(active_storage._meta.label_lower)
                     if remaining:
                         owners_text = ", ".join(sorted(remaining))
                         refusals.append(
@@ -1197,7 +1203,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         return [
             (removals[index][0], removals[index][1][0], remedy, refusal)
             for index, remedy, refusal in _shared_table_drops(
-                drops, state, (using,), catalog=probe, refilled=refilled, holders=holding
+                drops, state, (using,), catalog=probe, planned=True, refilled=refilled, holders=holding
             )
         ]
 

@@ -1137,6 +1137,28 @@ assert "keep a table another model may still own" not in message, message
     )
 
 
+@pytest.mark.parametrize("database", ["fresh", "populated"])
+def test_two_spellings_of_a_table_absent_before_the_plan_are_told_apart_by_names_alone(host, database):
+    root, run = host
+    # SQLite does not tell ALPHA_X from alpha_x. The plan creates A's table, B adopts it
+    # under the other spelling, and A is deleted, which would leave B without a table.
+    # The catalog before the plan holds neither spelling, so it cannot tell them apart.
+    adopted = state_only(created("B", db_table="ALPHA_X"))
+    migration(
+        root, "0002_drop", [created("A", db_table="alpha_x"), adopted, 'migrations.DeleteModel(name="A")']
+    )
+    run(
+        PRELUDE
+        + f"""
+if {database!r} == "populated":
+    seed()
+refusal = "alpha.0002_drop (Delete model A): cannot prove shared storage safe on 'default': cannot tell"
+expect(CommandError, refusal, migrate)
+expect(CommandError, "'alpha_x' from 'ALPHA_X' from names alone", migrate)
+"""
+    )
+
+
 def test_receiver_is_disconnected_after_refused_runs(host):
     root, run = host
     migration(root, "0002_drop", [REMOVE_OLD])

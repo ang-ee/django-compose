@@ -536,7 +536,8 @@ At `migrate`:
   or SQLite's main database with nothing attached; on other backends the guard always
   probes. `--fake-initial` adoption finds tables, so it is probed. The shared-table
   rule needs no data and still applies, from names alone: names only a catalog could
-  tell apart are refused.
+  tell apart are refused. Elsewhere the catalog tells them apart only where it holds
+  both before the plan, since the plan may create a name it lacks.
 - **Scope:** the history the project owns: the build record's `HISTORY_LABELS` and
   every project-source app, one whose migration package no installed distribution
   owns, as the retained-import audit's resolver classifies it. Django's and installed

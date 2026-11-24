@@ -89,6 +89,21 @@ CASES = {
         ["kept"],
         "alpha.record: alpha_record.old holds data in 1 rows on 'default'",
     ),
+    # The plan creates alpha_x, B adopts it spelled with its schema, and A's deletion
+    # drops it. The catalog before the plan holds neither spelling.
+    "spelled_twice": _Case(
+        [
+            [_create("Record")],
+            [
+                _create("A", "alpha_x"),
+                _state_only(_create("B", '"public"."alpha_x"')),
+                'migrations.DeleteModel(name="A")',
+            ],
+        ],
+        1,
+        ["kept"],
+        "cannot tell 'alpha_x' from '\"public\".\"alpha_x\"' from names alone",
+    ),
 }
 
 
