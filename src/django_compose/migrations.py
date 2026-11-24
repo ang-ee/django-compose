@@ -16,7 +16,7 @@ from typing import Any, Final, Literal, NamedTuple, cast
 from django.apps import apps as global_apps
 from django.apps.registry import Apps
 from django.conf import settings
-from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
+from django.core.exceptions import FieldDoesNotExist, FieldError, ImproperlyConfigured
 from django.core.management.base import CommandError
 from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, router, transaction
 from django.db.backends.base.base import BaseDatabaseWrapper
@@ -694,8 +694,9 @@ class _End(Exception):
 
 
 # What Django raises where it cannot render a migration state, read a model or field from
-# it, or move it forward through an operation.
-_STUCK = (ValueError, LookupError, FieldDoesNotExist)
+# it, or move it forward through an operation: a render's unresolved references or bases,
+# a model or field the state lacks, and a model class Django refuses to build.
+_STUCK = (ValueError, LookupError, FieldDoesNotExist, FieldError)
 
 # A judged removal: the migration and operation refused, the remedy where the refusal
 # has one of its own (see _refusal), and the refusal.

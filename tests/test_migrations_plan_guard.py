@@ -3053,3 +3053,49 @@ with connection.cursor() as cursor:
 assert [column.name for column in described] == ["id"]
 """
     )
+
+
+@pytest.mark.parametrize("database", ["fresh", "populated"])
+def test_a_model_django_cannot_render_ends_the_walk_where_native_migrate_fails(host, database):
+    root, run = host
+    # beta's history is an installed distribution's. Renaming the parent of a multi-table
+    # child gives a state Django cannot render: native migrate applies the migrations
+    # before it and fails there. alpha's own removal, of an empty column, comes first and
+    # is proved; the walk then ends where Django cannot move the state forward, with no
+    # guarded removal after it, so the plan migrates as without the guard.
+    parent = (
+        '("parent_ptr", models.OneToOneField(auto_created=True, on_delete=models.CASCADE, '
+        'parent_link=True, primary_key=True, serialize=False, to="beta.parent"))'
+    )
+    beta(
+        root,
+        "0001_initial",
+        [
+            f'migrations.CreateModel(name="Parent", fields=[{KEY}])',
+            f'migrations.CreateModel(name="Child", fields=[{parent}], bases=("beta.parent",))',
+        ],
+    )
+    migration(root, "0002_drop", [REMOVE_OLD])
+    field = "models.CharField(max_length=4, null=True)"
+    name = f'migrations.AddField(model_name="parent", name="name", field={field})'
+    beta(root, "0002_name", [name], [("beta", "0001_initial"), ("alpha", "0002_drop")])
+    rename = [
+        'migrations.RenameModel(old_name="Parent", new_name="Base")',
+        'migrations.DeleteModel(name="Child")',
+    ]
+    beta(root, "0003_rename", rename, [("beta", "0002_name")])
+    run(
+        PRELUDE
+        + f"""
+from django.core.exceptions import FieldError
+import django_compose.migrations as guard
+guarded = guard._guarded
+guard._guarded = lambda labels: guarded(labels) - {{"beta"}}
+if {database!r} == "populated":
+    seed(old="")
+    MigrationExecutor(connection).migrate([("beta", "0001_initial")])
+expect(FieldError, "clashes with declared field", migrate)
+assert {{("alpha", "0002_drop"), ("beta", "0002_name")}} <= applied()
+assert ("beta", "0003_rename") not in applied()
+"""
+    )
