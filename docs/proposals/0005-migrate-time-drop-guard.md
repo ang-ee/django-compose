@@ -74,30 +74,28 @@ choices behind it.
 - **Nothing stored, nothing probed.** An alias with no table but the recorders holds
   no data, so it is not probed; the shared-table rule needs no data and applies there
   from names alone. Skipping the whole walk was rejected: a plan refused on every
-  populated database then deleted a table another model still owns on a fresh one.
-  Every test database is fresh, so the walk there renders only at a removal that can
-  drop a table and classifies an app's history only where the rule refuses one of its
-  removals, before it walks again, which it then does only for history it judges.
-  A table dropped and created again, as Django's autodetector writes a many-to-many
-  field's new target, is not kept: the rule asks at the end of the plan whether a
-  native creation or followed rename filled the table's name after the drop. Judging
-  ownership at the removal instead was rejected: a model that a state-only operation
-  gives the name after the drop would be left without a table. Each walk records the
-  models owning a dropped table as it drops it, and follows them through
-  `RenameModel`; they never own the new storage: taking every owner of a filled name
-  for its owner lost the rows of a model that owned the table beside the removed one.
-  Where nothing is stored, the walk follows names only once names alone keep a table,
-  so a fresh database pays for following them only then. An owner under a deleted
-  model's own label that did not own the table when it was dropped is taken for that
-  model created again, as histories commonly delete and re-create a model: telling a
-  state-only re-adoption under that label apart made a composed host's every fresh
-  database follow the plan's names, several times the cost. Exempting every owner
-  under that label lost the rows of a model that owned the table and was renamed into
-  it.
-  An empty pre-plan state was rejected as the test, because `--fake-initial`
-  and state-only adoption give existing tables a model the plan introduces. Native
-  table introspection was rejected as the inventory, because on PostgreSQL it lists
-  only the search path's tables.
+  populated database then deleted a table another model still owns on a fresh one. An
+  empty pre-plan state was rejected as the test, because `--fake-initial` and
+  state-only adoption give existing tables a model the plan introduces. Native table
+  introspection was rejected as the inventory, because on PostgreSQL it lists only the
+  search path's tables. Every test database is fresh, so the walk there renders only at
+  a removal that can drop a table, follows names only once names alone keep a table,
+  and classifies an app's history only where the rule refuses one of its removals,
+  before it walks again, which it then does only for history it judges.
+- **A dropped table's name filled again.** A table dropped and created again, as
+  Django's autodetector writes a many-to-many field's new target, is not kept: the
+  rule asks at the end of the plan whether a native creation or followed rename filled
+  the table's name after the drop. Judging ownership at the removal instead was
+  rejected: a model that a state-only operation gives the name after the drop would be
+  left without a table. Each walk records the models owning a dropped table as it
+  drops it, and follows them through `RenameModel`; they never own the new storage:
+  taking every owner of a filled name for its owner lost the rows of a model that
+  owned the table beside the removed one. An owner under a deleted model's own label
+  that did not own the table when it was dropped is taken for that model created
+  again, as histories commonly delete and re-create a model: telling a state-only
+  re-adoption under that label apart made a composed host's every fresh database
+  follow the plan's names, several times the cost. Exempting every owner under that
+  label lost the rows of a model that owned the table and was renamed into it.
 - **Declaration.** `django_compose.operations` provides `IntendedRemoveField` and
   `IntendedDeleteModel`. A `Migration` attribute naming `(model, field)` pairs was
   rejected: it states each fact twice, and the operation and the list must then be

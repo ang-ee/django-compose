@@ -17,9 +17,12 @@
   system check `django_compose.E002`; `provision` refuses a shadowing `migrate`, the one
   it runs, before any database work.
 - `retire_history --purge` applies only the retired label's own migrations.
-- The drop guard proves storage empty with one EXISTS query and counts rows only for
-  a refusal. Deleting a table another model still owns is refused in the same words,
-  with the same remedy, at `makemigrations`, `migrate` and `retire_history --purge`.
+- The drop guard proves storage empty with one EXISTS query and counts rows only for a
+  refusal. On a database that stores data it walks and renders the whole pending plan
+  before the first operation, so `migrate` there takes seconds longer on a large plan:
+  about four and a half for two hundred pending migrations of a composed host.
+  Deleting a table another model still owns is refused in the same words, with the
+  same remedy, at `makemigrations`, `migrate` and `retire_history --purge`.
 - `SourceResolver.installed(module)` tells whether an installed distribution owns a
   module, settled by the first owner found rather than the full index.
 - **Upgrade impact:** a host whose unapplied history removes a column or table

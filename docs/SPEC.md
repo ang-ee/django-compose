@@ -471,16 +471,17 @@ schema is unchanged. For the prerelease cutoff and retained historical files,
 see [upgrade guidance](migrations.md#upgrade-from-the-removed-prerelease-protocol).
 
 Retirement requires consistent fully applied history across all configured
-migration-relevant aliases and refuses retained incoming cross-app dependencies.
-The alias scope includes native data-operation routing hints; custom database
-behavior that cannot establish a narrower scope requires all configured aliases.
-Optional purge authors/applies a final native deletion migration on that same alias
-scope; purge alone is not retirement. Successful retirement updates the record;
-the next compose removes the history-only config. Databases absent from command
-settings lie outside that proof. Guarded history reset additionally requires a
-fully applied, model-clean graph and uses transactional recorder changes with
-filesystem rollback preserving original bytes and permissions. Normal build and
-clean never reset history.
+migration-relevant aliases and refuses retained incoming cross-app dependencies. The
+alias scope includes native data-operation routing hints; custom database behavior
+that cannot establish a narrower scope requires all configured aliases. Optional purge
+authors/applies a final native deletion migration on that same alias scope, applying
+only the retired label's migrations and naming a targeted `migrate <app> <name>` for
+any other app's pending migration in its chain, since a full `migrate` would reach the
+purge; purge alone is not retirement. Successful retirement updates the record; the
+next compose removes the history-only config. Databases absent from command settings
+lie outside that proof. Guarded history reset additionally requires a fully applied,
+model-clean graph and uses transactional recorder changes with filesystem rollback
+preserving original bytes and permissions. Normal build and clean never reset history.
 
 `check_migrations` checks native state.
 `check_migrations --imports` statically audits selected migration sources,
@@ -613,16 +614,13 @@ Squashing folds a declared field removal into a following native `DeleteModel`, 
 stays guarded. Only the declaring operation is exempt. A purge migration authored by
 `retire_history --purge` declares nothing: purging retired data is a per-deployment
 decision that `retire_history <label> --purge` applies, and a refusal names that
-command. The purge itself applies only the retired label's migrations, and names a
-targeted `migrate <app> <name>` for any other app's pending migration in its chain,
-since a full `migrate` would reach the purge.
+command.
 
 Faked and backwards plans are not judged. `RunSQL` and other custom database code are
 not parsed: a drop they make is not judged, and the walk follows no rename they make.
-Storage they move under a vacated name, or under one absent before the plan that no
-native operation of the plan creates, cannot be proved, and its removal is refused.
-Storage they move under a name the walk accounts for is not detected: under a name
-that held other storage before the plan, the guard probes that other storage, and
+Beside the storage the probe refuses, under a vacated name or one absent before the
+plan, storage they move under a name the walk accounts for is not detected: under a
+name that held other storage before the plan, the guard probes that other storage, and
 under one a native operation of the plan created or filled, it takes the storage for
 the plan's own and probes nothing. That includes a `RunSQL` that swaps two tables
 present before the plan, and the plan's operations after a state the walk cannot

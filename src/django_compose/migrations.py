@@ -322,6 +322,13 @@ def _unsafe(prefix: str, refusals: Iterable[tuple[str, str]], outcome: str = "")
     )
 
 
+def _identities(connection: BaseDatabaseWrapper, table: str) -> tuple[tuple[str, str], tuple[str, str]]:
+    """Table name ``table`` as Django's identifiers spell it, its namespace and name, then
+    with its name as the backend tells names apart; see ``_name_key``."""
+    namespace, name = _storage_identifier(connection, table)
+    return (namespace, name), (namespace, _name_key(connection)(name))
+
+
 def _owners(state: ProjectState) -> Iterator[tuple[Any, Any]]:
     """Each model of ``state``, swapped ones included, with each table it owns: its own
     and its implicit many-to-many tables."""
@@ -334,15 +341,13 @@ def _holders(state: ProjectState, model: Any, field: str | None, connection: Bas
     """The labels of the models of ``state`` that own a table the removal of ``model``,
     or of its ``field``, drops, besides that storage itself, under a name the backend
     does not tell apart from it."""
-    key = _name_key(connection)
 
     def name(storage: Any) -> tuple[str, str] | None:
         try:
-            namespace, table = _storage_identifier(connection, storage._meta.db_table)
+            return _identities(connection, storage._meta.db_table)[1]
         except ImproperlyConfigured:
             # The shared-table rule refuses a name it cannot resolve on its own.
             return None
-        return namespace, key(table)
 
     dropped = tuple(_model_storage(model, removed_field=field))
     names = {name(storage) for storage in dropped} - {None}
@@ -385,16 +390,15 @@ def _shared_table_drops(
         dropped = tuple(_model_storage(model, removed_field=field))
         if not dropped:
             continue
-        held = holders[index] if holders else ()
+        owners_then = holders[index] if holders else ()
         for alias in aliases:
             connection = connections[alias]
             try:
                 if not operation.allow_migrate_model(alias, model):
                     continue
-                key = _name_key(connection)
                 for storage in dropped:
                     table = storage._meta.db_table
-                    identity = _storage_identifier(connection, table)
+                    identity, keyed = _identities(connection, table)
                     filled = refilled is not None and refilled(table)
                     remaining = set()
                     for owner, active_storage in owners:
@@ -403,21 +407,16 @@ def _shared_table_drops(
                         if (
                             field is None
                             and owner._meta.label_lower == model._meta.label_lower
-                            and owner._meta.label_lower not in held
+                            and owner._meta.label_lower not in owners_then
                         ) or not operation.allow_migrate_model(alias, owner):
                             continue
                         active_table = active_storage._meta.db_table
-                        other = _storage_identifier(connection, active_table)
-                        if (
-                            filled
-                            and owner._meta.label_lower not in held
-                            and identity[0] == other[0]
-                            and key(identity[1]) == key(other[1])
-                        ):
+                        other, other_keyed = _identities(connection, active_table)
+                        if filled and owner._meta.label_lower not in owners_then and keyed == other_keyed:
                             continue
                         if identity == other:
                             remaining.add(active_storage._meta.label_lower)
-                        elif key(identity[1]) == key(other[1]):
+                        elif keyed[1] == other_keyed[1]:
                             # Another namespace or case: only the catalog can tell them apart.
                             physical: set[tuple[str, str] | None] = {None}
                             if catalog:
@@ -576,8 +575,8 @@ def _proofs(
                         convert = connection.introspection.identifier_converter
                         key = _name_key(connection, column=True)
                         present = key(name) in {key(convert(item)) for item in names}
-            held = rows(alias).using(alias) if present else None
-            count = held.count() if held is not None and held.exists() else 0
+            data = rows(alias).using(alias) if present else None
+            count = data.count() if data is not None and data.exists() else 0
         except (DatabaseError, ImproperlyConfigured, _Undefined) as error:
             yield alias, None if declared else _unproved(routed, dropped, alias, error)
             continue
@@ -687,28 +686,29 @@ class _Storage:
         self._columns: dict[tuple[str, str | None], _Before] = {}
         # The names before the plan of storage a native creation adds.
         self._added: set[tuple[str, str | None]] = set()
-        self._held: list[tuple[Operation, str, str, str | None]] = []
+        # Native creations the walk passed, whose storage it names at its next render.
+        self._unnamed: list[tuple[Operation, str, str, str | None]] = []
         self._alias = connection.alias
-        self._table = _name_key(connection)
-        self._column = _name_key(connection, column=True)
+        self._table_key = _name_key(connection)
+        self._column_key = _name_key(connection, column=True)
 
     def key(self, table: str, column: str | None) -> tuple[str, str | None]:
         """A table name, or one of its column names, as the backend tells it apart."""
-        return self._table(table), None if column is None else self._column(column)
+        return self._table_key(table), None if column is None else self._column_key(column)
 
-    def table(self, name: str) -> _Before:
+    def _table(self, name: str) -> _Before:
         """The storage under table ``name``."""
-        return self._tables.get(self._table(name), name)
+        return self._tables.get(self._table_key(name), name)
 
-    def column(self, table: str, name: str) -> _Before:
+    def _column(self, table: str, name: str) -> _Before:
         """The storage under column ``name`` of ``table``, which shares a created or vacated table's fate."""
-        before = self.table(table)
+        before = self._table(table)
         return self._columns.get(self.key(before, name), name) if isinstance(before, str) else before
 
     def _rename_table(self, old: str, new: str) -> None:
-        if self._table(old) != self._table(new):
-            self._tables[self._table(new)] = self.table(old)
-            self._tables[self._table(old)] = _VACATED
+        if self._table_key(old) != self._table_key(new):
+            self._tables[self._table_key(new)] = self._table(old)
+            self._tables[self._table_key(old)] = _VACATED
 
     def follow(self, before: Any, after: Any, renamed: Mapping[str, str]) -> None:
         """Record what a database operation renamed, from the model before and after it.
@@ -717,7 +717,7 @@ class _Storage:
         as Django's ``database_forwards`` does, so a swapped model never arrives here.
         """
         self._rename_table(before._meta.db_table, after._meta.db_table)
-        table = self.table(after._meta.db_table)
+        table = self._table(after._meta.db_table)
         for field in (*before._meta.local_fields, *before._meta.local_many_to_many):
             try:
                 now = after._meta.get_field(renamed.get(field.name, field.name))
@@ -731,32 +731,32 @@ class _Storage:
                 field.concrete
                 and now.concrete
                 and isinstance(table, str)
-                and self._column(field.column) != self._column(now.column)
+                and self._column_key(field.column) != self._column_key(now.column)
             ):
-                self._columns[self.key(table, now.column)] = self.column(after._meta.db_table, field.column)
+                self._columns[self.key(table, now.column)] = self._column(after._meta.db_table, field.column)
                 self._columns[self.key(table, field.column)] = _VACATED
 
-    def hold(self, operation: Operation, label: str, named: tuple[str, str | None]) -> None:
-        """Hold the native creation of the model and field ``named`` until ``resolve_from``."""
-        self._held.append((operation, label, *named))
+    def creating(self, operation: Operation, label: str, named: tuple[str, str | None]) -> None:
+        """Note the native creation of the model and field ``named``; see ``name_created``."""
+        self._unnamed.append((operation, label, *named))
 
-    def resolve_from(self, state: ProjectState) -> None:
-        """Name the storage each held creation added, from ``state`` rendered since.
+    def name_created(self, state: ProjectState) -> None:
+        """Name the storage each creation noted since added, from ``state`` rendered since.
 
-        Nothing is rendered while nothing is held. Django creates storage only where the
+        Nothing is rendered while no creation is unnamed. Django creates storage only where the
         operation migrates the model. A model or field removed in between is left
         unnamed, so its absent storage stays refused.
         """
-        if not self._held:
+        if not self._unnamed:
             return
-        for operation, label, name, field in self._held:
+        for operation, label, name, field in self._unnamed:
             try:
                 model = state.apps.get_model(label, name)
                 if operation.allow_migrate_model(self._alias, model):
                     self._create(model, field)
             except LookupError, FieldDoesNotExist:
                 continue
-        self._held.clear()
+        self._unnamed.clear()
 
     def _create(self, model: Any, field: str | None) -> None:
         """Record the storage a native creation adds: a model's tables, or a field's table or column.
@@ -769,14 +769,14 @@ class _Storage:
         if field is not None and (definition := model._meta.get_field(field)).concrete:
             added.append((model._meta.db_table, definition.column))
         for table, column in added:
-            origin = self.table(table)
+            origin = self._table(table)
             if column is None:
                 if origin is _VACATED:
-                    self._tables[self._table(table)] = None
+                    self._tables[self._table_key(table)] = None
                 elif origin is not None:
                     self._added.add(self.key(origin, None))
             elif isinstance(origin, str):
-                before = self.column(table, column)
+                before = self._column(table, column)
                 if before is _VACATED:
                     self._columns[self.key(origin, column)] = None
                 elif before is not None:
@@ -786,16 +786,16 @@ class _Storage:
         """Record what a native removal drops: a deleted model's tables, its implicit
         many-to-many tables among them, or a removed field's column or many-to-many table."""
         if field is not None and not (definition := model._meta.get_field(field)).many_to_many:
-            if definition.concrete and isinstance(origin := self.table(model._meta.db_table), str):
+            if definition.concrete and isinstance(origin := self._table(model._meta.db_table), str):
                 self._columns[self.key(origin, definition.column)] = _VACATED
             return
         for storage in _model_storage(model, removed_field=field):
-            self._tables[self._table(storage._meta.db_table)] = _VACATED
+            self._tables[self._table_key(storage._meta.db_table)] = _VACATED
 
     def refilled(self, table: str) -> bool:
         """Whether a native creation or followed rename put storage under table name
         ``table``, which a native removal of the plan dropped, since it last did."""
-        return self._tables.get(self._table(table), _VACATED) is not _VACATED
+        return self._tables.get(self._table_key(table), _VACATED) is not _VACATED
 
     def stored(self, table: str, column: str | None) -> _Origin | None | Literal[_Vacated.NAME]:
         """The names the storage now under ``table``, or its ``column``, had before the plan.
@@ -803,10 +803,10 @@ class _Storage:
         ``None`` means the plan itself created that storage, and ``_VACATED`` that its
         name was vacated.
         """
-        before = self.table(table) if column is None else self.column(table, column)
+        before = self._table(table) if column is None else self._column(table, column)
         if not isinstance(before, str):
             return before
-        names = (cast(str, self.table(table)), None if column is None else before)
+        names = (cast(str, self._table(table)), None if column is None else before)
         added = not self._added.isdisjoint({self.key(names[0], None), self.key(*names)})
         return _Origin(*names, added)
 
@@ -1006,7 +1006,7 @@ class _Walk:
     It renders its own state in place where it needs a model: at every removal it
     follows, and otherwise at a judged removal it proves or that can drop a table; at a
     rename that can change a storage name; before an operation it does not follow while
-    a creation it holds is unnamed; and at the end, after a removal that can drop a
+    a creation it passed is unnamed; and at the end, after a removal that can drop a
     table. Django's incremental reload then keeps the rendering current while it is
     cheap, and the walk drops it before an operation where Django would re-render every
     related model recursively, see ``_relinks``, unless it follows that operation's
@@ -1084,7 +1084,7 @@ class _Walk:
         try:
             if self.following:
                 # Name what the plan's last creations added before asking what fills a name.
-                self.storage.resolve_from(state)
+                self.storage.name_created(state)
             shared = _shared_table_drops(
                 [drop.removal for drop in self.drops],
                 state,
@@ -1109,7 +1109,7 @@ class _Walk:
     def _rendered(
         self, migration: Migration, operation: Operation, state: ProjectState, name: str = ""
     ) -> Any:
-        """Name what held creations added, from ``state`` rendered in place where the walk
+        """Name what noted creations added, from ``state`` rendered in place where the walk
         reads it at ``operation``, and return the model ``name`` of the app, if any.
 
         Where Django cannot render the state afresh, though native ``migrate``, keeping
@@ -1119,7 +1119,7 @@ class _Walk:
         label = migration.app_label
         try:
             if self.following:
-                self.storage.resolve_from(state)
+                self.storage.name_created(state)
             return state.apps.get_model(label, name) if name else None
         except ValueError as error:
             self.unrendered = f"cannot render the migration state ({error})"
@@ -1302,7 +1302,7 @@ class _Walk:
                 self.storage.follow(before_model, after_model, renamed[2])
         if creation and self.following:
             # Named at the walk's next render, before anything can rename it.
-            self.storage.hold(operation, label, creation)
+            self.storage.creating(operation, label, creation)
 
 
 def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> None:
