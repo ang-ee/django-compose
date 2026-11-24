@@ -326,7 +326,7 @@ def _drive(environment: Path) -> None:
         assert DropGuardAutodetector(before, after).changes(graph)["alpha"]
         # Native namespace aliases can resolve two different explicit schema
         # names to the same empty relation. Namespace strings cannot prove
-        # independence; offline planning must refuse without a catalog query.
+        # independence; names alone must refuse it without a catalog query.
         with connection.cursor() as cursor:
             cursor.execute(
                 'CREATE TEMP TABLE "namespace_alias_records" (id integer PRIMARY KEY, "old" varchar(40))'

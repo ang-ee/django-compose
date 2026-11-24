@@ -3,25 +3,13 @@
 ## Unreleased
 
 - Apply the [drop guard](docs/SPEC.md#drop-guard) when `migrate` runs, and so in
-  `provision`, also under `--skip-checks`: a pending removal in the history the
-  project owns that would destroy stored data is refused before any operation runs,
-  under the name its storage had before the plan, wherever the plan's own renames move
-  it. Storage absent before the plan counts as the plan's own only where a native
-  operation of the plan creates it, and a name an earlier operation of the plan
-  vacated only once a native operation fills it again; a removal of other such
-  storage, such as a table a `RunSQL` renamed, cannot be proved and is refused; the
-  specification states what custom database code leaves undetected. Previously only
-  autodetected removals were judged, at `makemigrations`,
-  so a removal migration already on disk was applied unchecked. Django's and other
-  apps' history remains their owners' responsibility. On an alias that holds no table
-  but the migration and provision recorders, such as a fresh or test database on
-  PostgreSQL, where a table an extension owns does not count, or SQLite, nothing is
-  stored, so nothing is probed; deleting a table another model still owns is refused
-  there too, since that rule needs no data, unless a native operation of the plan
-  creates the table again after the drop, as Django writes a many-to-many field's new
-  target, for a model that did not own it as it was dropped. Other backends always
-  probe. See
-  [proposal 0005](docs/proposals/0005-migrate-time-drop-guard.md).
+  `provision`, also under `--skip-checks`: a pending removal in the history the project
+  owns is refused before any operation runs where it would destroy stored data or
+  delete a table another model still owns. Previously only autodetected removals were
+  judged, at `makemigrations`, so a removal migration already on disk was applied
+  unchecked. The specification states what the guard judges, on which databases, and
+  what it leaves undetected; see
+  [proposal 0005](docs/proposals/0005-migrate-time-drop-guard.md) for the decisions.
 - Add `django_compose.operations.IntendedRemoveField` and `IntendedDeleteModel` to
   declare a drop a migration intends; see
   [intended drops](docs/migrations.md#declare-an-intended-drop).
@@ -30,9 +18,9 @@
 - `retire_history --purge` applies only the retired label's own migrations.
 - The drop guard proves storage empty with one EXISTS query and counts rows only for
   a refusal. Deleting a table another model still owns is refused in the same words,
-  with the same remedy, at `makemigrations`, `migrate` and `retire_history --purge`:
-  keep the table, or first change that owner. A table whose identity the guard cannot
-  resolve gets its own remedy.
+  with the same remedy, at `makemigrations`, `migrate` and `retire_history --purge`.
+- `SourceResolver.installed(module)` tells whether an installed distribution owns a
+  module, settled by the first owner found rather than the full index.
 - **Upgrade impact:** a host whose unapplied history removes a column or table
   that still holds data is now refused at `migrate` and `provision`, which is the
   point. Review each named removal: keep the storage, or move its data and write the

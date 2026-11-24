@@ -287,7 +287,9 @@ subdirectories, including any directory named `web`, are ordinary source inputs.
 directories and then `sys.path`, without executing parent packages. Path-only
 lookups for fingerprints, serving and reload inputs do not inspect distribution
 metadata. Migration import audits additionally determine providers through exact
-RECORD or PEP 610 ownership, with one lazy index per audit. Native app/config
+RECORD or PEP 610 ownership, with one lazy index per audit. The drop guard asks only
+whether a distribution owns a migration package, which the first RECORD or PEP 610
+project found to name it settles before that index is built. Native app/config
 modules are imported to select configurations and must remain safe before Django
 setup. Snapshot and serving do not import the model compiler or execute integrations.
 
@@ -556,9 +558,9 @@ At `migrate`:
   written under the definition the field had then, which the guard does not keep:
   where an `AlterField` of the plan, in any form, changes the field's class, `null`,
   `default` or `db_default`, from which Django derives its default, only NULL is empty
-  in that column. The walk follows
-  every rename the plan's database operations make, whoever owns them:
-  `AlterModelTable`, `RenameModel`, `RenameField` and `AlterField`. It follows each
+  in that column. The walk follows every rename the plan's database operations make,
+  whoever owns them: `AlterModelTable`, `RenameModel`, `RenameField` and `AlterField`.
+  It follows each
   where Django applies it, on an alias that migrates the model the operation produces,
   so a swapped model or one routed elsewhere renames nothing. A subclass that replaces
   Django's `database_forwards` runs custom database code, which is not followed. Two

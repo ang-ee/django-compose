@@ -498,7 +498,7 @@ def _dropped(
 
 
 _ABSENT = "it is absent before the plan, and no native operation of the plan creates it"
-_VACANT = "an earlier operation of the plan vacated its name, and no native operation fills it again"
+_UNFILLED = "an earlier operation of the plan vacated its name, and no native operation fills it again"
 
 
 def _unproved(model: Any, dropped: _Dropped, alias: str, reason: object) -> str:
@@ -515,17 +515,17 @@ def _proofs(
     aliases: Iterable[str],
     *,
     declared: bool,
-    created: bool,
+    added: bool,
     absent: str = _ABSENT,
 ) -> Iterator[tuple[str, str | None]]:
     """Yield each alias the operation drops ``dropped`` on, with a refusal if it holds data.
 
     Routing is decided here, once per alias: Django routes the operation with
     ``routed``, while ``model`` describes the storage as the database holds it now.
-    A declared drop is routed but not probed. Absent storage holds nothing when
-    ``created``; otherwise nothing accounts for its absence, so it cannot be proved
-    empty, for the reason ``absent`` gives. One EXISTS query proves present storage
-    empty; only storage holding data is counted.
+    A declared drop is routed but not probed. Absent storage holds nothing where a
+    native creation ``added`` it; otherwise nothing accounts for its absence, so it
+    cannot be proved empty, for the reason ``absent`` gives. One EXISTS query proves
+    present storage empty; only storage holding data is counted.
     """
     table, column, rows = dropped
 
@@ -570,7 +570,7 @@ def _proofs(
         except (DatabaseError, ImproperlyConfigured) as error:
             yield alias, None if declared else _unproved(model, dropped, alias, error)
             continue
-        if not present and not created:
+        if not present and not added:
             yield alias, _unproved(model, dropped, alias, absent)
         elif count:
             yield (
@@ -611,7 +611,7 @@ class DropGuardAutodetector(MigrationAutodetector):
             for operation, model, field in removals
             if (dropped := _dropped(model, field, policies)) is not None
             # A database that lags the history holds nothing in storage it lacks.
-            for _, refusal in _proofs(operation, model, model, dropped, aliases, declared=False, created=True)
+            for _, refusal in _proofs(operation, model, model, dropped, aliases, declared=False, added=True)
             if refusal is not None
         ]
         refusals.extend(
@@ -729,10 +729,10 @@ class _Storage:
                 self._columns[self._key(table, now.column)] = self.column(after._meta.db_table, field.column)
                 self._columns[self._key(table, field.column)] = _VACATED
 
-    def add(self, operation: Operation, label: str, created: tuple[str, str | None]) -> None:
-        """Hold the native creation, or the ``AlterField``, of the model and field
-        ``created`` names until ``resolve_from``."""
-        self._held.append((operation, label, *created))
+    def hold(self, operation: Operation, label: str, named: tuple[str, str | None]) -> None:
+        """Hold the native creation, or the ``AlterField``, of the model and field ``named``
+        until ``resolve_from``."""
+        self._held.append((operation, label, *named))
 
     def resolve_from(self, state: ProjectState) -> None:
         """Name the storage each held creation added, or alteration redefined, from
@@ -912,7 +912,7 @@ def _empty_changes(before: Any, after: Any) -> bool:
     )
 
 
-def _created(operation: Operation) -> tuple[str, str | None] | None:
+def _creation(operation: Operation) -> tuple[str, str | None] | None:
     """The model and field whose storage a native operation creates; a new model adds its tables."""
     if isinstance(operation, CreateModel):
         return operation.name, None
@@ -1005,22 +1005,24 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
     ``migrate`` calls this from ``pre_migrate`` with the plan and alias it is about
     to apply, before any operation runs. The specification's "Drop guard" section
     defines the rule. An alias that stores nothing holds no data to prove: there the
-    walk probes nothing, follows no rename and renders only at a removal that can drop
-    a table, and only the shared-table rule, which needs no data, applies, from names
-    alone. Only where that rule keeps a table does the walk run again, following the
+    walk probes nothing, follows no rename and renders only at a judged removal that can
+    drop a table and at the end, and only the shared-table rule, which needs no data,
+    applies, from names alone. Only where that rule keeps a table does the walk run again, following the
     plan's names to see whether a native operation filled the dropped table's name, and
     only then is an app's history classified, for the removals still refused.
 
-    The walk renders its own state in place where it needs a model: at a guarded
-    removal, at a rename that can change a storage name, and at the end. Django's
-    incremental reload then keeps the rendering current while it is cheap, and the
-    walk drops it before an operation where Django would re-render every related
-    model recursively, see ``_relinks``, unless it follows that operation's rename and
-    so reads the model right after it. An ``AlterField`` that changes no column or
-    many-to-many table name is read from the state without rendering it. Storage a
-    native creation adds, and a column an alteration redefines, are named where the walk
-    next renders, or before an operation the walk does not follow. The pre-plan state is
-    the one native ``migrate`` builds, through the private
+    The walk renders its own state in place where it needs a model: at every removal it
+    follows, and otherwise at a judged removal it proves or that can drop a table; at a
+    rename that can change a storage name; before an operation it does not follow while
+    a creation or alteration it holds is unnamed; and at the end, after a removal that
+    can drop a table. Django's incremental reload then keeps the rendering current while
+    it is cheap, and the walk drops it before an operation where Django would re-render
+    every related model recursively, see ``_relinks``, unless it follows that
+    operation's rename and so reads the model right after it. An ``AlterField`` that
+    changes no column or many-to-many table name is read from the state without
+    rendering it. Storage a native creation adds, and a column an alteration redefines,
+    are named where the walk next renders, or before an operation the walk does not
+    follow. The pre-plan state is the one native ``migrate`` builds, through the private
     ``MigrationExecutor._create_project_state``, on the graph native ``migrate``
     planned with. Re-check on each Django upgrade: that private call, that graph,
     ``_relinks`` against ``ProjectState``'s reload rule, and the cached ``apps``
@@ -1102,7 +1104,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             unfollowed = f"the walk follows no name since {stop}" if stop else ""
             if origin is _VACATED:
                 if not declared and operation.allow_migrate_model(using, routed):
-                    refuse(migration, operation, _unproved(routed, dropped, using, unfollowed or _VACANT))
+                    refuse(migration, operation, _unproved(routed, dropped, using, unfollowed or _UNFILLED))
             elif origin is not None:
                 model, proof = routed, dropped
                 renamed = (origin.table, origin.column) != (dropped.table, dropped.column)
@@ -1118,7 +1120,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                     proof,
                     (using,),
                     declared=declared,
-                    created=origin.added,
+                    added=origin.added,
                     absent=unfollowed or _ABSENT,
                 ):
                     if refusal is not None:
@@ -1193,7 +1195,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             # states what that leaves undetected.
             native = following and database and _native(operation)
             renamed = _renamed(operation, state, label) if native else None
-            adds = _created(operation) if native else None
+            creation = _creation(operation) if native else None
             if not native and not _leaves_state(operation):
                 # Name what earlier creations added before an operation the walk does
                 # not follow can rename it.
@@ -1210,16 +1212,16 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
             operation.state_forwards(label, state)
             if altered and _empty_changes(before_field, _field(state, label, altered)):
                 # Named at the walk's next render, like a creation.
-                storage.add(altered, label, (altered.model_name, altered.name))
+                storage.hold(altered, label, (altered.model_name, altered.name))
             # Django changes storage only where the operation migrates the model it
             # produces: never for a swapped model, nor on an alias routed away.
             if renamed and following:
                 after_model = rendered(migration, operation, state, renamed[1])
                 if after_model is not None and operation.allow_migrate_model(using, after_model):
                     storage.follow(before_model, after_model, renamed[2])
-            if adds and following:
+            if creation and following:
                 # Named at the walk's next render, before anything can rename it.
-                storage.add(operation, label, adds)
+                storage.hold(operation, label, creation)
 
         walked: set[tuple[str, str]] = set()
         # Native migrate applies its plan in the order of the full clean plan.
