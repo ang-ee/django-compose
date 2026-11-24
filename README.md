@@ -66,9 +66,9 @@ python manage.py runserver       # Run Django's development server
 Django owns the app registry, ORM, managers, querysets and migration history.
 Generated classes import the source apps, so keep their packages installed.
 Rebuild generated code as apps change; preserve and review migration files.
-`makemigrations` and `migrate` refuse a migration of the project's own history
-that would remove a column or table still holding data, unless it declares that drop;
-see the
+`makemigrations` refuses to write a migration that would remove a column or table
+still holding data, and `migrate` refuses to apply one in the project's own history
+unless it declares that drop; see the
 [drop guard](https://github.com/ang-ee/django-compose/blob/main/docs/migrations.md#advanced-the-drop-guard-and-history-cutoffs).
 
 ## Get started

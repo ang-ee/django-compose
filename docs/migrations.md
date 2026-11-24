@@ -176,24 +176,21 @@ removing providers, using `check_migrations --imports --removing`.
 ## Advanced: the drop guard and history cutoffs
 
 The [drop guard](SPEC.md#drop-guard) refuses a migration that would remove a column
-or table still holding data. `makemigrations` applies it to what it autodetects, on
-every eligible configured database. `migrate`, and therefore `provision`, applies it
-to the plan it is about to run, before any operation and also under `--skip-checks`.
-On a database that stores nothing yet, such as a fresh or test database on
-PostgreSQL or SQLite, where tables an extension owns do not count, it has no data to
-prove, but still refuses deleting a table another model owns. On other backends it
-always probes.
-At `migrate` it judges the history the project owns, its composed history and its
-own apps' migrations; Django's migrations and those of installed apps are their
-owners' responsibility. A refusal names each
-migration, operation, model, column or table and row count, and nothing is migrated.
-Integration-owned row exemptions use `MigrationPolicy`. Implement required data
-cutovers as reviewed migrations. Proving an unindexed column empty scans its table.
-The specification lists what the guard does not judge.
+or table still holding data, or delete a table another model still owns.
+`makemigrations` applies it to what it autodetects; `migrate`, and therefore
+`provision`, to the plan it is about to run, before any operation and also under
+`--skip-checks`, judging only the history the project owns. The specification states
+what it judges, on which databases, how it tells storage apart, and what it does not
+judge.
+
+A refusal names each migration, operation and the storage at stake with its remedy,
+and nothing is migrated. Implement required data cutovers as reviewed migrations:
+keep the storage, or move its data and [declare the drop](#declare-an-intended-drop).
+Integrations exempt rows they retire with `MigrationPolicy`. Proving an unindexed
+column empty scans its table.
 
 On upgrade, a host whose unapplied history removes storage that still holds
-data is refused at `migrate` and `provision` until each named removal is reviewed:
-keep the storage, or move the data and declare the drop.
+data is refused at `migrate` and `provision` until each named removal is reviewed.
 
 ### Declare an intended drop
 
@@ -234,25 +231,6 @@ The import becomes part of retained history; the module imports only Django.
 `makemigrations` keeps refusing to autodetect a drop while an eligible database still
 holds the data. Author the cutover migration first, for example from
 `makemigrations --empty`, so the models and history agree.
-
-### Storage identity
-
-The drop guard compares storage on each eligible alias. A table still owned by an
-active model cannot be deleted, even when empty, on a database that stores nothing
-yet, or reached through differently quoted names. This includes Django's implicit
-many-to-many tables deleted with their owning model or field. An unmanaged, proxy
-or swapped model owns no table, so it does not keep one from deletion. Identical table names on disjoint database aliases do not
-establish shared ownership.
-
-Ordinary and double-quoted identifiers use Django's backend interpretation.
-PostgreSQL checks account for quoted case, explicit schemas and `search_path`;
-SQLite checks use its native case and temporary-table visibility rules. Attached
-SQLite databases, unsupported quoting or namespaces, excessive identifier lengths
-and otherwise unprovable identity cannot prove a drop safe, and the refusal names
-the remedy: declare a drop whose rows are in question, or give a table that others
-may share a name the guard can resolve. Other backends use native introspection,
-matching a name in any case where the backend ignores it; the real-backend
-regression coverage is SQLite and PostgreSQL.
 
 ### History cutoffs
 

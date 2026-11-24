@@ -492,23 +492,24 @@ uninstall anything. See [migration workflows](migrations.md).
 
 ### Drop guard
 
-The drop guard refuses a native removal that would destroy stored data. A removal is
-a `RemoveField` or `DeleteModel`, also one among the database operations of a
+The drop guard refuses a native removal that would destroy stored data. A removal is a
+`RemoveField` or `DeleteModel`, also one among the database operations of a
 `SeparateDatabaseAndState`. It drops a concrete field's column, a field's implicit
 many-to-many table, or a model's table; explicit through models and generated columns
 own no storage of their own. Storage is empty when no row holds data in it, read
-without the model's managers: a nullable column is empty at NULL and a non-null
-column at its native default, while a database default cannot prove emptiness. A
-deleted table may still hold rows that `MigrationPolicy.retired_primary_keys(model,
-alias)` explicitly retires. Eligibility follows native model options and routers.
-Quoted identifiers resolve through backend semantics; uncertain storage identity and
-an unavailable eligible database cannot prove a drop safe
-([supported cases](migrations.md#storage-identity)). A table that an active model
-still owns is never deleted, even when empty. An unmanaged, proxy or swapped model
-owns no table, since Django neither creates nor deletes one for it, so it keeps no
-table from deletion; the rows of that table remain protected. One EXISTS query proves
-present storage empty, so an unindexed column scans its table; rows are counted only
-for a refusal.
+without the model's managers: a nullable column is empty at NULL and a non-null column
+at its native default, while a database default cannot prove emptiness. A deleted
+table may still hold rows that `MigrationPolicy.retired_primary_keys(model, alias)`
+explicitly retires. Eligibility follows native model options and routers. Storage
+identity follows the backend's own rules: on PostgreSQL quoted case, explicit schemas
+and `search_path`, and on SQLite its case rule and the temporary tables it resolves
+first. Attached SQLite databases, an identifier Django's `split_identifier` does not
+represent faithfully, a namespace on another backend, a name over the backend's length
+limit, and an unavailable eligible database cannot prove a drop safe. A table that an
+active model still owns on the same alias is never deleted, even when empty; identical
+names on disjoint aliases are not shared. An unmanaged, proxy or swapped model owns no
+table, since Django neither creates nor deletes one for it, so it keeps no table from
+deletion; the rows of that table remain protected.
 
 It runs at two points on these rules:
 
@@ -535,9 +536,7 @@ At `migrate`:
   or SQLite's main database with nothing attached; on other backends the guard always
   probes. `--fake-initial` adoption finds tables, so it is probed. The shared-table
   rule needs no data and still applies, from names alone: names only a catalog could
-  tell apart are refused. Only a removal that can drop a table, a model deletion or a
-  many-to-many field's removal, is judged there, and an app's history is classified
-  for scope only where the rule refuses one of its removals.
+  tell apart are refused.
 - **Scope:** the history the project owns: the build record's `HISTORY_LABELS` and
   every project-source app, one whose migration package no installed distribution
   owns, as the retained-import audit's resolver classifies it. Django's and installed

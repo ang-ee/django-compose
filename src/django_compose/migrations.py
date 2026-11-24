@@ -461,8 +461,8 @@ def _proofs(
     dropped: _Dropped,
     aliases: Iterable[str],
     *,
-    declared: bool = False,
-    created: bool = True,
+    declared: bool,
+    created: bool,
 ) -> Iterator[tuple[str, str | None]]:
     """Yield each alias the operation drops ``dropped`` on, with a refusal if it holds data.
 
@@ -556,7 +556,8 @@ class DropGuardAutodetector(MigrationAutodetector):
             (_AUTHOR, refusal)
             for operation, model, field in removals
             if (dropped := _dropped(model, field, policies)) is not None
-            for _, refusal in _proofs(operation, model, model, dropped, aliases)
+            # A database that lags the history holds nothing in storage it lacks.
+            for _, refusal in _proofs(operation, model, model, dropped, aliases, declared=False, created=True)
             if refusal is not None
         ]
         refusals.extend(
