@@ -248,9 +248,9 @@ Its optional `--purge` authors and applies a final native deletion migration
 across the same database scope before retirement. It refuses deletion of tables
 still owned by active models before authoring or applying changes. A failed
 application retains that migration for retry and does not mark retirement
-complete. The purge is the explicit decision to drop that data: `migrate` and
-`provision` refuse an unapplied purge migration while its tables hold rows, so
-apply it on each deployment with `retire_history <label> --purge`. Successful
+complete. The purge is the explicit decision to drop that data, applied on each
+deployment with `retire_history <label> --purge`; the [drop guard](SPEC.md#drop-guard)
+states how `migrate` treats a pending purge migration. Successful
 retirement updates the build record under the normal writer lock; the next
 compose removes the history-only configuration. Removing the retired migration
 package from version control is a separate coordinated cutoff decision.

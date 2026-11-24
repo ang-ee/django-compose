@@ -30,12 +30,13 @@ from django_compose.management import unguarded_commands
 from django_compose.serving import receipt_lease, verified_receipt
 
 PROVISION_LOCK = 0x416E676565507276
-LEGACY_TABLE = "base_provision"
 
 
 class ProvisionRecorder:
     """Bootstrap infrastructure outside the installed model/migration registry."""
 
+    # The record's table name before its rename; ``provision --upgrade-from`` renames it.
+    legacy_table = "base_provision"
     _record_class: Any = None
 
     @classproperty
@@ -72,14 +73,14 @@ class ProvisionRecorder:
 
     def validate_tables(self) -> set[str]:
         tables = self.tables()
-        if LEGACY_TABLE in tables:
+        if self.legacy_table in tables:
             if self.Record._meta.db_table in tables:
                 raise CommandError(
                     "Both provision tables exist; resolve the ambiguous state before provisioning"
                 )
             raise CommandError(
-                "Legacy base_provision exists; stop old provisioners and run provision "
-                "--upgrade-from base_provision"
+                f"Legacy {self.legacy_table} exists; stop old provisioners and run provision "
+                f"--upgrade-from {self.legacy_table}"
             )
         return tables
 
@@ -89,21 +90,21 @@ class ProvisionRecorder:
 
     def ensure_schema(self, upgrade_from: str | None = None) -> None:
         tables = self.tables()
-        if self.Record._meta.db_table in tables and LEGACY_TABLE in tables:
+        if self.Record._meta.db_table in tables and self.legacy_table in tables:
             self.validate_tables()
-        if LEGACY_TABLE in tables and upgrade_from == LEGACY_TABLE:
+        if self.legacy_table in tables and upgrade_from == self.legacy_table:
             # Commit invalidation before publishing the new name: readiness readers
             # do not take the advisory lock, even on transactional-DDL backends.
             if self.connection.in_atomic_block or not self.connection.get_autocommit():
                 raise CommandError("Provision upgrade requires an independent autocommit statement")
             with self.connection.cursor() as cursor:
-                columns = self.connection.introspection.get_table_description(cursor, LEGACY_TABLE)
+                columns = self.connection.introspection.get_table_description(cursor, self.legacy_table)
                 expected = {field.column for field in self.Record._meta.local_fields}
                 if {column.name for column in columns} != expected:
                     raise CommandError(
                         "Legacy provision table has an unexpected schema; reconcile it before upgrade"
                     )
-                table = self.connection.ops.quote_name(LEGACY_TABLE)
+                table = self.connection.ops.quote_name(self.legacy_table)
                 cursor.execute(f"SELECT id, state, digest, compiler, updated FROM {table}")
                 rows = cursor.fetchall()
                 if len(rows) > 1 or any(
@@ -134,7 +135,7 @@ class ProvisionRecorder:
                     ("in_progress",),
                 )
             with self.connection.schema_editor() as editor:
-                editor.alter_db_table(self.Record, LEGACY_TABLE, self.Record._meta.db_table)
+                editor.alter_db_table(self.Record, self.legacy_table, self.Record._meta.db_table)
             return
         if self.Record._meta.db_table not in self.validate_tables():
             with self.connection.schema_editor() as editor:

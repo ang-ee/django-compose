@@ -51,6 +51,8 @@ django.setup()
 from django.apps import apps
 from django.db import connections
 from django_compose.provision import ProvisionRecorder
+TABLE = ProvisionRecorder.Record._meta.db_table
+LEGACY_TABLE = ProvisionRecorder.legacy_table
 """
 
 
@@ -674,8 +676,6 @@ def test_upgrade_invalidates_before_table_rename_and_refuses_ambiguity(tmp_path:
         + """
 from unittest.mock import patch
 from django.core.management.base import CommandError
-from django_compose.provision import LEGACY_TABLE
-TABLE = ProvisionRecorder.Record._meta.db_table
 recorder=ProvisionRecorder(connections['other'])
 recorder.ensure_schema()
 recorder.write('complete','current','compiler:1')
@@ -843,8 +843,6 @@ def test_malformed_legacy_cutover_refuses_before_any_mutation(tmp_path: Path) ->
         _SETUP
         + """
 from django.core.management.base import CommandError
-from django_compose.provision import LEGACY_TABLE
-TABLE=ProvisionRecorder.Record._meta.db_table
 recorder=ProvisionRecorder(connections['other'])
 with recorder.connection.cursor() as cursor:
     cursor.execute("CREATE TABLE base_provision (id integer, state text)")
@@ -887,8 +885,6 @@ def test_legacy_timestamp_is_validated_by_native_field_before_cutover(tmp_path: 
         _SETUP
         + """
 from django.core.management.base import CommandError
-from django_compose.provision import LEGACY_TABLE
-TABLE=ProvisionRecorder.Record._meta.db_table
 recorder=ProvisionRecorder(connections['other'])
 with recorder.connection.cursor() as cursor:
     cursor.execute('CREATE TABLE base_provision ('

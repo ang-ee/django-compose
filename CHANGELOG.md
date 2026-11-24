@@ -18,8 +18,9 @@
   `provision` checks before any database work; see the
   [drop guard](docs/SPEC.md#drop-guard).
 - `retire_history --purge` applies only the retired label's own migrations.
-- `django_compose.provision.TABLE` is gone: the provision record's table name is
-  `ProvisionRecorder.Record._meta.db_table`, read from the model that owns it.
+- `django_compose.provision.TABLE` and `LEGACY_TABLE` are gone: the provision record's
+  table name is `ProvisionRecorder.Record._meta.db_table`, read from the model that owns
+  it, and the name `provision --upgrade-from` renames is `ProvisionRecorder.legacy_table`.
 - The drop guard proves storage empty with one EXISTS query and counts rows only for a
   refusal. On a database that stores data it walks and renders the whole pending plan
   before the first operation, so `migrate` there takes seconds longer on a large plan:
