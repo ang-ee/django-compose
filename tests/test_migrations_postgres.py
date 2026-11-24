@@ -27,15 +27,41 @@ def _state_only(operation: str) -> str:
 
 class _Case(NamedTuple):
     """A history of app ``alpha``, the migrations applied before the plan with the rows
-    ``Record`` then holds, and the refusal ``migrate`` gives for the rest, or ``None``."""
+    ``Record`` then holds, and the refusal ``migrate`` gives for the rest, or ``None``.
+    ``setup`` runs first, on the empty database."""
 
     history: list[list[str]]
     applied: int
     rows: list[str]
     refusal: str | None
+    setup: tuple[str, ...] = ()
+
+
+def _refilled(schema: str) -> _Case:
+    """A fresh database, where names are compared alone: the plan drops A's table, a
+    database operation creates a table under the same bare name in ``schema``, and B
+    adopts the dropped table's name. The whole name tells whether that filled it."""
+    again = _create("Again", f'"{schema}"."records"')
+    return _Case(
+        [
+            [_create("A", '"left"."records"')],
+            [
+                'migrations.DeleteModel(name="A")',
+                f"migrations.SeparateDatabaseAndState(database_operations=[{again}])",
+                _state_only(_create("B", '"left"."records"')),
+            ],
+        ],
+        0,
+        [],
+        None if schema == "left" else "table '\"left\".\"records\"' is still owned by alpha.b on 'default'",
+        ('CREATE SCHEMA "left"', 'CREATE SCHEMA "right"'),
+    )
 
 
 CASES = {
+    # Filled under its own name, B owns new storage; in another schema, nothing filled it.
+    "refilled": _refilled("left"),
+    "refilled_elsewhere": _refilled("right"),
     # Shadow owns alpha_record with Record before the plan. A declared drop of Record's
     # table, then a creation of Fresh's under its name, would leave Shadow without its row.
     "continuing_refill": _Case(
@@ -91,6 +117,9 @@ def _migrate(environment: Path, root: Path, name: str) -> None:
     old_name = connection.settings_dict["NAME"]
     connection.creation.create_test_db(verbosity=0, autoclobber=False)
     try:
+        with connection.cursor() as cursor:
+            for statement in case.setup:
+                cursor.execute(statement)
         record = None
         if case.applied:
             executor = MigrationExecutor(connection)
@@ -146,7 +175,6 @@ def _drive(environment: Path) -> None:
         DropGuardAutodetector,
         _changed_removals,
         _shared_table_drops,
-        _Storage,
         _stores_nothing,
     )
     from django_compose.provision import ProvisionRecorder
@@ -290,25 +318,6 @@ def _drive(environment: Path) -> None:
                 list(_changed_removals(before, changes)), after, connections, catalog=False
             )
             assert names and all("from names alone" in refusal for _, _, refusal in names), names
-        # Where nothing is stored, names are compared alone, and a table a native operation
-        # creates again after its drop is told by its whole name: created again in another
-        # schema under the same bare name, it fills nothing, so a model still owning the
-        # dropped table keeps it; created again under the same name, it is new storage.
-        before, graph = state('"left"."records"', '"left"."records"')
-        after = before.clone()
-        after.remove_model("alpha", "record")
-        for again, kept in (('"left"."records"', False), ('"right"."records"', True)):
-            storage = _Storage(connection)
-            storage.end(before.apps.get_model("alpha", "Record"), None)
-            storage.create(state(again)[0].apps.get_model("alpha", "Record"), None)
-            removals = list(_changed_removals(before, changes))
-            with patch.object(connection, "cursor", side_effect=AssertionError("catalog query")):
-                refused = _shared_table_drops(
-                    removals, after, ["default"], catalog=False, refilled=storage.refilled
-                )
-            assert [refusal for _, _, refusal in refused] == (
-                ["table '\"left\".\"records\"' is still owned by beta.record on 'default'"] if kept else []
-            ), refused
         # Identical names on disjoint aliases protect only their own storage.
         before, graph = state("alias_records", '"alias_records"')
         model = before.apps.get_model("alpha", "Record")
