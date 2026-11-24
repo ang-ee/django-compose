@@ -25,6 +25,10 @@
   about four and a half for two hundred pending migrations of a composed host.
   Deleting a table another model still owns is refused in the same words, with the
   same remedy, at `makemigrations`, `migrate` and `retire_history --purge`.
+- `check_migrations`, and so `provision`, builds native history's state from copies of
+  the migration operations. Django rewrites in place the fields that reference a renamed
+  field, so a history renaming a field that another model's `to_field` names failed to
+  migrate after the check in the same process.
 - `SourceResolver.installed(module)` tells whether an installed distribution owns a
   module, settled by the first owner found rather than the full index.
 - **Upgrade impact:** a host whose unapplied history removes a column or table

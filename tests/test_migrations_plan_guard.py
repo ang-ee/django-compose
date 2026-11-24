@@ -2702,3 +2702,79 @@ with connection.cursor() as cursor:
     assert cursor.fetchall() == [("kept",)]
 """
     )
+
+
+TARGET = [
+    f'migrations.CreateModel(name="Target", fields=[{KEY}, '
+    '("code", models.CharField(max_length=10, unique=True))])',
+    f'migrations.CreateModel(name="Item", fields=[{KEY}, ("target", models.ForeignKey('
+    '"alpha.Target", models.SET_NULL, to_field="code", null=True))])',
+]
+RENAME_CODE = 'migrations.RenameField(model_name="target", old_name="code", new_name="code2")'
+
+
+def test_a_fresh_plan_renaming_a_to_field_target_migrates_as_without_the_guard(host):
+    root, run = host
+    # Django's ProjectState.rename_field rewrites in place the fields that reference a
+    # renamed field. Any planned removal makes the walk run on a fresh database, as
+    # contenttypes' own 0002 does in every project, and it must not rewrite the
+    # operations native migrate then applies.
+    migration(root, "0002_items", TARGET)
+    migration(root, "0003_rename", [RENAME_CODE], after="0002_items")
+    x = f'migrations.CreateModel(name="X", fields=[{KEY}, ("a", models.CharField(max_length=4, null=True))])'
+    beta(root, "0001_x", [x, 'migrations.RemoveField(model_name="x", name="a")'])
+    run(
+        PRELUDE
+        + """
+migrate()
+assert {("alpha", "0003_rename"), ("beta", "0001_x")} <= applied()
+"""
+    )
+
+
+@pytest.mark.parametrize("item", ["before", "planned"])
+def test_a_populated_plan_renaming_a_to_field_target_proves_its_drop_and_migrates(host, item):
+    root, run = host
+    # Item, existing before the plan or created by it, references Target.code, which the
+    # plan renames before it removes Record.old, empty: neither the state before the plan
+    # nor the plan's operations may keep the walk's renamed reference.
+    migration(root, "0002_items", TARGET)
+    extra = [add_field("extra")] if item == "before" else []
+    migration(root, "0003_plan", [*extra, RENAME_CODE, REMOVE_OLD], after="0002_items")
+    run(
+        PRELUDE
+        + f"""
+seed("0002_items" if {item!r} == "before" else "0001_origin", old="")
+if {item!r} == "before":
+    # Native migrate's state before the plan holds the applied operations' fields.
+    executor = MigrationExecutor(connection)
+    state = executor._create_project_state(with_applied_migrations=True)
+    target = state.models["alpha", "item"].fields["target"]
+    check_plan_drops(executor.migration_plan(executor.loader.graph.leaf_nodes()), using="default")
+    assert (list(target.to_fields), target.remote_field.field_name) == (["code"], "code")
+migrate()
+assert ("alpha", "0003_plan") in applied()
+assert columns() == (["id", "extra"] if {item!r} == "before" else ["id"])
+"""
+    )
+
+
+def test_a_reference_to_a_renamed_field_is_proved_by_the_state_before_the_plan(host):
+    root, run = host
+    # The walk's state renames Target.code and the reference to it, while the state before
+    # the plan keeps Item.target as its rows were written: pointing at code.
+    migration(root, "0002_items", TARGET)
+    removal = 'migrations.RemoveField(model_name="item", name="target")'
+    migration(root, "0003_plan", [add_field("extra"), RENAME_CODE, removal], after="0002_items")
+    run(
+        PRELUDE
+        + """
+seed("0002_items")
+with connection.cursor() as cursor:
+    cursor.execute("INSERT INTO alpha_target (code) VALUES ('k1')")
+    cursor.execute("INSERT INTO alpha_item (target_id) VALUES ('k1')")
+refusal = "(Remove field target from item): alpha.item: alpha_item.target_id holds data in 1 rows"
+expect(CommandError, refusal, migrate)
+assert ("alpha", "0003_plan") not in applied()
+"""
+    )

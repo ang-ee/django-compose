@@ -76,7 +76,33 @@ def _redefined(*plan: list[str], value: str = "kept") -> _Case:
     )
 
 
+_TARGET = [
+    'migrations.CreateModel(name="Target", fields=[("id", models.AutoField(primary_key=True)), '
+    '("code", models.CharField(max_length=10, unique=True))])',
+    'migrations.CreateModel(name="Item", fields=[("id", models.AutoField(primary_key=True)), '
+    '("target", models.ForeignKey("alpha.Target", models.SET_NULL, to_field="code", null=True))])',
+]
+_RENAME_CODE = 'migrations.RenameField(model_name="target", old_name="code", new_name="code2")'
+
+
 CASES = {
+    # Item references Target.code, which the plan renames: Django rewrites the reference
+    # in place, and native migrate then applies the operations and state the walk read.
+    "renamed_reference_fresh": _Case([[_create("Record"), *_TARGET, _RENAME_CODE, _REMOVE_OLD]], 0, [], None),
+    "renamed_reference": _Case(
+        [
+            [_create("Record"), *_TARGET],
+            [
+                'migrations.AddField(model_name="record", name="extra", '
+                'field=models.CharField(max_length=5, default=""))',
+                _RENAME_CODE,
+                _REMOVE_OLD,
+            ],
+        ],
+        1,
+        [""],
+        None,
+    ),
     # One AlterField renames old's column and gives it the default "kept": the row's value.
     "rename_and_default": _redefined(
         [_alter('CharField(max_length=40, default="kept", db_column="renamed")'), _REMOVE_OLD]

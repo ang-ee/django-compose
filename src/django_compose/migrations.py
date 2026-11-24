@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 import importlib.util
 import stat
@@ -143,16 +144,37 @@ def history_labels() -> tuple[str, ...]:
     return tuple(receipt.HISTORY_LABELS)
 
 
+def _own(operations: Iterable[Operation]) -> list[Operation]:
+    """Copies of ``operations`` for a state this package progresses itself.
+
+    Django's ``ProjectState.rename_field`` rewrites in place the fields that reference a
+    renamed field, and every loader's migrations share their modules' operations, which
+    native ``migrate`` may apply later in the same process.
+    """
+    return copy.deepcopy(list(operations))
+
+
+def _own_fields(state: ProjectState) -> ProjectState:
+    """Give ``state`` field objects of its own; see ``_own``. ``ModelState.clone`` shares them."""
+    for model_state in state.models.values():
+        model_state.fields = {name: copy.deepcopy(field) for name, field in model_state.fields.items()}
+    return state
+
+
 def check_native_history(apps: Apps, *, labels: Iterable[str]) -> None:
     """Require model-clean native history without database access.
 
-    Compose check calls this after population. Disabled native migration
-    mappings remain authoritative, and tombstones retain historical state.
+    Compose check calls this after population, and ``provision`` before it migrates in
+    the same process, so the history's state is built from operations of its own.
+    Disabled native migration mappings remain authoritative, and tombstones retain
+    historical state.
     """
     enabled = {label for label in labels if MigrationLoader.migrations_module(label)[0] is not None}
     if not enabled:
         return
     loader = MigrationLoader(None, ignore_no_migrations=True)
+    for migration in loader.graph.nodes.values():
+        migration.operations = _own(migration.operations)
     before, after = effective_states(loader, apps)
     changes = MigrationAutodetector(before, after).changes(
         graph=loader.graph,
@@ -1013,9 +1035,12 @@ class _Walk:
     rename and so reads the model right after it. An ``AlterField`` that changes no
     column or many-to-many table name is read from the state without rendering it.
     Storage a native creation adds is named where the walk next renders, or before an
-    operation the walk does not follow. Where data is stored, the walk keeps the state
-    before the plan as it was when its first operation changed it, rendered if the walk
-    had rendered it by then, and otherwise renders it where a proof first reads it. The
+    operation the walk does not follow. Where data is stored, the walk keeps a copy of
+    the state before the plan, taken where its first operation changes it, with the
+    rendering the walk had by then, and otherwise renders it where a proof first reads
+    it. The walk progresses copies of the planned operations, and its states own their
+    fields, so neither native ``migrate``'s operations nor its state before the plan, nor
+    the walk's copy of that state, change as the walk progresses; see ``_own``. The
     pre-plan state is the one native ``migrate`` builds, through the private
     ``MigrationExecutor._create_project_state``, on the graph native ``migrate`` planned
     with. Re-check on each Django upgrade: that private call, that graph, ``_relinks``
@@ -1057,7 +1082,7 @@ class _Walk:
     def run(self) -> list[tuple[Migration, Operation, str, str]]:
         """Walk the plan; return the judged removals it could not render and those the
         shared-table rule refuses, each with its remedy."""
-        state: ProjectState = self.executor._create_project_state(with_applied_migrations=True)  # type: ignore[attr-defined]
+        state = _own_fields(self.executor._create_project_state(with_applied_migrations=True))  # type: ignore[attr-defined]
         if self.probe:
             # The walk's own state until its first operation changes it.
             self.before = state
@@ -1070,7 +1095,8 @@ class _Walk:
                 key = (migration.app_label, migration.name)
                 if key in self.forwards:
                     walked.add(key)
-                    self._judge(self.forwards[key], self.forwards[key].operations, state)
+                    # Native migrate applies the planned operations after the walk.
+                    self._judge(self.forwards[key], _own(self.forwards[key].operations), state)
         except _Halted:
             raise _unsafe("unsafe migration drop", self.refusals, " Nothing was migrated.") from None
         if unwalked := sorted(self.forwards.keys() - walked):
@@ -1288,7 +1314,7 @@ class _Walk:
         before_model = self._rendered(migration, operation, state, renamed[0]) if renamed else None
         if self.before is state:
             # The walk's state changes from here on; a clone keeps any rendering it has.
-            self.before = state.clone()
+            self.before = _own_fields(state.clone())
         if not renamed and "apps" in state.__dict__ and _relinks(operation, state, label):
             # Render afresh where the walk next needs a model instead; after a followed
             # rename it needs one at once, and a fresh render would cost every model.
