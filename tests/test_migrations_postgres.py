@@ -58,7 +58,48 @@ def _refilled(schema: str) -> _Case:
     )
 
 
+def _alter(field: str) -> str:
+    return f'migrations.AlterField(model_name="record", name="old", field=models.{field})'
+
+
+_REMOVE_OLD = 'migrations.RemoveField(model_name="record", name="old")'
+
+
+def _redefined(*plan: list[str], value: str = "kept") -> _Case:
+    """Record's row holds ``value`` in old, written under its default "" before the plan,
+    which redefines old before removing it. Its definition before the plan decides."""
+    return _Case(
+        [[_create("Record")], *plan],
+        1,
+        [value],
+        "alpha.record: alpha_record.old holds data in 1 rows on 'default'" if value else None,
+    )
+
+
 CASES = {
+    # One AlterField renames old's column and gives it the default "kept": the row's value.
+    "rename_and_default": _redefined(
+        [_alter('CharField(max_length=40, default="kept", db_column="renamed")'), _REMOVE_OLD]
+    ),
+    # The same, with the removal in a migration of its own, as makemigrations writes it.
+    "rename_and_default_split": _redefined(
+        [_alter('CharField(max_length=40, default="kept", db_column="renamed")')], [_REMOVE_OLD]
+    ),
+    # The class changes too.
+    "rename_and_class": _redefined([_alter('TextField(default="kept", db_column="renamed")'), _REMOVE_OLD]),
+    # A state-only removal and addition gives old the default "kept".
+    "state_remove_add": _redefined(
+        [
+            "migrations.SeparateDatabaseAndState(state_operations=["
+            f'{_REMOVE_OLD}, migrations.AddField(model_name="record", name="old", '
+            'field=models.CharField(max_length=40, default="kept"))])',
+            _REMOVE_OLD,
+        ]
+    ),
+    # Django's own make-nullable-then-remove, as contenttypes' 0002 does: "" stays empty.
+    "nullable": _redefined(
+        [_alter('CharField(max_length=40, default="", null=True)'), _REMOVE_OLD], value=""
+    ),
     # Filled under its own name, B owns new storage; in another schema, nothing filled it.
     "refilled": _refilled("left"),
     "refilled_elsewhere": _refilled("right"),

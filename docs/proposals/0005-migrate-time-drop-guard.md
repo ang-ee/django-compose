@@ -36,10 +36,14 @@ choices behind it.
   neither, so the walk maps each storage name the plan's database operations change
   back to its name before the plan and probes that. A name vacated by an earlier
   rename or removal of the plan names storage the plan creates once a native
-  creation fills it again, or storage a followed rename moved there. Storage from
-  before the plan holds rows written under the field's definition then; carrying
-  each definition through the plan's renames would be a second mechanism, so where an
-  alteration changes what reads as empty in a column, only NULL is empty there.
+  creation fills it again, or storage a followed rename moved there. A column from
+  before the plan holds rows written under the definition the state before the plan
+  gives it, and is judged by that definition, found through the same storage names;
+  the walk keeps that state, and its rendering where it has one before the first
+  operation changes it. Tracking the plan's alterations instead, with such a column
+  empty only at NULL, lost a redefinition made by the `AlterField` that renamed the
+  column, missed a state-only removal and addition, and refused Django's own
+  make-nullable-then-remove.
 - **Refuse what the walk cannot account for.** The walk uses the graph native
   `migrate` planned with, including for a squash-replaced target; a planned migration
   it cannot follow is refused. Storage absent before the plan is the plan's own only

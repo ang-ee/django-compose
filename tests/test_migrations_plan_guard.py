@@ -436,31 +436,62 @@ else:
     )
 
 
-@pytest.mark.parametrize("alteration", ["native", "state_only", "run_sql", "widening"])
-def test_a_column_the_plan_redefines_is_empty_only_at_null(host, alteration):
+REDEFINITIONS = [
+    "default",
+    "state_only",
+    "run_sql",
+    "widening",
+    "rename_and_default",
+    "rename_and_class",
+    "split",
+    "state_remove_add",
+    "nullable",
+]
+
+
+@pytest.mark.parametrize("redefinition", REDEFINITIONS)
+def test_a_column_is_judged_by_its_definition_before_the_plan(host, redefinition):
     root, run = host
-    # old's rows hold "kept" under its default "". Judged by a default the plan changes to
-    # "kept", they would read as empty; a widening changes nothing that reads as empty.
-    default = "kept" if alteration != "widening" else ""
-    field = f'models.CharField(max_length={80 if alteration == "widening" else 40}, default="{default}")'
-    alter = f'migrations.AlterField(model_name="record", name="old", field={field})'
-    wrapped = {
-        "native": alter,
-        "widening": alter,
-        "state_only": state_only(alter),
-        "run_sql": f"migrations.RunSQL(migrations.RunSQL.noop, state_operations=[{alter}])",
-    }[alteration]
-    migration(root, "0002_drop", [wrapped, REMOVE_OLD])
+    # old's rows hold "kept" under its default "" before the plan, as written then. Judged
+    # by the default "kept" the plan gives the column before removing it, in whatever form
+    # and under whatever name, they would read as empty. A widening and Django's own
+    # make-nullable-then-remove, as contenttypes' 0002 does, leave "" empty.
+    kept = 'models.CharField(max_length=40, default="kept")'
+    alter = {
+        "rename_and_default": 'models.CharField(max_length=40, default="kept", db_column="renamed")',
+        "split": 'models.CharField(max_length=40, default="kept", db_column="renamed")',
+        "rename_and_class": 'models.TextField(default="kept", db_column="renamed")',
+        "widening": 'models.CharField(max_length=80, default="")',
+        "nullable": 'models.CharField(max_length=40, default="", null=True)',
+    }.get(redefinition, kept)
+    alter = f'migrations.AlterField(model_name="record", name="old", field={alter})'
+    operations = {
+        "state_only": [state_only(alter)],
+        "run_sql": [f"migrations.RunSQL(migrations.RunSQL.noop, state_operations=[{alter}])"],
+        "state_remove_add": [
+            f"migrations.SeparateDatabaseAndState(state_operations=[{REMOVE_OLD}, {add_field('old', kept)}])"
+        ],
+    }.get(redefinition, [alter])
+    if redefinition == "split":
+        # As makemigrations writes it: the removal in a migration of its own.
+        migration(root, "0002_alter", operations)
+        migration(root, "0003_drop", [REMOVE_OLD], after="0002_alter")
+    else:
+        migration(root, "0002_drop", [*operations, REMOVE_OLD])
     run(
         PRELUDE
         + f"""
-seed(old="kept")
-if {alteration!r} == "widening":
-    # A widening leaves "" as old's empty value: only "kept" holds data.
+redefinition = {redefinition!r}
+seed(old="" if redefinition == "nullable" else "kept")
+if redefinition == "widening":
     seed(old="")
-refusal = "(Remove field old from record): alpha.record: alpha_record.old holds data in 1 rows"
-expect(CommandError, refusal, migrate)
-assert columns() == ["id", "old"]
+if redefinition == "nullable":
+    migrate()
+    assert columns() == ["id"]
+else:
+    refusal = "(Remove field old from record): alpha.record: alpha_record.old holds data in 1 rows"
+    expect(CommandError, refusal, migrate)
+    assert columns() == ["id", "old"]
 """
     )
 
@@ -798,10 +829,14 @@ with patch("django_compose.management.commands.migrate.check_plan_drops", counte
         assert registries == [], registries
         assert columns() == ["id"]
     else:
-        # --fake-initial adoption finds tables, so the guard probes them.
+        # --fake-initial adoption finds tables, so the guard probes them, but the state
+        # before the plan defines no field their rows were written under.
         refusal = {{
             "populated": "(Remove field extra from record): alpha.record: cannot prove alpha_record.extra",
-            "adopted": "(Remove field old from record): alpha.record: alpha_record.old holds data",
+            "adopted": (
+                "(Remove field old from record): alpha.record: cannot prove alpha_record.old empty on "
+                "'default' (the state before the plan defines no field stored in it)"
+            ),
         }}[database]
         fake = database == "adopted"
         expect(CommandError, "alpha.0003_drop " + refusal, lambda: migrate(fake_initial=fake))
@@ -1537,6 +1572,49 @@ else:
     )
 
 
+def test_a_column_past_where_the_walk_stopped_is_judged_by_its_definition_before_the_plan(host):
+    root, run = host
+    # alpha's history is an installed distribution's, and the walk follows no name past
+    # the state it cannot render. beta's plan then gives spare the value its row holds as
+    # its default and removes it: written under the default "", the row holds data.
+    migration(root, "0002_tag", [created("Tag"), add_field("tag", TAGGED)])
+    plan = [
+        'migrations.DeleteModel(name="Tag")',
+        add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)'),
+        state_only(remove_field("tag")),
+    ]
+    migration(root, "0003_plan", plan, after="0002_tag")
+    write(root, "history/beta/0001_item.py", ITEM)
+    kept = 'models.CharField(max_length=40, default="kept")'
+    write(
+        root,
+        "history/beta/0002_drop.py",
+        f"""
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    dependencies = [("beta", "0001_item"), ("alpha", "0003_plan")]
+    operations = [
+        migrations.AlterField(model_name="item", name="spare", field={kept}),
+        migrations.RemoveField(model_name="item", name="spare"),
+    ]
+""",
+    )
+    run(
+        PRELUDE
+        + """
+import django_compose.migrations as guard
+guard._guarded = lambda labels: frozenset(labels) - {"alpha"}
+seed("0002_tag")
+MigrationExecutor(connection).migrate([("beta", "0001_item")])
+with connection.cursor() as cursor:
+    cursor.execute("INSERT INTO beta_item (spare) VALUES ('kept')")
+refusal = "beta.0002_drop (Remove field spare from item): beta.item: beta_item.spare holds data in 1 rows"
+expect(CommandError, refusal, migrate)
+assert ("beta", "0002_drop") not in applied()
+"""
+    )
+
+
 def test_table_renamed_after_a_state_only_adoption_keeps_its_rows_protected(host):
     root, run = host
     migration(root, "0002_adopt", [adopt("Ledger", delete_record=True)])
@@ -1937,15 +2015,17 @@ def counted(plan, *, using):
 with patch("django_compose.management.commands.migrate.check_plan_drops", counted):
     migrate()
 # One full render serves every later rename and removal while Django keeps it current
-# cheaply, re-rendering only the changed model and those that point at it. A widening
-# AlterField renders nothing before the removal. Each key alteration in the hub plan
-# would re-render all ten models, so the walk drops its rendering before the first and
-# renders afresh at the rename: two full renders and 32 models, against 52 kept current.
+# cheaply, re-rendering only the changed model and those that point at it, and the state
+# before the plan, rendered before the first operation changes it, judges the column. A
+# widening AlterField renders nothing before the removal, which renders both states.
+# Each key alteration in the hub plan would re-render all ten models, so the walk drops
+# its rendering before the first and renders afresh at the rename: two full renders and
+# 32 models, against 52 kept current.
 # Each key rename re-renders the ten models as well, but a fresh render right after it
 # would also render the sixty beside them, so the walk keeps its rendering there: one
 # full render and 104 models, against four and 284.
 full, size, rendered = {{
-    "renames": (1, 1, 4), "widening": (1, 1, 2), "hub": (2, 10, 32), "renamed_key": (1, 70, 104)
+    "renames": (1, 1, 4), "widening": (2, 1, 3), "hub": (2, 10, 32), "renamed_key": (1, 70, 104)
 }}[{plan!r}]
 assert registries == [size] * full, registries
 assert len(models) == rendered, models
