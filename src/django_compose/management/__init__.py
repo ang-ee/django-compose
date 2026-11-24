@@ -9,7 +9,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable
 from typing import Any
 
 from django.conf import settings
@@ -39,15 +38,15 @@ def require_serving_mode() -> None:
         raise CommandError("Migration commands require serving mode; unset DJANGO_COMPOSE_MODE")
 
 
-def unguarded_commands(names: Iterable[str] = ("makemigrations", "migrate")) -> tuple[str, ...]:
-    """Describe each of the drop-guarded commands ``names`` that native dispatch resolves elsewhere.
+def unguarded_commands() -> tuple[str, ...]:
+    """Describe each drop-guarded command that native dispatch resolves elsewhere.
 
     ComposeConfig must be last in INSTALLED_APPS, so a same-named command of any
     other app wins native dispatch and its drop guard is silently off. A subclass
     of this package's command keeps the guard unless it overrides ``execute``.
     """
     shadowed = []
-    for name in names:
+    for name in ("makemigrations", "migrate"):
         # Imported here: the command modules load migration state and models, while
         # this module loads before settings, for the launcher.
         guarded = importlib.import_module(f"django_compose.management.commands.{name}").Command

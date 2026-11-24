@@ -13,9 +13,10 @@
 - Add `django_compose.operations.IntendedRemoveField` and `IntendedDeleteModel` to
   declare a drop a migration intends; see
   [intended drops](docs/migrations.md#declare-an-intended-drop).
-- Report another app's `migrate` or `makemigrations` that shadows this package's with
-  system check `django_compose.E002`; `provision` refuses a shadowing `migrate`, the one
-  it runs, before any database work.
+- Report another app's `migrate` or `makemigrations` that shadows this package's, and
+  so switches the drop guard off, with system check `django_compose.E002`, which
+  `provision` checks before any database work; see the
+  [drop guard](docs/SPEC.md#drop-guard).
 - `retire_history --purge` applies only the retired label's own migrations.
 - `django_compose.provision.TABLE` is gone: the provision record's table name is
   `ProvisionRecorder.Record._meta.db_table`, read from the model that owns it.
@@ -40,8 +41,8 @@
   first. A pending purge migration is refused the same way; apply it on each
   deployment with `retire_history <label> --purge`. Any other installed app, the
   project's or a third party's, that ships a `migrate` or `makemigrations` command now
-  fails system check `django_compose.E002`, and its `migrate` makes `provision` refuse:
-  remove that command, or make it subclass this package's.
+  fails system check `django_compose.E002` and makes `provision` refuse: remove that
+  command, or make it subclass this package's.
 
 ## 0.1.0.dev13
 

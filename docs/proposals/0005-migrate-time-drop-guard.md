@@ -115,9 +115,11 @@ choices behind it.
   migrations, leaving other apps' pending history to `migrate`.
 - **Fail fast.** `ComposeConfig` must be last in `INSTALLED_APPS`, so another app's
   `migrate` would silently switch the guard off. System check `django_compose.E002`
-  reports another app's `migrate` or `makemigrations`, and the provision preflight
-  refuses a shadowing `migrate`, the only one of the two it runs. The receiver wraps
-  `execute`, not `handle`, so a subclass that replaces `handle` keeps the guard.
+  reports another app's `migrate` or `makemigrations`, and `provision` checks both
+  before any database work, as the specification states. Checking only the `migrate`
+  it runs was rejected: its final system check then failed on a shadowing
+  `makemigrations` after migrating. The receiver wraps `execute`, not `handle`, so a
+  subclass that replaces `handle` keeps the guard.
 - **Out of scope.** Backwards plans name an explicit target, and the authoring guard
   never covered them. `--fake` runs no operations. `RunSQL` and custom database code
   are not parsed; the specification states what that leaves undetected, and lists the
