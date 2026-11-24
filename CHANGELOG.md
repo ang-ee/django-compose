@@ -14,7 +14,8 @@
   declare a drop a migration intends; see
   [intended drops](docs/migrations.md#declare-an-intended-drop).
 - Report another app's `migrate` or `makemigrations` that shadows this package's with
-  system check `django_compose.E002`; `provision` refuses it before any database work.
+  system check `django_compose.E002`; `provision` refuses a shadowing `migrate`, the one
+  it runs, before any database work.
 - `retire_history --purge` applies only the retired label's own migrations.
 - The drop guard proves storage empty with one EXISTS query and counts rows only for
   a refusal. Deleting a table another model still owns is refused in the same words,
@@ -28,8 +29,10 @@
   `IntendedDeleteModel(name=...)` in that migration. Deleting a table another model
   still owns is refused even when declared: keep the table, or change that owner
   first. A pending purge migration is refused the same way; apply it on each
-  deployment with `retire_history <label> --purge`. A project app that ships its own
-  `migrate` or `makemigrations` must subclass this package's command.
+  deployment with `retire_history <label> --purge`. Any other installed app, the
+  project's or a third party's, that ships a `migrate` or `makemigrations` command now
+  fails system check `django_compose.E002`, and its `migrate` makes `provision` refuse:
+  remove that command, or make it subclass this package's.
 
 ## 0.1.0.dev13
 

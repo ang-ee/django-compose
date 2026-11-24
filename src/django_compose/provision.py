@@ -266,7 +266,8 @@ def run(command: BaseCommand, options: dict[str, Any]) -> None:
         command.stdout.write(command.style.SUCCESS("provision: ready"))
         return
     verified_receipt()
-    if shadowed := unguarded_commands():
+    # Provision runs migrate, never makemigrations, whose shadowing only the system check reports.
+    if shadowed := unguarded_commands(("migrate",)):
         raise CommandError("provision: " + "; ".join(shadowed))
     connection = connections[using]
     if connection.in_atomic_block or (connection.connection is not None and not connection.get_autocommit()):

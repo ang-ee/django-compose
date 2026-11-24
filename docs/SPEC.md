@@ -634,9 +634,10 @@ when the field sets `db_constraint=False`.
 Native dispatch must resolve this package's `makemigrations` and `migrate`, or a
 subclass of each. `ComposeConfig` is last in `INSTALLED_APPS`, so a same-named command
 of any other app wins and would switch the guard off. System check
-`django_compose.E002` reports it, and `provision` refuses it before any database work.
-The guard wraps the command's `execute`, so a subclass that replaces `handle` keeps it;
-a subclass that overrides `execute` without calling it passes E002 but has no guard.
+`django_compose.E002` reports either, and `provision`, which runs only `migrate`,
+refuses a shadowing `migrate` before any database work. The guard wraps the command's
+`execute`, so a subclass that replaces `handle` keeps it; a subclass that overrides
+`execute` without calling it passes E002 but has no guard.
 [Proposal 0005](proposals/0005-migrate-time-drop-guard.md) records these decisions.
 
 ## Database preparation and readiness

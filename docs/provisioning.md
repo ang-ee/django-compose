@@ -21,9 +21,9 @@ are preserved, with migration checks deliberately deferred to the final check.
 Skipping system checks does not skip the [drop guard](SPEC.md#drop-guard): a plan
 whose project-owned history would drop stored data without a declared intent fails the
 migrate step before any operation runs, and provision stays `in_progress`. Before any
-database work, provision also refuses when another app's `migrate` or `makemigrations`
-command shadows this package's, which would switch the guard off; system check
-`django_compose.E002` reports the same.
+database work, provision also refuses when another app's `migrate` command shadows this
+package's, which would switch the guard off; system check `django_compose.E002`
+reports that, and a shadowing `makemigrations`, which provision never runs.
 PostgreSQL refreshes statistics for existing managed tables (including implicit
 many-to-many tables) belonging to apps migrated forward.
 

@@ -586,7 +586,9 @@ def test_provision_judges_a_root_app_with_plain_models_and_its_own_migrations(tm
 
 
 @pytest.mark.parametrize("command", ["migrate", "makemigrations"])
-def test_provision_and_checks_refuse_a_shadowed_guarded_command(tmp_path: Path, command: str) -> None:
+def test_checks_refuse_a_shadowed_guarded_command_and_provision_a_shadowed_migrate(
+    tmp_path: Path, command: str
+) -> None:
     manage = _composed_host(tmp_path, _item_models("old = models.CharField(max_length=40, default='')"))
     database = tmp_path / "probe.sqlite3"
     with sqlite3.connect(database) as connection:
@@ -599,10 +601,18 @@ def test_provision_and_checks_refuse_a_shadowed_guarded_command(tmp_path: Path, 
     assert manage("compose").returncode == 0
     result = manage("provision", "--wait-db", "1")
     assert result.returncode != 0
-    assert f"provision: {command} resolves to probe's command, which bypasses the drop guard" in result.stderr
+    output = result.stdout + result.stderr
+    if command == "migrate":
+        assert "provision: migrate resolves to probe's command, which bypasses the drop guard" in output
+        state = "complete"
+    else:
+        # Provision never runs makemigrations; the migrate it runs keeps the guard.
+        assert "makemigrations resolves" not in output, output
+        assert "unsafe migration drop: probe.0002_drop (Remove field old from item)" in output, output
+        state = "in_progress"
     with sqlite3.connect(database) as connection:
         assert [row[1] for row in connection.execute("PRAGMA table_info(probe_item)")] == ["id", "old"]
-        assert connection.execute("SELECT state FROM django_compose_provision").fetchall() == [("complete",)]
+        assert connection.execute("SELECT state FROM django_compose_provision").fetchall() == [(state,)]
     result = manage("check")
     assert result.returncode != 0
     assert "django_compose.E002" in result.stderr, result.stdout + result.stderr
