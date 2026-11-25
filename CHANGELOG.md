@@ -23,10 +23,10 @@
   table name is `ProvisionRecorder.Record._meta.db_table`, read from the model that owns
   it, and the name `provision --upgrade-from` renames is `ProvisionRecorder.legacy_table`.
 - The drop guard proves storage empty with one EXISTS query, or two for a column of a
-  table that holds rows, and counts rows only for a refusal. On a database that stores data it walks and renders the whole pending plan
-  before the first operation, so `migrate` there takes longer on a large plan: a few
-  seconds for two hundred pending migrations of a composed host on an idle machine,
-  several times that on a loaded one.
+  table that holds rows, and counts rows only for a refusal. On a database that stores
+  data it walks and renders the whole pending plan before the first operation, so
+  `migrate` there takes longer on a large plan: a few seconds for two hundred pending
+  migrations of a composed host on an idle machine, several times that on a loaded one.
   Deleting a table another model still owns is refused in the same words, with the
   same remedy, at `makemigrations`, `migrate` and `retire_history --purge`.
 - `check_migrations`, and so `provision`, builds native history's state from copies of
@@ -49,13 +49,14 @@
   there on; where it cannot copy an operation or move the state, every removal from
   there on. Where the state renders again after a later migration, or the walk ended at
   an operation it cannot copy, a refusal names that migration: migrate to it first, then
-  migrate. Otherwise order the history as the refusal says. Any other installed app, the project's or a third party's, that ships a
-  `migrate` or `makemigrations` command now fails system check `django_compose.E002` and
-  makes `provision` refuse: remove that command, or make it subclass this package's. A
-  `makemigrations` that must stay, such as django-linear-migrations', keeps the guard as
-  a command subclassing both, as `class Command(LinearCommand, ComposeCommand)`, with
-  nothing silenced; silencing `django_compose.E002` and `commands.E001` instead
-  provisions, but authors without the guard.
+  migrate. Otherwise order the history as the refusal says. Any other installed app, the
+  project's or a third party's, that ships a `migrate` or `makemigrations` command now
+  fails system check `django_compose.E002` and makes `provision` refuse: remove that
+  command, or make it subclass this package's. A `makemigrations` that must stay, such
+  as django-linear-migrations', keeps the guard as a command subclassing both, as
+  `class Command(LinearCommand, ComposeCommand)`, with nothing silenced; silencing
+  `django_compose.E002` and `commands.E001` instead provisions, but authors without the
+  guard.
 
 ## 0.1.0.dev13
 

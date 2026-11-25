@@ -664,12 +664,12 @@ At `migrate`:
   the remedy says to resolve those removals first. `retire_history --purge` names the
   rest of a retired label's chain to migrate first under the same check. Every
   other refusal a stopped walk makes needs the history changed: a removal it cannot
-  read, ordered to come where the state renders; a table drop whose owners at the end
-  of the plan it cannot tell, ordered so that the state renders there; and after the
-  walk ends without that remedy, the operations of the migration where it ended made
-  ones that `copy.deepcopy` copies, or that Django's migration state applies, or the
-  removals ordered before it. Every remedy that names `migrate` names
-  `--database <alias>` where the alias migrated is not the default.
+  read, ordered to come in a migration after the one where the state renders again; a
+  table drop whose owners at the end of the plan it cannot tell, ordered so that the
+  state renders there; and after the walk ends without that remedy, the operations of
+  the migration where it ended made ones that `copy.deepcopy` copies, or that Django's
+  migration state applies, or the removals ordered before it. Every remedy that names
+  `migrate` names `--database <alias>` where the alias migrated is not the default.
 
 A migration declares a drop it intends with `IntendedRemoveField` or
 `IntendedDeleteModel` from `django_compose.operations`: native subclasses applied and

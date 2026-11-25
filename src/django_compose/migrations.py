@@ -711,9 +711,9 @@ _DECLARE = (
 
 
 _RENDER = (
-    "order the history so that each removal named here comes where the migration state renders, "
-    "each relation's target defined, for example by making its migration depend on the one that "
-    "defines that target again or removes the relation"
+    "order the history so that each removal named here comes in a migration after the one where the "
+    "migration state renders again, each relation's target defined, for example by making the "
+    "removal's migration depend on the one that defines that target again or removes the relation"
 )
 _RENDER_END = (
     "order the history so that the migration state renders at the end of the plan, each relation's "
@@ -1419,7 +1419,7 @@ class _Walk:
 
     def _can_restart(self, restart: Migration) -> bool:
         """Whether native ``migrate`` can start after ``restart``, checked once; see
-        ``_restarts``."""
+        ``_restartable``."""
         if restart not in self._starts:
             self._starts[restart] = _restartable(self.executor, self.planned, restart)
         return self._starts[restart]

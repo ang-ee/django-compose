@@ -1650,7 +1650,7 @@ assert type(caught.__cause__) is ValueError, repr(caught.__cause__)
 # end of the plan, and no migration to migrate to first can be named.
 unowned = "alpha.0003_untag (Delete model Tag): cannot tell who owns its table at the end of the plan"
 expect(CommandError, unowned, migrate)
-reorder = "To proceed, order the history so that each removal named here comes where the migration state"
+reorder = "To proceed, order the history so that each removal named here comes in a migration after the one"
 expect(CommandError, reorder, migrate)
 expect(CommandError, "order the history so that the migration state renders at the end of the plan", migrate)
 assert ("alpha", "0003_untag") not in applied()
@@ -1786,7 +1786,7 @@ blind = "cannot render the migration state at beta.0002_drop (ValueError: "
 heading = "cannot prove migration drop safe: beta.0002_drop (Delete model Thing): "
 assert refusal.startswith(heading + blind), refusal
 assert "Remove field spare" not in refusal, refusal
-assert "To proceed, order the history so that each removal named here comes where" in refusal, refusal
+assert "comes in a migration after the one where the migration state renders again" in refusal, refusal
 assert not applied()
 """
     )
@@ -1868,7 +1868,8 @@ seed("0002_tag", old="kept")
 blind = "alpha.0005_drop (Remove field extra from record): cannot render the migration state at "
 caught = expect(CommandError, blind + "alpha.0004_a_window", migrate)
 assert "migrate alpha 0004_a_window first" not in str(caught), str(caught)
-expect(CommandError, "To proceed, order the history so that each removal named here comes where", migrate)
+remedy = "To proceed, order the history so that each removal named here comes in a migration after"
+assert remedy in str(caught), str(caught)
 assert ("alpha", "0003_open") not in applied()
 """
     )
@@ -3589,6 +3590,59 @@ if {ends!r}:
 else:
     migrate()
     assert ("beta", "0002_held") in applied()
+"""
+    )
+
+
+def test_checking_a_restart_leaves_the_fields_of_an_uncopyable_operation_alone(host):
+    root, run = host
+    # beta's migration adds Spare.link, a relation to Spare.code, by an operation the walk
+    # cannot copy, then renames Spare.code. Checking that native migrate can start after it
+    # steps that operation itself, putting its field into the checked state; the copied
+    # rename there must not rewrite that field, which the operation shares, or migrating
+    # first as the remedy says would add Spare.link to Spare.key before Spare.key exists.
+    code = '("code", models.CharField(max_length=5, unique=True))'
+    beta(root, "0001_spare", [f'migrations.CreateModel(name="Spare", fields=[{KEY}, {code}])'])
+    write(
+        root,
+        "history/beta/0002_held.py",
+        """
+import sys
+from django.db import migrations, models
+class HeldAdd(migrations.AddField):
+    def __init__(self, *args, held, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.held = held
+LINK = models.ForeignKey("beta.Spare", models.SET_NULL, null=True, to_field="code", db_constraint=False)
+class Migration(migrations.Migration):
+    dependencies = [("beta", "0001_spare")]
+    operations = [
+        HeldAdd(model_name="spare", name="link", field=LINK, held=sys),
+        migrations.RenameField(model_name="spare", old_name="code", new_name="key"),
+    ]
+""",
+    )
+    write(
+        root,
+        "history/alpha/0002_drop.py",
+        f"""
+from django.db import migrations
+class Migration(migrations.Migration):
+    dependencies = [("alpha", "0001_origin"), ("beta", "0002_held")]
+    operations = [{REMOVE_OLD}]
+""",
+    )
+    run(
+        PRELUDE
+        + """
+import django_compose.migrations as guard
+guarded = guard._guarded
+guard._guarded = lambda labels: guarded(labels) - {"beta"}
+remedy = "To proceed, migrate beta 0002_held first, past the operation the drop guard cannot copy"
+expect(CommandError, remedy, migrate)
+migrate("beta", "0002_held")
+migrate()
+assert ("alpha", "0002_drop") in applied()
 """
     )
 
