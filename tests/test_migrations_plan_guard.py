@@ -3366,8 +3366,9 @@ def test_an_operation_the_walk_cannot_copy_ends_it(host, removal, held):
     # copy, so cannot progress without changing what native migrate applies: copying a
     # module raises TypeError, a delegating wrapper RecursionError. On a database that
     # stores nothing, the walk judges beta's deletion of Spare and ends there; only a
-    # removal of alpha's own history after it is refused. A RunPython changes no state,
-    # so the walk shares it uncopied, as native migrate does.
+    # removal of alpha's own history after it is refused, with migrating past beta's
+    # migration first as its remedy. A RunPython changes no state, so the walk shares it
+    # uncopied, as native migrate does.
     beta(root, "0001_spare", [f'migrations.CreateModel(name="Spare", fields=[{KEY}])'])
     write(
         root,
@@ -3408,9 +3409,13 @@ if {ends!r}:
     refusal = "alpha.0002_drop (Remove field old from record): cannot follow the migration state at "
     heading = "cannot prove migration drop safe: "
     expect(CommandError, heading + refusal + "beta.0002_held ({error}: ", migrate)
-    remedy = "To proceed, make each operation of beta.0002_held one that copy.deepcopy copies"
+    # Native migrate copies no operation: migrating past beta's first lets the walk read the rest.
+    remedy = "To proceed, migrate beta 0002_held first, past the operation the drop guard cannot copy"
     expect(CommandError, remedy, migrate)
     assert ("beta", "0002_held") not in applied()
+    migrate("beta", "0002_held")
+    migrate()
+    assert ("alpha", "0002_drop") in applied()
 else:
     migrate()
     assert ("beta", "0002_held") in applied()

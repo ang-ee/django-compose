@@ -47,9 +47,9 @@
   safe` each table drop it cannot read, each table drop whose owners at the end of the
   plan it cannot tell, and, on a database that stores data, each undeclared removal from
   there on; where it cannot copy an operation or move the state, every removal from
-  there on. Where the state renders again after a later migration, a refusal names that
-  migration: migrate to it first, then migrate. Otherwise order the history as the
-  refusal says. Any other installed app, the project's or a third party's, that ships a
+  there on. Where the state renders again after a later migration, or the walk ended at
+  an operation it cannot copy, a refusal names that migration: migrate to it first, then
+  migrate. Otherwise order the history as the refusal says. Any other installed app, the project's or a third party's, that ships a
   `migrate` or `makemigrations` command now fails system check `django_compose.E002` and
   makes `provision` refuse: remove that command, or make it subclass this package's. A
   `makemigrations` that must stay, such as django-linear-migrations', keeps the guard as

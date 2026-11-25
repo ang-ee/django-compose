@@ -743,15 +743,18 @@ def _adopt(creating: Migration | None, alias: str) -> str:
 class _End(Exception):
     """Where the walk lost its migration state, at ``migration`` or, where it is ``None``, at
     the end of the plan, and why: ``error`` was raised while it was ``doing`` something to
-    that state: ``follow`` where copying an operation or moving the state with one raised,
-    so the walk ends; ``render`` or ``read`` where rendering or reading it raised, so the
-    walk goes blind, its state still moving."""
+    that state: ``follow`` where copying an operation, as ``copied`` tells, or moving the
+    state with one raised, so the walk ends; ``render`` or ``read`` where rendering or
+    reading it raised, so the walk goes blind, its state still moving."""
 
-    def __init__(self, migration: Migration | None, error: Exception, doing: str) -> None:
+    def __init__(
+        self, migration: Migration | None, error: Exception, doing: str, *, copied: bool = False
+    ) -> None:
         where = "the end of the plan" if migration is None else f"{migration.app_label}.{migration.name}"
         super().__init__(f"cannot {doing} the migration state at {where} ({type(error).__name__}: {error})")
         self.migration = migration
         self.error = error
+        self.copied = copied
 
 
 def _render(state: ProjectState) -> Apps:
@@ -761,11 +764,14 @@ def _render(state: ProjectState) -> Apps:
 
 
 def _unfollowed(end: _End) -> str:
-    """The remedy for what the walk refuses since it ended at ``end``."""
-    where = "it" if end.migration is None else f"{end.migration.app_label}.{end.migration.name}"
+    """The remedy for what the walk refuses since it ended at ``end``, where migrating past
+    the migration that stopped it first does not help."""
+    migration = cast(Migration, end.migration)
+    where = f"{migration.app_label}.{migration.name}"
+    change = "copy.deepcopy copies" if end.copied else "Django's migration state applies"
     return (
-        f"make each operation of {where} one that copy.deepcopy copies and that moves the migration "
-        f"state, or order the history so that each removal named here comes before {where}"
+        f"make the operations of {where} ones that {change}, or order the history so that each "
+        f"removal named here comes before {where}"
     )
 
 
@@ -1212,6 +1218,8 @@ class _Walk:
         self.restart: Migration | None = None
         # The first exception the walk caught: the cause its refusal names.
         self.cause: Exception | None = None
+        # Where the walk ended, if it did.
+        self.ended: _End | None = None
         self._restartable: dict[Migration, bool] = {}
         # The state before the plan, kept where data is stored, and the fields it stores
         # in each column; see _written.
@@ -1224,13 +1232,14 @@ class _Walk:
         return self.following and self.lost is None
 
     @contextmanager
-    def _moving(self, migration: Migration) -> Iterator[None]:
-        """Where the walk copies an operation of ``migration``, or moves its state with one:
-        whatever Django or the history's code raises there loses the state and ends the walk."""
+    def _moving(self, migration: Migration, *, copying: bool = False) -> Iterator[None]:
+        """Where the walk copies an operation of ``migration``, where ``copying``, or moves its
+        state with one: whatever Django or the history's code raises there loses the state
+        and ends the walk."""
         try:
             yield
         except Exception as error:
-            raise _End(migration, error, "follow") from error
+            raise _End(migration, error, "follow", copied=copying) from error
 
     def _blinded(self, migration: Migration | None, error: Exception, doing: str = "read") -> None:
         """Whatever rendering or reading the state at ``migration`` raised leaves the walk
@@ -1273,7 +1282,7 @@ class _Walk:
         self.before = state
         try:
             for migration in planned:
-                with self._moving(migration):
+                with self._moving(migration, copying=True):
                     # Native migrate applies the planned operations after the walk.
                     operations = [_own(operation) for operation in migration.operations]
                 self._judge(migration, operations, state)
@@ -1282,6 +1291,7 @@ class _Walk:
             refused = [*self.refused, *self._shared(state)]
         except _End as end:
             self.cause = self.cause or end.error
+            self.ended = end
             refused = [*self.refused, *self._ended(end)]
         return [self._remedied(refusal) for refusal in refused]
 
@@ -1327,17 +1337,22 @@ class _Walk:
 
     def _ended(self, end: _End) -> list[_Refused]:
         """Each judged removal the walk cannot read since it ended at ``end``, and each
-        judged table drop it met, whose owners at the end of the plan it cannot tell."""
+        judged table drop it met, whose owners at the end of the plan it cannot tell.
+
+        Native ``migrate`` copies no operation, so where the walk ended at one it cannot
+        copy, migrating past that migration first lets it read the rest; see ``_remedied``.
+        """
         removals = [
             (migration, operation)
             for migration in self.planned
             for operation in _database_removals(migration.operations)
         ]
         remedy = _unfollowed(end)
+        restart = end.migration if end.copied else None
         return [
             *self._unjudged(end, remedy),
             *(
-                _Refused(migration, operation, remedy, str(end))
+                _Refused(migration, operation, remedy, str(end), restart=restart)
                 for migration, operation in removals[self.passed :]
                 if migration.app_label in self.judged
             ),
@@ -1345,33 +1360,43 @@ class _Walk:
 
     def _remedied(self, refusal: _Refused) -> _Refused:
         """``refusal``, whose remedy, where it names a migration to migrate to first, names
-        one native ``migrate`` can start after, or else asks for the history ordered."""
+        one native ``migrate`` can start after, or else is the one it holds."""
         restart = refusal.restart
         if restart is None:
             return refusal
         if restart not in self._restartable:
             self._restartable[restart] = self._restarts(restart)
         if not self._restartable[restart]:
-            return refusal._replace(remedy=_RENDER, restart=None)
+            return refusal._replace(restart=None)
         alias = self.connection.alias
-        remedy = (
-            f"{_migrate(alias, restart.app_label, restart.name)} first, after which the migration "
-            f"state renders again, then {_migrate(alias)}"
+        past = (
+            "past the operation the drop guard cannot copy"
+            if self.ended is not None and self.ended.copied and restart is self.ended.migration
+            else "after which the migration state renders again"
         )
+        remedy = f"{_migrate(alias, restart.app_label, restart.name)} first, {past}, then {_migrate(alias)}"
         return refusal._replace(remedy=remedy, restart=None)
 
     def _restarts(self, restart: Migration) -> bool:
         """Whether native ``migrate`` can start where migrating to ``restart`` leaves the
         database: the state before the plan, moved by copies of the planned migrations
         ``restart`` needs, renders afresh, as native ``migrate`` renders the state it
-        starts from before it plans."""
+        starts from before it plans. Native ``migrate`` copies no operation, so one that
+        cannot be copied moves this throwaway state itself, whose fields are then made its
+        own again."""
         needed = set(self.executor.loader.graph.forwards_plan((restart.app_label, restart.name)))
         try:
             state = _own_fields(self.executor._create_project_state(with_applied_migrations=True))  # type: ignore[attr-defined]
             for migration in self.planned:
                 if (migration.app_label, migration.name) in needed:
                     for operation in migration.operations:
-                        _own(operation).state_forwards(migration.app_label, state)
+                        try:
+                            owned = _own(operation)
+                        except Exception:
+                            operation.state_forwards(migration.app_label, state)
+                            _own_fields(state)
+                            continue
+                        owned.state_forwards(migration.app_label, state)
             _render(state)
         except Exception:
             return False
@@ -1632,7 +1657,7 @@ class _Walk:
         if self.lost is not None and self.blind is None:
             if undeclared:
                 self.refused.append(
-                    _Refused(migration, operation, None, str(self.lost), restart=self.restart)
+                    _Refused(migration, operation, _RENDER, str(self.lost), restart=self.restart)
                 )
                 return
             if not drops_table:

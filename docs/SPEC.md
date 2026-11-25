@@ -651,16 +651,19 @@ At `migrate`:
   the new app's creation is the migration to apply first. Where the walk went blind and
   reads its state again after a migration, a removal it refuses from there on names
   that migration: `migrate <app> <migration>` first, then `migrate`, judges the rest
-  afresh, its names followed again. It names it only where native `migrate` can start
-  after it: copies of the operations that migration needs, applied to the state before
-  the plan, render afresh, as native `migrate` renders the state it starts from before
-  it plans. Every other refusal a stopped walk makes needs the history changed: a
-  removal it cannot read, ordered to come where the state renders; a table drop whose
-  owners at the end of the plan it cannot tell, ordered so that the state renders
-  there; and after the walk ends, the operations of the migration where it ended made
-  ones that `copy.deepcopy` copies and that move the state, or the removals ordered
-  before it. Every remedy that names `migrate` names `--database <alias>` where the
-  alias migrated is not the default.
+  afresh, its names followed again. Where the walk ended at an operation it cannot
+  copy, a removal it refuses from there on names that operation's migration the same
+  way, since native `migrate` copies no operation. Either is named only where native
+  `migrate` can start after it: copies of the operations that migration needs, the one
+  that cannot be copied stepped itself, applied to the state before the plan, render
+  afresh, as native `migrate` renders the state it starts from before it plans. Every
+  other refusal a stopped walk makes needs the history changed: a removal it cannot
+  read, ordered to come where the state renders; a table drop whose owners at the end
+  of the plan it cannot tell, ordered so that the state renders there; and after the
+  walk ends without that remedy, the operations of the migration where it ended made
+  ones that `copy.deepcopy` copies, or that Django's migration state applies, or the
+  removals ordered before it. Every remedy that names `migrate` names
+  `--database <alias>` where the alias migrated is not the default.
 
 A migration declares a drop it intends with `IntendedRemoveField` or
 `IntendedDeleteModel` from `django_compose.operations`: native subclasses applied and
