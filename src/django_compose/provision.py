@@ -278,7 +278,8 @@ def run(command: BaseCommand, options: dict[str, Any]) -> None:
         if message.is_serious() and not message.is_silenced()
     )
     if problems:
-        raise CommandError("provision: " + "; ".join(dict.fromkeys(problems)))
+        # Django's check registry keeps no order, so the problems are listed sorted.
+        raise CommandError("provision: " + "; ".join(sorted(set(problems))))
     connection = connections[using]
     if connection.in_atomic_block or (connection.connection is not None and not connection.get_autocommit()):
         raise CommandError("Provision requires an independent autocommit connection")

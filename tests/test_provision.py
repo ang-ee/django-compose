@@ -629,8 +629,12 @@ def test_provision_refuses_a_shadowed_guarded_command_before_any_database_work(
         columns = [row[1] for row in connection.execute("PRAGMA table_info(probe_item)")]
         state = connection.execute("SELECT state FROM django_compose_provision").fetchall()
     if refused:
-        problem = f"provision: {command} resolves to probe's command, which bypasses the drop guard"
-        assert problem in output, output
+        problem = f"{command} resolves to probe's command, which bypasses the drop guard"
+        assert "provision: " in output and problem in output, output
+        if command == "makemigrations":
+            # Django's commands.E001 too, listed in sorted order, whatever the check registry's.
+            autodetector = "The migrate and makemigrations commands must have the same autodetector."
+            assert f"provision: {autodetector}; {problem}" in output, output
         assert (columns, state) == (["id", "old"], [("complete",)])
     else:
         assert (columns, state) == (["id", "old", "new"], [("complete",)])
