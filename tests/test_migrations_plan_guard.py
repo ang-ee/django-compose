@@ -3496,6 +3496,8 @@ else:
 assert "alpha.0003_window (Delete model Spare): cannot " in refusal, refusal
 assert "AttributeError: " in refusal or "ValueError: " in refusal, refusal
 assert "0004_drop" not in refusal, refusal
+# What Django raised names objects by their memory addresses; the refusal does not.
+assert " at 0x" not in refusal, refusal
 assert ("alpha", "0003_window") not in applied()
 """
     )

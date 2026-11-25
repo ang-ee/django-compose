@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import importlib
 import importlib.util
+import re
 import stat
 import string
 import sys
@@ -353,7 +354,9 @@ _RESOLVE = (
 def _refused(drop: str, refusals: Iterable[tuple[str, str, bool]], outcome: str = "") -> CommandError:
     """One error naming every ``(remedy, refusal, unsafe)``, then each distinct remedy once,
     in order: under "unsafe ``drop``" those that would destroy stored data or a table another
-    model owns, and under "cannot prove ``drop`` safe" those the guard cannot judge."""
+    model owns, and under "cannot prove ``drop`` safe" those the guard cannot judge. What
+    was raised names objects without their memory addresses, so the error reads the same
+    on every run."""
     refusals = tuple(refusals)
     remedies = dict.fromkeys(remedy for remedy, _, _ in refusals)
     headings = ((True, f"unsafe {drop}"), (False, f"cannot prove {drop} safe"))
@@ -362,7 +365,8 @@ def _refused(drop: str, refusals: Iterable[tuple[str, str, bool]], outcome: str 
         for kind, heading in headings
         if any(unsafe is kind for _, _, unsafe in refusals)
     ]
-    return CommandError(". ".join(parts) + f".{outcome} To proceed, " + "; ".join(remedies) + ".")
+    message = ". ".join(parts) + f".{outcome} To proceed, " + "; ".join(remedies) + "."
+    return CommandError(re.sub(r" at 0x[0-9a-f]+", "", message))
 
 
 def _identities(connection: BaseDatabaseWrapper, table: str) -> tuple[tuple[str, str], tuple[str, str]]:
