@@ -644,6 +644,34 @@ def test_provision_refuses_a_shadowed_guarded_command_before_any_database_work(
     assert ("django_compose.E002" in result.stderr) is not silenced, result.stdout + result.stderr
 
 
+def test_a_makemigrations_subclassing_another_app_and_this_package_keeps_the_guard(tmp_path: Path) -> None:
+    # As a host shipping django-linear-migrations documents it: the project's command
+    # subclasses that app's and this package's, so it keeps the guard's autodetector,
+    # passes both checks with nothing silenced, and provisions.
+    manage = _composed_host(tmp_path, _item_models("old = models.CharField(max_length=40, default='')"))
+    (tmp_path / "probe/management/commands/makemigrations.py").write_text(
+        "from django.core.management.commands.makemigrations import Command as Native\n"
+        "from django_compose.management.commands.makemigrations import Command as Compose\n\n"
+        "class Linear(Native):\n"
+        "    # Stands in for django-linear-migrations' command.\n"
+        "    pass\n\n"
+        "class Command(Linear, Compose):\n"
+        "    pass\n"
+    )
+    assert manage("compose").returncode == 0
+    result = manage("check", "--tag", "commands")
+    assert result.returncode == 0, result.stdout + result.stderr
+    result = manage("provision", "--wait-db", "1")
+    assert result.returncode == 0, result.stdout + result.stderr
+    result = manage(
+        "shell",
+        "-c",
+        "from django.core.management import load_command_class; "
+        "print(load_command_class('probe', 'makemigrations').autodetector.__name__)",
+    )
+    assert "DropGuardAutodetector" in result.stdout, result.stdout + result.stderr
+
+
 def test_native_makemigrations_then_migrate_sees_new_file_in_same_process(tmp_path: Path) -> None:
     """Django reloads a migration file created earlier in the same process."""
 

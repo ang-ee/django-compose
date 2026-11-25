@@ -1906,6 +1906,146 @@ assert not applied()
     )
 
 
+MOVING = """
+FAIL = False
+
+
+class Breaks(migrations.AlterModelOptions):
+    # A state-changing operation whose state Django cannot move once FAIL is set.
+    def state_forwards(self, app_label, state):
+        if FAIL:
+            raise RuntimeError("the state cannot move")
+        super().state_forwards(app_label, state)
+"""
+
+
+def test_a_state_that_cannot_move_ends_the_walk(host):
+    root, run = host
+    # Where moving the state raises, the walk cannot read anything after it, as native
+    # migrate cannot apply it: even a declared drop after it is refused, and the remedy
+    # names the operations to change, since migrating there first fails natively too.
+    migration(root, "0002_breaks", ['Breaks(name="record", options={})'], preamble=MOVING)
+    migration(
+        root, "0003_drop", ['IntendedRemoveField(model_name="record", name="old")'], after="0002_breaks"
+    )
+    run(
+        PRELUDE
+        + """
+seed(old="kept")
+importlib.import_module("history.alpha.0002_breaks").FAIL = True
+ended = "alpha.0003_drop (Remove field old from record): cannot follow the migration state at "
+caught = expect(CommandError, ended + "alpha.0002_breaks (RuntimeError: the state cannot move)", migrate)
+assert "make the operations of alpha.0002_breaks ones that Django's migration state applies" in str(caught)
+assert type(caught.__cause__) is RuntimeError and columns() == ["id", "old"]
+"""
+    )
+
+
+def test_whatever_rendering_raises_leaves_the_walk_blind_and_the_first_is_the_cause(host):
+    root, run = host
+    # Where data is stored, rendering Spare raises a RuntimeError, as a broken field's code
+    # might: the walk goes blind there as at any render failure. Deleting Tag left Holder.tag dangling, so the
+    # state at the end of the plan does not render either, a ValueError; the refusal
+    # names the first exception the walk caught as its cause.
+    holder = (
+        'migrations.CreateModel(name="Holder", fields=[("id", models.AutoField(primary_key=True)), ("tag", '
+        + TAGGED
+        + ")])"
+    )
+    migration(root, "0002_tag", [created("Tag"), created("Spare"), holder])
+    plan = ['migrations.DeleteModel(name="Tag")', 'migrations.DeleteModel(name="Spare")']
+    migration(root, "0003_plan", plan, after="0002_tag")
+    run(
+        PRELUDE
+        + """
+seed("0002_tag")
+from django.db.migrations.state import StateApps
+get_model = StateApps.get_model
+def broken(self, app_label, model_name=None, require_ready=True):
+    if (model_name or "").lower() == "spare":
+        raise RuntimeError("Spare cannot be rendered")
+    return get_model(self, app_label, model_name, require_ready)
+StateApps.get_model = broken
+spare = "alpha.0003_plan (Delete model Spare): cannot render the migration state at alpha.0003_plan "
+caught = expect(CommandError, spare + "(RuntimeError: ", migrate)
+unowned = "alpha.0003_plan (Delete model Tag): cannot tell who owns its table at the end of the plan"
+assert unowned in str(caught), str(caught)
+assert type(caught.__cause__) is RuntimeError, repr(caught.__cause__)
+"""
+    )
+
+
+def test_the_remedy_names_the_latest_migration_after_which_the_state_renders_again(host):
+    root, run = host
+    # Two windows, each closed within its migration: the walk goes blind in each, at a
+    # declared drop and then at a declared deletion, and reads its state again after each.
+    # The removal after both names the second as the migration to migrate to first, once
+    # the deletion refused in it is resolved: migrating to the first would meet the second
+    # window again.
+    tagged = [created("Tag"), created("Tag2"), created("Gone"), add_field("tag", TAGGED)]
+    tag2 = 'models.ForeignKey("alpha.Tag2", models.SET_NULL, null=True, db_constraint=False)'
+    migration(root, "0002_tag", [*tagged, add_field("tag2", tag2), add_field("spare"), add_field("extra")])
+    me = 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)'
+    first = [
+        state_only('migrations.DeleteModel(name="Tag")'),
+        add_field("me", me),
+        'IntendedRemoveField(model_name="record", name="spare")',
+        state_only(remove_field("tag")),
+    ]
+    migration(root, "0003_first", first, after="0002_tag")
+    second = [
+        state_only('migrations.DeleteModel(name="Tag2")'),
+        add_field("me2", me),
+        'IntendedDeleteModel(name="Gone")',
+        state_only(remove_field("tag2")),
+    ]
+    migration(root, "0004_second", second, after="0003_first")
+    migration(root, "0005_drop", [remove_field("extra")], after="0004_second")
+    run(
+        PRELUDE
+        + """
+seed("0002_tag", old="kept")
+remedy = (
+    "once the removals refused in alpha.0004_second are resolved, migrate alpha 0004_second first, "
+    "after which the migration state renders again, then migrate"
+)
+caught = expect(CommandError, remedy, migrate)
+assert "migrate alpha 0003_first first" not in str(caught), str(caught)
+"""
+    )
+
+
+def test_a_walk_that_went_blind_tells_a_refilled_table_from_names_alone(host):
+    root, run = host
+    # A's table is dropped and B recreates it, which the walk that follows names on a
+    # database that stores nothing records. It then goes blind at B's deletion, which it
+    # cannot read, and reads its state again after the migration. C takes the name by
+    # state alone. Names moved unfollowed while the walk was blind, so it does not trust
+    # what it recorded: from names alone, C owns A's table at the end of the plan.
+    shared = {"db_table": "shared_t"}
+    migration(root, "0002_tag", [created("Tag"), add_field("tag", TAGGED), created("A", **shared)])
+    plan = [
+        'migrations.DeleteModel(name="A")',
+        created("B", **shared),
+        REMOVE_OLD,
+        'migrations.DeleteModel(name="Tag")',
+        add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)'),
+        'migrations.DeleteModel(name="B")',
+        state_only(remove_field("tag")),
+        state_only(created("C", **shared)),
+    ]
+    migration(root, "0003_plan", plan, after="0002_tag")
+    run(
+        PRELUDE
+        + """
+blind = "alpha.0003_plan (Delete model B): cannot render the migration state at"
+caught = expect(CommandError, blind, migrate)
+owned = "alpha.0003_plan (Delete model A): table 'shared_t' is still owned by alpha.c on 'default'"
+assert owned in str(caught), str(caught)
+"""
+    )
+
+
 @pytest.mark.parametrize("database", ["fresh", "populated"])
 @pytest.mark.parametrize("where", ["before", "after"])
 def test_a_table_drop_around_a_render_window_is_judged_where_the_state_renders_again(host, where, database):
@@ -3620,6 +3760,13 @@ refusal = (
 )
 expect(CommandError, refusal, lambda: migrate(fake_initial=True))
 assert ("beta", "0001_initial") not in applied()
+# Where native migrate could not start after that migration, the remedy names none.
+import django_compose.migrations as guard
+restartable = guard._restartable
+guard._restartable = lambda *args: False
+remedy = "To proceed, migrate first to the migration that gives that storage its model, then migrate."
+expect(CommandError, remedy, lambda: migrate(fake_initial=True))
+guard._restartable = restartable
 migrate("beta", "0001", fake_initial=True)
 migrate()
 with connection.cursor() as cursor:

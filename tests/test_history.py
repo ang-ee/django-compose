@@ -172,6 +172,14 @@ expect(RuntimeError, "purge applies only 'alpha' history; first apply the rest o
        "migrate beta 0001_pending",
        lambda: retire_history("alpha", purge=True))
 assert not updated.called
+# Where native migrate could not start after a migration of that chain, none is named.
+import django_compose.migrations as guard
+restartable = guard._restartable
+guard._restartable = lambda *args: False
+expect(RuntimeError, "purge applies only 'alpha' history, and native migrate could not start after "
+       "beta.0001_pending in the rest of its chain", lambda: retire_history("alpha", purge=True))
+guard._restartable = restartable
+assert not updated.called
 applied = MigrationExecutor(connection).loader.applied_migrations
 assert ("beta", "0001_pending") not in applied and ("alpha", "0002_after_beta") not in applied
 assert "alpha_record" in connection.introspection.table_names()
