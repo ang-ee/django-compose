@@ -23,7 +23,7 @@ The launcher exposes these Django management commands:
 | Command | Purpose | Guide |
 | --- | --- | --- |
 | `compose` | Generate output; `--check` verifies output/history without writes; `--if-stale` skips a current build | [Lifecycle](SPEC.md#setup-lifecycle) |
-| `makemigrations`, `migrate` | Author and apply ordinary Django migrations; the [drop guard](SPEC.md#drop-guard) refuses an autodetected drop of stored data, and at `migrate` an undeclared one in the project's own history | [Migrations](migrations.md) |
+| `makemigrations`, `migrate` | Author and apply ordinary Django migrations; the [drop guard](SPEC.md#drop-guard) refuses an autodetected drop of stored data, and at `migrate` a drop in the project's own history that would lose stored data or a table another model owns, or that it cannot prove safe | [Migrations](migrations.md) |
 | `runserver` | Compose before Django's development-server reloads | [Development](configuration.md#serve-the-project) |
 | `provision` | Apply migrations and app preparation hooks; `--check` verifies readiness | [Provisioning](provisioning.md) |
 | `check_migrations` | Compare models/history; `--imports` audits retained Python dependencies | [History checks](migrations.md#disable-delete-or-uninstall) |

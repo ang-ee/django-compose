@@ -526,21 +526,30 @@ It runs at two points on these rules:
   `--skip-checks`, through `migrations.check_plan_drops(plan, *, using)`. It judges a
   forward plan on the alias being migrated, on the graph native `migrate` planned with,
   including for a squash-replaced target, in the order the executor applies it. A
-  planned migration the walk cannot follow is refused by name. Where the walk cannot
-  render afresh the migration state it reads, though native `migrate`, which keeps its
-  rendering current in place, may apply it, the walk stops rendering there, whichever
-  history left the state so: it follows no name and proves nothing from there on, and
-  moves the unrendered state on, which still tells whether a removal drops a table.
-  From there on it refuses every removal in the history the guard judges that can drop
-  a table, and, where data is stored, every undeclared one, however empty; a declared
-  column drop needs no proof and applies, and where nothing is stored a column removal
-  is not refused. Where whatever the walk runs raises while it copies an operation that
-  can change the state, reads a field's naming or moves the state forward, the walk
-  ends there instead, and every removal in the history the guard judges from there on
-  is refused, since without the state a field's removal cannot be told from a
-  many-to-many table's. Either way every such table drop the walk met before is refused
-  too, since its owners at the end of the plan cannot be told, the refusals name what
-  was raised, and a plan with no such removal applies as native `migrate` applies it.
+  planned migration the walk cannot follow is refused by name. What happens where the
+  walk's own work raises depends on whether its state can still move. Where copying an
+  operation that can change the state, or moving the state with one, raises, the state
+  is lost and the walk ends: every removal in the history the guard judges from there
+  on is refused, whatever its kind and on every database, since without the state a
+  field's removal cannot be told from a many-to-many table's, and so is every table
+  drop it met, whose owners at the end of the plan cannot be told. Where rendering or
+  reading the state raises instead, as where Django cannot render afresh a state that
+  native `migrate`, keeping its rendering current in place, applies, the state still
+  moves, unrendered, and the walk goes blind, whichever history left the state so. A
+  blind walk reads no model and refuses each removal in the history the guard judges
+  that it would have to read: every one that can drop a table, which the unrendered
+  state tells, and, where data is stored, every undeclared one, however empty. A
+  declared column drop needs no proof and applies, and where nothing is stored a column
+  removal is not refused. After each later migration a blind walk tries to render its
+  state afresh, as native `migrate` renders the state it starts from, and where it can,
+  it reads its state again. Names moved unfollowed meanwhile, so from the first time it
+  goes blind the walk follows no name and proves nothing: where data is stored it
+  refuses every undeclared removal it judges, and it tells who owns the tables it drops,
+  met before it went blind or after it reads again, from names alone at the end of the
+  plan. Where the state at the end of the plan does not render, every table drop it met
+  is refused. The refusals name what was raised, and raise from it; a plan with no such
+  removal applies as native `migrate` applies it. Whatever the guard itself raises
+  outside its walk refuses the plan in the same way.
 
 At `migrate`:
 
@@ -573,9 +582,10 @@ At `migrate`:
   gives it, on a model that migrates on the alias, under which its rows were written,
   whatever the plan redefines in any form or under any name: its class, `null`,
   `default` or `db_default`, from which Django derives its default, or whether it is
-  generated. To derive it, the guard calls the callable `default` of each such definition
-  once for each column it proves, at `pre_migrate`: that runs the history's code before the
-  plan, and what it writes stays written even where the plan is refused. A column
+  generated. A table without rows proves every column empty without any default. Where
+  the table holds rows, the guard calls the callable `default` of each such definition
+  once for each column it proves, at `pre_migrate`: that runs the history's code before
+  the plan, and what it writes stays written even where the plan is refused. A column
   generated before the plan holds no data of its own, while one the
   plan redefines as generated still holds the rows written before it. Where no field
   of that state is stored in the column, as for a table `--fake-initial` adopts, or
@@ -638,14 +648,19 @@ At `migrate`:
   that gives the storage its model. A plan that starts between the two halves of
   Django's documented move of a model between apps, after the old app's state-only
   deletion and before the new app's state-only creation, meets such columns too, and
-  the new app's creation is the migration to apply first. Where the walk stops
-  rendering or following the history, the refusal of a later migration names where it
-  stopped: `migrate <app> <migration>` first, then `migrate`, judges the rest from the
-  state native `migrate` renders afresh where it starts, which has to render there.
-  A removal of the migration where the walk stopped, or before it, and every refusal
-  where the end of the plan leaves the state unreadable, needs the history ordered so
-  that the state renders at that removal, for example by making its migration depend
-  on one past where the walk stopped.
+  the new app's creation is the migration to apply first. Where the walk went blind and
+  reads its state again after a migration, a removal it refuses from there on names
+  that migration: `migrate <app> <migration>` first, then `migrate`, judges the rest
+  afresh, its names followed again. It names it only where native `migrate` can start
+  after it: copies of the operations that migration needs, applied to the state before
+  the plan, render afresh, as native `migrate` renders the state it starts from before
+  it plans. Every other refusal a stopped walk makes needs the history changed: a
+  removal it cannot read, ordered to come where the state renders; a table drop whose
+  owners at the end of the plan it cannot tell, ordered so that the state renders
+  there; and after the walk ends, the operations of the migration where it ended made
+  ones that `copy.deepcopy` copies and that move the state, or the removals ordered
+  before it. Every remedy that names `migrate` names `--database <alias>` where the
+  alias migrated is not the default.
 
 A migration declares a drop it intends with `IntendedRemoveField` or
 `IntendedDeleteModel` from `django_compose.operations`: native subclasses applied and
@@ -675,9 +690,12 @@ of any other app wins and would switch the guard off. System check
 `provision` refuses a shadowing `migrate`, which it runs, silenced or not, and refuses
 whatever the `commands` checks report unless it is silenced, as its final system
 check would only after migrating, with the provision record left `in_progress`. A
-host that ships its own `makemigrations`, as django-linear-migrations does, and
-silences `django_compose.E002` and Django's `commands.E001` provisions as the system
-checks allow. The guard wraps the command's `execute`, so a subclass that replaces
+host that ships its own `makemigrations`, as django-linear-migrations does, keeps the
+guard with a command that subclasses both, as `class Command(LinearCommand,
+ComposeCommand)`: it keeps the guard's autodetector and passes both checks, with nothing
+silenced. A host that silences `django_compose.E002` and Django's `commands.E001`
+instead provisions as the system checks allow, but authors migrations without the
+guard. The guard wraps the command's `execute`, so a subclass that replaces
 `handle` keeps it; a subclass that overrides `execute` without calling it passes E002
 but has no guard.
 [Proposal 0005](proposals/0005-migrate-time-drop-guard.md) records these decisions.

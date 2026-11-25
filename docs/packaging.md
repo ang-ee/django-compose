@@ -112,8 +112,8 @@ For projects with database preparation hooks or a readiness gate, use
 part of the verified sequence and records completion for the selected alias.
 
 Both apply the [drop guard](SPEC.md#drop-guard) to the history the project owns:
-a refusal means a pending migration would drop stored data, and the release needs
-that migration reviewed before it proceeds. Purging a retired app's data is a separate
+a refusal means a pending migration would drop stored data, or that the guard cannot
+prove it would not, and the release needs that migration reviewed before it proceeds. Purging a retired app's data is a separate
 decision on each deployment. On a deployment that should drop that data, apply the
 reviewed history first, then run:
 

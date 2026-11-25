@@ -35,24 +35,27 @@
   migrate after the check in the same process.
 - `SourceResolver.installed(module)` tells whether an installed distribution owns a
   module, settled by the first owner found rather than the full index.
-- **Upgrade impact:** a host whose unapplied history removes a column or table
-  that still holds data is now refused at `migrate` and `provision`, which is the
-  point. Review each named removal: keep the storage, or move its data and write the
-  removal as `IntendedRemoveField(model_name=..., name=...)` or
-  `IntendedDeleteModel(name=...)` in that migration. Deleting a table another model
-  still owns is refused even when declared: keep the table, or change that owner
-  first. A pending purge migration is refused the same way; apply it on each
-  deployment with `retire_history <label> --purge`. Where the guard cannot read the
-  migration state, as where a history leaves a relation's target undefined for a
-  while or holds an operation it cannot copy, it refuses, under `cannot prove
-  migration drop safe`, each later table drop and, on a database that stores data,
-  each later undeclared removal of the history it judges: migrate first to the
-  migration the refusal names, then migrate. Any other installed app, the
-  project's or a third party's, that ships a `migrate` or `makemigrations` command now
-  fails system check `django_compose.E002` and makes `provision` refuse: remove that
-  command, or make it subclass this package's. A `makemigrations` that must stay, such
-  as django-linear-migrations', provisions once `django_compose.E002` is silenced, with
-  `commands.E001` where Django reports it.
+- **Upgrade impact:** a host whose unapplied history removes a column or table that
+  still holds data is now refused at `migrate` and `provision`, which is the point.
+  Review each named removal: keep the storage, or move its data and write the removal as
+  `IntendedRemoveField(model_name=..., name=...)` or `IntendedDeleteModel(name=...)` in
+  that migration. Deleting a table another model still owns is refused even when
+  declared: keep the table, or change that owner first. A pending purge migration is
+  refused the same way; apply it on each deployment with `retire_history <label>
+  --purge`. Where the guard cannot read the migration state, as where a history leaves a
+  relation's target undefined for a while, it refuses under `cannot prove migration drop
+  safe` each table drop it cannot read, each table drop whose owners at the end of the
+  plan it cannot tell, and, on a database that stores data, each undeclared removal from
+  there on; where it cannot copy an operation or move the state, every removal from
+  there on. Where the state renders again after a later migration, a refusal names that
+  migration: migrate to it first, then migrate. Otherwise order the history as the
+  refusal says. Any other installed app, the project's or a third party's, that ships a
+  `migrate` or `makemigrations` command now fails system check `django_compose.E002` and
+  makes `provision` refuse: remove that command, or make it subclass this package's. A
+  `makemigrations` that must stay, such as django-linear-migrations', keeps the guard as
+  a command subclassing both, as `class Command(LinearCommand, ComposeCommand)`, with
+  nothing silenced; silencing `django_compose.E002` and `commands.E001` instead
+  provisions, but authors without the guard.
 
 ## 0.1.0.dev13
 

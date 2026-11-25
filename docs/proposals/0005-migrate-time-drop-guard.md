@@ -54,13 +54,20 @@ choices behind it.
   the plan's own was rejected: a `RunSQL` rename then left the renamed, populated
   storage to a later native drop unprobed. Custom SQL that moves storage under a name
   the walk accounts for is not detected, since that needs parsing SQL; the
-  specification states that class. A state the walk cannot render afresh, in whatever
-  history, leaves it blind: it moves the unrendered state on, follows no name and
-  proves nothing, and refuses every judged removal that would need either, any table
-  drop and, where data is stored, any undeclared removal. One it cannot copy or move
-  forward ends it, and every judged removal from there on is refused. Both are
-  classified as every other refusal is, so a project without guarded drops there
-  migrates as it did before the guard. Judging on past a render failure by the names
+  specification states that class. Whatever the walk raises where its state can still
+  move, rendering or reading it, leaves it blind: it moves the unrendered state on,
+  follows no name and proves nothing, and refuses every judged removal that would need
+  either, any table drop and, where data is stored, any undeclared removal; at each
+  later migration it tries a fresh render, and where one succeeds it reads its state
+  again, telling the owners of the tables it drops from names alone. A state it cannot
+  copy or move forward ends it, and every judged removal from there on is refused.
+  Deciding blind or ended by which line raised was rejected: the same window ended one
+  walk, which had rendered in place, and left another blind. Naming, as the migration
+  to migrate to first, the one where the walk went blind was rejected: native `migrate`
+  renders afresh the state it starts from, so a window spanning migrations left a
+  database no `migrate` could start from; the remedy names only one native `migrate`
+  can start after. Both outcomes are classified as every other refusal is. Judging on
+  past a render failure by the names
   before the plan was rejected: a native rename after it moved stored data under a
   name the walk probed as it was before the plan. Ending the walk at a render failure
   was rejected too: it refused declared drops, and column removals where nothing is
