@@ -55,7 +55,7 @@ choices behind it.
   storage to a later native drop unprobed. Custom SQL that moves storage under a name
   the walk accounts for is not detected, since that needs parsing SQL; the
   specification states that class. Whatever the walk raises where its state can still
-  move, rendering or reading it, leaves it blind: it moves the unrendered state on,
+  move, rendering or reading it, leaves it blind: it moves the state on as Django does,
   follows no name and proves nothing, and refuses every judged removal that would need
   either, any table drop and, where data is stored, any undeclared removal; at each
   later migration it tries a fresh render, and where one succeeds it reads its state

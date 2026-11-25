@@ -535,7 +535,7 @@ It runs at two points on these rules:
   drop it met, whose owners at the end of the plan cannot be told. Where rendering or
   reading the state raises instead, as where Django cannot render afresh a state that
   native `migrate`, keeping its rendering current in place, applies, the state still
-  moves, unrendered, and the walk goes blind, whichever history left the state so. A
+  moves, as Django moves it, and the walk goes blind, whichever history left the state so. A
   blind walk reads no model and refuses each removal in the history the guard judges
   that it would have to read: every one that can drop a table, which the unrendered
   state tells, and, where data is stored, every undeclared one, however empty. A

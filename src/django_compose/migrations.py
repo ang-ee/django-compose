@@ -1141,7 +1141,7 @@ class _Walk:
     move. Where copying an operation or moving the state with one raises, the state is
     lost and the walk ends, see ``_moving``: every judged removal from there on, and every
     judged table drop it met, is refused. Where rendering or reading the state raises,
-    the state still moves, unrendered, and the walk goes blind, see ``_blinded``: it
+    the state still moves, as Django moves it, and the walk goes blind, see ``_blinded``: it
     refuses each judged removal it would have to read, and at each later migration it
     tries to render its state afresh, as native ``migrate`` renders the state it starts
     from; where that succeeds, it reads its state again, see ``_resight``. Names moved
