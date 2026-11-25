@@ -2233,6 +2233,12 @@ guard._stores_nothing = broken
 refusal = "the drop guard cannot judge migrate's plan on 'default' (RuntimeError: inventory failed)"
 caught = expect(CommandError, refusal, migrate)
 assert type(caught.__cause__) is RuntimeError and ("alpha", "0002_drop") not in applied()
+def holding(connection):
+    raise RuntimeError(f"inventory failed on {object()!r}")
+guard._stores_nothing = holding
+# What was raised names objects without their memory addresses, so the refusal reads the same.
+caught = expect(CommandError, "(RuntimeError: inventory failed on <object object>)", migrate)
+assert " at 0x" not in str(caught), str(caught)
 """
     )
 
