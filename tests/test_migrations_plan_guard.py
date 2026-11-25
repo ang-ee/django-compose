@@ -3417,3 +3417,65 @@ migrate()
 assert ("beta", "0002_drop") in applied()
 """
     )
+
+
+VIRTUAL = """
+class Virtual(models.Field):
+    # A field Django's schema editor neither creates nor drops a column for.
+    def db_type(self, connection):
+        return None
+"""
+
+
+def test_removing_a_field_without_a_database_type_drops_nothing_and_applies(host):
+    root, run = host
+    # Such a field is in the state, and among its model's concrete fields, but stores
+    # nothing: Django creates no column for it, so its removal drops none.
+    virtual = add_field("virtual", "Virtual(null=True)")
+    migration(root, "0002_virtual", [virtual], preamble=VIRTUAL)
+    migration(root, "0003_drop", [remove_field("virtual")], after="0002_virtual")
+    run(
+        PRELUDE
+        + """
+seed("0002_virtual")
+with connection.cursor() as cursor:
+    cursor.execute("INSERT INTO alpha_record (old) VALUES ('kept')")
+assert columns() == ["id", "old"]
+migrate()
+assert ("alpha", "0003_drop") in applied() and columns() == ["id", "old"]
+"""
+    )
+
+
+def test_a_state_the_end_of_the_plan_cannot_render_refuses_the_table_drops_met(host):
+    root, run = host
+    # Each removal of the plan renders, but the state-only deletion of Tag after them leaves
+    # Holder.tag dangling, and the relation added last makes the state at the end of the
+    # plan render afresh, where the shared-table rule reads it: who owns Spare's table then
+    # cannot be told, so its deletion is refused and nothing is migrated.
+    key = '("id", models.AutoField(primary_key=True))'
+    tag = f'("tag", {TAGGED})'
+    models = [
+        created("Tag"),
+        created("Spare"),
+        f'migrations.CreateModel(name="Holder", fields=[{key}, {tag}])',
+    ]
+    migration(root, "0002_tag", models)
+    me = add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)')
+    plan = ['migrations.DeleteModel(name="Spare")', state_only('migrations.DeleteModel(name="Tag")'), me]
+    migration(root, "0003_plan", plan, after="0002_tag")
+    run(
+        PRELUDE
+        + """
+seed("0002_tag")
+refusal = (
+    "cannot prove migration drop safe: alpha.0003_plan (Delete model Spare): cannot tell who owns its "
+    "table at the end of the plan: the walk cannot follow the migration state at the end of the plan "
+    "(ValueError: "
+)
+expect(CommandError, refusal, migrate)
+reorder = "To proceed, order the history so that the migration state renders at each removal"
+expect(CommandError, reorder, migrate)
+assert ("alpha", "0003_plan") not in applied() and "alpha_spare" in tables()
+"""
+    )
