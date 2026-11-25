@@ -1623,7 +1623,7 @@ expect(CommandError, "cannot follow migrate's plan through alpha.0099_ghost",
     )
 
 
-def test_a_state_the_walk_cannot_render_ends_it_and_refuses_what_it_judges(host):
+def test_a_state_the_walk_cannot_render_leaves_it_blind_and_refuses_what_it_judges(host):
     root, run = host
     key = '("id", models.AutoField(primary_key=True))'
     tag = '("tag", models.ForeignKey("alpha.Tag", models.SET_NULL, null=True, db_constraint=False))'
@@ -1642,14 +1642,15 @@ def test_a_state_the_walk_cannot_render_ends_it_and_refuses_what_it_judges(host)
         PRELUDE
         + """
 seed("0002_tag")
-ended = "cannot render the migration state at alpha.0005_drop (ValueError: The field"
-expect(CommandError, "alpha.0005_drop (Remove field old from record): " + ended, migrate)
-# Without the state at the end of the plan, no table drop can be told from a kept table.
+blind = "cannot render the migration state at alpha.0005_drop (ValueError: The field"
+expect(CommandError, "alpha.0005_drop (Remove field old from record): " + blind, migrate)
+# The state never renders again, so no table drop can be told from a kept table at the
+# end of the plan, and no migration to migrate to first can be named.
 unowned = "alpha.0003_untag (Delete model Tag): cannot tell who owns its table at the end of the plan"
 expect(CommandError, unowned, migrate)
-# Migrating first to where the walk stopped would migrate the removal it refuses there.
-reorder = "To proceed, order the history so that the migration state renders at each removal"
+reorder = "To proceed, order the history so that each removal named here comes where the migration state"
 expect(CommandError, reorder, migrate)
+expect(CommandError, "order the history so that the migration state renders at the end of the plan", migrate)
 assert ("alpha", "0003_untag") not in applied()
 """
     )
@@ -1731,7 +1732,7 @@ else:
     # alpha's history is not the project's to change, so none of its removals is refused,
     # and the remedy is to migrate past where the walk stopped first.
     assert "alpha.0003_plan (Delete" not in refusal and "alpha.0003_plan (Remove" not in refusal, refusal
-    remedy = "To proceed, migrate alpha 0003_plan first, where the drop guard stopped reading the history"
+    remedy = "To proceed, migrate alpha 0003_plan first, after which the migration state renders again"
     assert remedy in refusal, refusal
     assert ("alpha", "0003_plan") not in applied()
     migrate("alpha", "0003_plan")
@@ -1741,31 +1742,31 @@ else:
     )
 
 
-def test_a_table_drop_after_the_walk_goes_blind_is_refused_where_nothing_is_stored(host):
+def test_a_table_drop_inside_a_render_window_is_refused_where_nothing_is_stored(host):
     root, run = host
-    # As above, on a database that stores nothing: who owns Thing's table at the end of the
-    # plan cannot be told once the walk is blind, so its deletion is refused. The walk that
-    # then follows names to tell whether the plan refilled that name refuses no column
-    # removal, which can lose nothing there.
-    migration(root, "0002_tag", [created("Tag"), created("Spare"), add_field("tag", TAGGED)])
-    plan = [
+    # alpha's window spans migrations: beta's plan runs while Record.tag dangles. On a
+    # database that stores nothing, who owns Thing's table cannot be read at its deletion,
+    # so that deletion is refused; the walk that then follows names to tell whether the
+    # plan refilled that name refuses no column removal, which can lose nothing there.
+    # Migrating first to where the state renders again would migrate the deletion itself.
+    migration(root, "0002_tag", [created("Tag"), add_field("tag", TAGGED)])
+    opening = [
         'migrations.DeleteModel(name="Tag")',
         add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)'),
-        'migrations.DeleteModel(name="Spare")',
-        state_only(remove_field("tag")),
     ]
-    migration(root, "0003_plan", plan, after="0002_tag")
+    migration(root, "0003_open", opening, after="0002_tag")
     write(root, "history/beta/0001_item.py", ITEM)
     removals = [created("Thing"), 'migrations.RemoveField(model_name="item", name="spare")']
     removals.append('migrations.DeleteModel(name="Thing")')
+    beta(root, "0002_drop", removals, [("beta", "0001_item"), ("alpha", "0003_open")])
     write(
         root,
-        "history/beta/0002_drop.py",
+        "history/alpha/0004_close.py",
         f"""
 from django.db import migrations, models
 class Migration(migrations.Migration):
-    dependencies = [("beta", "0001_item"), ("alpha", "0003_plan")]
-    operations = [{", ".join(removals)}]
+    dependencies = [("alpha", "0003_open"), ("beta", "0002_drop")]
+    operations = [{state_only(remove_field("tag"))}]
 """,
     )
     run(
@@ -1779,13 +1780,142 @@ except CommandError as error:
     refusal = str(error)
 else:
     raise AssertionError("expected a refusal")
-blind = "cannot render the migration state at alpha.0003_plan (ValueError: "
+blind = "cannot render the migration state at beta.0002_drop (ValueError: "
 heading = "cannot prove migration drop safe: beta.0002_drop (Delete model Thing): "
 assert refusal.startswith(heading + blind), refusal
 assert "Remove field spare" not in refusal, refusal
-assert "To proceed, migrate alpha 0003_plan first" in refusal, refusal
+assert "To proceed, order the history so that each removal named here comes where" in refusal, refusal
 assert not applied()
-migrate("alpha", "0003_plan")
+"""
+    )
+
+
+@pytest.mark.parametrize("database", ["fresh", "populated"])
+@pytest.mark.parametrize("where", ["before", "after"])
+def test_a_table_drop_around_a_render_window_is_judged_where_the_state_renders_again(host, where, database):
+    root, run = host
+    # beta deletes an empty Thing before or after alpha's window, which closes within its
+    # migration, as a test database's or a deployment's one plan applies them. The state
+    # renders again after the window, so who owns Thing's table at the end of the plan is
+    # told from names alone, and the deletion applies; only where data is stored and the
+    # deletion comes after the window can it not be proved, since names moved unfollowed
+    # meanwhile, and migrating to the window first then lets the walk prove it.
+    beta(root, "0001_thing", [created("Thing")])
+    drop = 'migrations.DeleteModel(name="Thing")'
+    migration(root, "0002_tag", [created("Tag"), created("Spare"), add_field("tag", TAGGED)])
+    if where == "before":
+        beta(root, "0002_drop", [drop], [("beta", "0001_thing")])
+    plan = [
+        'migrations.DeleteModel(name="Tag")',
+        add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)'),
+        remove_field("old"),
+        'migrations.DeleteModel(name="Spare")',
+        state_only(remove_field("tag")),
+    ]
+    dependencies = [("alpha", "0002_tag")] + ([("beta", "0002_drop")] if where == "before" else [])
+    write(
+        root,
+        "history/alpha/0003_plan.py",
+        f"""
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    dependencies = {dependencies!r}
+    operations = [{", ".join(plan)}]
+""",
+    )
+    if where == "after":
+        beta(root, "0002_drop", [drop], [("beta", "0001_thing"), ("alpha", "0003_plan")])
+    run(
+        PRELUDE
+        + f"""
+import django_compose.migrations as guard
+guard._guarded = lambda labels: frozenset(labels) - {{"alpha"}}
+if {database!r} == "populated":
+    seed("0002_tag")
+    MigrationExecutor(connection).migrate([("beta", "0001_thing")])
+if {where!r} == "after" and {database!r} == "populated":
+    remedy = "To proceed, migrate alpha 0003_plan first, after which the migration state renders again"
+    expect(CommandError, remedy, migrate)
+    assert ("beta", "0002_drop") not in applied()
+    migrate("alpha", "0003_plan")
+migrate()
+assert ("beta", "0002_drop") in applied() and "beta_thing" not in tables()
+"""
+    )
+
+
+@pytest.mark.parametrize("opening", ["state_only", "native"])
+def test_the_two_step_remedy_names_a_migration_native_migrate_can_start_after(host, opening):
+    root, run = host
+    # One linear history of the project's own: 0003 deletes Tag while Record.tag points at
+    # it and adds a relation, which native migrate applies in place, while a fresh render of
+    # the state fails until 0004 removes tag by state alone; 0005 then removes an empty
+    # column. Native migrate renders afresh the state it starts from, so migrating to 0003
+    # first would leave a database no migrate can start from: the remedy names 0004, after
+    # which the state renders again. Where 0003 itself removes a column, that removal cannot
+    # be read either, and migrating to 0004 first is refused for it, with nothing migrated.
+    migration(
+        root, "0002_tag", [created("Tag"), add_field("tag", TAGGED), add_field("spare"), add_field("extra")]
+    )
+    me = add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)')
+    if opening == "native":
+        operations = ['migrations.DeleteModel(name="Tag")', me, remove_field("spare")]
+    else:
+        rename = 'migrations.RenameField(model_name="record", old_name="spare", new_name="spare2")'
+        operations = [state_only('migrations.DeleteModel(name="Tag")'), me, rename]
+    migration(root, "0003_window", operations, after="0002_tag")
+    migration(root, "0004_close", [state_only(remove_field("tag"))], after="0003_window")
+    migration(root, "0005_drop", [remove_field("extra")], after="0004_close")
+    run(
+        PRELUDE
+        + f"""
+seed("0002_tag", old="kept")
+blind = "alpha.0005_drop (Remove field extra from record): cannot render the migration state at "
+expect(CommandError, blind + "alpha.0003_window", migrate)
+remedy = "migrate alpha 0004_close first, after which the migration state renders again, then migrate"
+expect(CommandError, remedy, migrate)
+if {opening!r} == "native":
+    spare = "alpha.0003_window (Remove field spare from record): cannot render the migration state"
+    expect(CommandError, spare, lambda: migrate("alpha", "0004_close"))
+    assert ("alpha", "0003_window") not in applied()
+else:
+    migrate("alpha", "0004_close")
+    migrate()
+    assert ("alpha", "0005_drop") in applied() and "extra" not in columns()
+"""
+    )
+
+
+def test_the_two_step_remedy_waits_for_a_window_over_several_migrations_to_close(host):
+    root, run = host
+    # An installed app's window spans four migrations; the project's removal of an empty
+    # column follows it. The remedy names the last of them, after which the state renders.
+    migration(
+        root, "0002_tag", [created("Tag"), created("Spare"), created("Spare2"), add_field("tag", TAGGED)]
+    )
+    me = add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)')
+    migration(root, "0003_a", ['migrations.DeleteModel(name="Tag")', me], after="0002_tag")
+    migration(root, "0003_b", ['migrations.DeleteModel(name="Spare")'], after="0003_a")
+    migration(root, "0003_c", ['migrations.DeleteModel(name="Spare2")'], after="0003_b")
+    migration(root, "0003_d", [state_only(remove_field("tag"))], after="0003_c")
+    write(root, "history/beta/0001_item.py", ITEM)
+    beta(
+        root,
+        "0002_drop",
+        ['migrations.RemoveField(model_name="item", name="spare")'],
+        [("beta", "0001_item"), ("alpha", "0003_d")],
+    )
+    run(
+        PRELUDE
+        + """
+import django_compose.migrations as guard
+guard._guarded = lambda labels: frozenset(labels) - {"alpha"}
+seed("0002_tag")
+MigrationExecutor(connection).migrate([("beta", "0001_item")])
+remedy = "To proceed, migrate alpha 0003_d first, after which the migration state renders again"
+expect(CommandError, remedy, migrate)
+assert ("alpha", "0003_a") not in applied()
+migrate("alpha", "0003_d")
 migrate()
 assert ("beta", "0002_drop") in applied()
 """
@@ -3103,7 +3233,8 @@ if {ends!r}:
     refusal = "alpha.0002_drop (Remove field old from record): cannot follow the migration state at "
     heading = "cannot prove migration drop safe: "
     expect(CommandError, heading + refusal + "beta.0002_held ({error}: ", migrate)
-    expect(CommandError, "To proceed, migrate beta 0002_held first", migrate)
+    remedy = "To proceed, make each operation of beta.0002_held one that copy.deepcopy copies"
+    expect(CommandError, remedy, migrate)
     assert ("beta", "0002_held") not in applied()
 else:
     migrate()
@@ -3139,11 +3270,14 @@ assert columns() == ["id", "old", "price"]
     )
 
 
-def test_a_through_left_as_a_string_by_an_in_place_reload_ends_the_walk(host):
+@pytest.mark.parametrize("rendered", [True, False])
+def test_a_through_left_as_a_string_by_an_in_place_reload_leaves_the_walk_blind(host, rendered):
     root, run = host
     # A state-only deletion of Record.tags' explicit through, then a reload of Record in
     # place, leaves the through a string; the walk then asks every model which tables it
-    # owns at the deletion of Spare, and cannot read it.
+    # owns at the deletion of Spare, and cannot read it, whether it rendered in place,
+    # after following a removal just before, or renders afresh. The state still moves,
+    # so only that deletion is refused, and the declared drop after the window is not.
     link = '("{0}", models.ForeignKey("alpha.{0}", models.CASCADE))'
     tags = add_field("tags", 'models.ManyToManyField("alpha.Tag", through="alpha.Link")')
     migration(
@@ -3159,19 +3293,30 @@ def test_a_through_left_as_a_string_by_an_in_place_reload_ends_the_walk(host):
         ],
     )
     window = [
-        remove_field("gone"),
         state_only('migrations.DeleteModel(name="Link")'),
         add_field("x", "models.CharField(max_length=5, null=True)"),
         'migrations.DeleteModel(name="Spare")',
         state_only(remove_field("tags")),
     ]
+    if rendered:
+        window.insert(0, remove_field("gone"))
     migration(root, "0003_window", window, after="0002_tags")
+    migration(
+        root, "0004_drop", ['IntendedRemoveField(model_name="record", name="old")'], after="0003_window"
+    )
     run(
         PRELUDE
         + """
 seed("0002_tags", old="")
-refusal = "alpha.0003_window (Delete model Spare): cannot follow the migration state at alpha.0003_window ("
-expect(CommandError, refusal + "AttributeError: ", migrate)
+try:
+    migrate()
+except CommandError as error:
+    refusal = str(error)
+else:
+    raise AssertionError("expected a refusal")
+assert "alpha.0003_window (Delete model Spare): cannot " in refusal, refusal
+assert "AttributeError: " in refusal or "ValueError: " in refusal, refusal
+assert "0004_drop" not in refusal, refusal
 assert ("alpha", "0003_window") not in applied()
 """
     )
@@ -3553,11 +3698,11 @@ def test_a_state_the_end_of_the_plan_cannot_render_refuses_the_table_drops_met(h
 seed("0002_tag")
 refusal = (
     "cannot prove migration drop safe: alpha.0003_plan (Delete model Spare): cannot tell who owns its "
-    "table at the end of the plan: the walk cannot follow the migration state at the end of the plan "
+    "table at the end of the plan: the walk cannot render the migration state at the end of the plan "
     "(ValueError: "
 )
 expect(CommandError, refusal, migrate)
-reorder = "To proceed, order the history so that the migration state renders at each removal"
+reorder = "To proceed, order the history so that the migration state renders at the end of the plan"
 expect(CommandError, reorder, migrate)
 assert ("alpha", "0003_plan") not in applied() and "alpha_spare" in tables()
 """

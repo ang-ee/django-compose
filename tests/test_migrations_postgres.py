@@ -28,13 +28,15 @@ def _state_only(operation: str) -> str:
 class _Case(NamedTuple):
     """A history of app ``alpha``, the migrations applied before the plan with the rows
     ``Record`` then holds, and the refusal ``migrate`` gives for the rest, or ``None``.
-    ``setup`` runs first, on the empty database."""
+    ``setup`` runs first, on the empty database. Where the refusal's remedy is to migrate
+    to the ``restart``-th migration first, doing so and then migrating applies the rest."""
 
     history: list[list[str]]
     applied: int
     rows: list[str]
     refusal: str | None
     setup: tuple[str, ...] = ()
+    restart: int | None = None
 
 
 def _refilled(schema: str) -> _Case:
@@ -171,6 +173,36 @@ CASES = {
         ["kept"],
         "alpha.record: alpha_record.old holds data in 1 rows on 'default'",
     ),
+    # 0003 deletes Tag by state alone while Record.tag points at it and adds a relation, so
+    # the state renders afresh again only after 0004 removes tag by state alone; 0005 removes
+    # an empty column. Migrating to 0003 first would leave a database no migrate can start
+    # from, so the remedy names 0004.
+    "remedy_after_a_window": _Case(
+        [
+            [_create("Record")],
+            [
+                'migrations.CreateModel(name="Tag", fields=[("id", models.AutoField(primary_key=True))])',
+                'migrations.AddField(model_name="record", name="tag", field=models.ForeignKey("alpha.Tag", '
+                "models.SET_NULL, null=True, db_constraint=False))",
+                'migrations.AddField(model_name="record", name="spare", '
+                'field=models.CharField(max_length=40, default=""))',
+                'migrations.AddField(model_name="record", name="extra", '
+                'field=models.CharField(max_length=40, default=""))',
+            ],
+            [
+                _state_only('migrations.DeleteModel(name="Tag")'),
+                'migrations.AddField(model_name="record", name="me", field=models.ForeignKey("alpha.Record", '
+                "models.SET_NULL, null=True))",
+                'migrations.RenameField(model_name="record", old_name="spare", new_name="spare2")',
+            ],
+            [_state_only('migrations.RemoveField(model_name="record", name="tag")')],
+            ['migrations.RemoveField(model_name="record", name="extra")'],
+        ],
+        2,
+        ["kept"],
+        "migrate alpha 0004_step first, after which the migration state renders again, then migrate",
+        restart=4,
+    ),
     # The plan creates alpha_x, B adopts it spelled with its schema, and A's deletion
     # drops it. The catalog before the plan holds neither spelling.
     "spelled_twice": _Case(
@@ -248,6 +280,11 @@ def _migrate(environment: Path, root: Path, name: str) -> None:
                 assert list(record._base_manager.values_list("old", flat=True)) == case.rows
         else:
             assert case.refusal is None, f"expected refusal: {case.refusal}"
+        if case.restart is not None:
+            call_command("migrate", "alpha", migrations[case.restart - 1], interactive=False, verbosity=0)
+            call_command("migrate", interactive=False, verbosity=0)
+            assert record is not None
+            assert list(record._base_manager.values_list("old", flat=True)) == case.rows
     finally:
         connection.close()
         connection.creation.destroy_test_db(old_database_name=old_name, verbosity=0)
