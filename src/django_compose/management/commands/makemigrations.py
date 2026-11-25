@@ -1,4 +1,4 @@
-"""Author native migrations with the shared destructive-operation safeguards."""
+"""Author native migrations under the shared drop guard."""
 
 from typing import Any
 

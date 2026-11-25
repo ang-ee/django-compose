@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from django.apps import AppConfig
 from django.conf import settings
+from django.core import checks
 from django.core.exceptions import ImproperlyConfigured
 
+from django_compose.management import check_guarded_commands
 from django_compose.serving import _close_startup_verification, _finish_startup_verification, mode, verify
 from django_compose.snapshot import Snapshot
 
@@ -23,6 +25,7 @@ class ComposeConfig(AppConfig):
             if mode() is not None:
                 raise ImproperlyConfigured("Compose mode requires BuildComposeConfig last in INSTALLED_APPS")
             _finish_startup_verification(required=True)
+            checks.register(check_guarded_commands, checks.Tags.commands)
         finally:
             _close_startup_verification()
 

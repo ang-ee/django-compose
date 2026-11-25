@@ -47,6 +47,14 @@ after.remove_model("alpha", "record")
 after.add_model(ModelState("beta", "Adopted", fields=[("id", models.AutoField(primary_key=True))],
                            options={"db_table": "alpha_record"}))
 expect(CommandError, "still owned", lambda: DropGuardAutodetector(before, after).changes(loader.graph))
+try:
+    DropGuardAutodetector(before, after).changes(loader.graph)
+except CommandError as error:
+    message = str(error)
+assert message == (
+    "unsafe autodetected drop: table 'alpha_record' is still owned by beta.adopted on 'default'. "
+    "To proceed, keep a table another model may still own, or first change that owner."
+), message
 """)
 
 
@@ -434,7 +442,8 @@ assert model._base_manager.get().value == "valuable"
 def test_shared_table_identity_survives_quotes_and_sqlite_case(host, active_table):
     _, run = host
     run(f"""
-from django_compose.migrations import _shared_table_drops
+from django.db import connections
+from django_compose.migrations import _changed_removals, _shared_table_drops
 loader = MigrationLoader(None)
 before = loader.project_state()
 before.models[("alpha", "record")].options["db_table"] = '"alpha_record"'
@@ -447,11 +456,15 @@ with connection.schema_editor() as editor:
     editor.create_model(model)
 # Even an empty shared table is protected independently of the row proof.
 expect(CommandError, "still owned", lambda: DropGuardAutodetector(before, after).changes(loader.graph))
-with patch.object(connection, "cursor", side_effect=AssertionError("offline binding queried")):
-    expected = "offline" if {active_table!r} == "ALPHA_RECORD" else "still owned"
+with patch.object(connection, "cursor", side_effect=AssertionError("catalog queried")):
+    expected = "from names alone" if {active_table!r} == "ALPHA_RECORD" else "still owned"
     changes = {{"alpha": [migrations.Migration("drop", "alpha")]}}
     changes["alpha"][0].operations = [migrations.DeleteModel("Record")]
-    expect(CommandError, expected, lambda: _shared_table_drops(before, after, changes))
+    removals = list(_changed_removals(before, changes))
+    [(index, _, refusal, unsafe)] = _shared_table_drops(removals, after, sorted(connections), catalog=False)
+    assert index == 0 and expected in refusal, refusal
+    # Names only the catalog could tell apart are not proved distinct, not known shared.
+    assert unsafe is (expected == "still owned"), refusal
 assert model._base_manager.count() == 0
 """)
 

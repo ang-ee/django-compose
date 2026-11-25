@@ -1,14 +1,19 @@
-"""Native migration state, retained history and destructive-operation safeguards."""
+"""Native migration state, retained history and the drop guard."""
 
 from __future__ import annotations
 
+import copy
 import importlib
 import importlib.util
+import re
 import stat
+import string
 import sys
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, Literal, NamedTuple, cast
 
 from django.apps import apps as global_apps
 from django.apps.registry import Apps
@@ -26,21 +31,39 @@ from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.operations import fields as field_operations
 from django.db.migrations.operations import models as model_operations
 from django.db.migrations.operations.base import Operation
-from django.db.migrations.operations.fields import RemoveField
-from django.db.migrations.operations.models import DeleteModel
+from django.db.migrations.operations.fields import AddField, AlterField, RemoveField, RenameField
+from django.db.migrations.operations.models import AlterModelTable, CreateModel, DeleteModel, RenameModel
 from django.db.migrations.operations.special import RunPython, RunSQL, SeparateDatabaseAndState
 from django.db.migrations.recorder import MigrationRecorder
 from django.db.migrations.state import ProjectState
+from django.db.migrations.utils import field_is_referenced, get_references
 from django.db.migrations.writer import MigrationWriter
+from django.db.models import QuerySet
 from django.db.models.expressions import DatabaseDefault
 from django.utils.module_loading import module_dir
 
-from django_compose.artifacts import atomic_write
+from django_compose.artifacts import atomic_write, receipt_lock, update_receipt
 from django_compose.declarations import MigrationPolicy, resolve_integrations
 from django_compose.management import require_serving_mode as require_serving_mode
 from django_compose.migration_imports import HistoricalImport as HistoricalImport
 from django_compose.migration_imports import historical_imports as historical_imports
-from django_compose.serving import read_receipt
+from django_compose.operations import IntendedDeleteModel, IntendedRemoveField
+from django_compose.provision import ProvisionRecorder
+from django_compose.serving import Receipt, read_receipt, verified_receipt
+from django_compose.sources import SourceResolver
+
+
+def _build_record() -> Receipt | None:
+    """The build record this process acts on, or ``None`` without a composition.
+
+    A serving process acts on the record its startup verified. The build phase,
+    which retains no startup verification, reads the record it is checking.
+    """
+    try:
+        return verified_receipt()
+    except ImproperlyConfigured:
+        output = getattr(settings, "COMPOSE_OUTPUT_DIR", None)
+        return None if output is None else read_receipt(Path(output))
 
 
 def history_only_labels() -> frozenset[str]:
@@ -52,7 +75,7 @@ def history_only_labels() -> frozenset[str]:
     snap = getattr(settings, "COMPOSE_SNAPSHOT", None)
     if snap is None:
         return frozenset()
-    receipt = read_receipt(Path(settings.COMPOSE_OUTPUT_DIR))
+    receipt = _build_record()
     if receipt is None:
         return frozenset()
     active = {entry.label for entry in snap.entries}
@@ -117,22 +140,53 @@ def _directory(label: str, *, missing: bool = False) -> Path:
 
 def history_labels() -> tuple[str, ...]:
     """Read the compiler receipt without invoking composition."""
-    receipt = read_receipt(Path(settings.COMPOSE_OUTPUT_DIR))
+    receipt = _build_record()
     if receipt is None:
         raise CommandError("Migration authoring requires a receipt; run compose first")
     return tuple(receipt.HISTORY_LABELS)
 
 
+def _own(operation: Operation) -> Operation:
+    """A copy of ``operation`` for a state this package progresses itself, or ``operation``
+    itself where it leaves the state as it is; see ``_leaves_state``.
+
+    Django's ``ProjectState.rename_field`` rewrites in place the fields that reference a
+    renamed field, and every loader's migrations share their modules' operations, which
+    native ``migrate`` may apply later in the same process. An operation that changes no
+    state puts nothing into one. Copying runs the history's own code, which may raise
+    anything.
+    """
+    return operation if _leaves_state(operation) else copy.deepcopy(operation)
+
+
+def _own_fields(state: ProjectState) -> ProjectState:
+    """Give ``state`` field objects of its own; see ``_own``. ``ModelState.clone`` shares them."""
+    for model_state in state.models.values():
+        model_state.fields = {name: copy.deepcopy(field) for name, field in model_state.fields.items()}
+    return state
+
+
 def check_native_history(apps: Apps, *, labels: Iterable[str]) -> None:
     """Require model-clean native history without database access.
 
-    Compose check calls this after population. Disabled native migration
-    mappings remain authoritative, and tombstones retain historical state.
+    Compose check calls this after population, and ``provision`` before it migrates in
+    the same process, so the history's state is built from operations of its own.
+    Disabled native migration mappings remain authoritative, and tombstones retain
+    historical state.
     """
     enabled = {label for label in labels if MigrationLoader.migrations_module(label)[0] is not None}
     if not enabled:
         return
     loader = MigrationLoader(None, ignore_no_migrations=True)
+    for migration in loader.graph.nodes.values():
+        owned = []
+        for operation in migration.operations:
+            try:
+                owned.append(_own(operation))
+            except Exception:
+                # An operation that cannot be copied stays shared, as Django shares it.
+                owned.append(operation)
+        migration.operations = owned
     before, after = effective_states(loader, apps)
     changes = MigrationAutodetector(before, after).changes(
         graph=loader.graph,
@@ -147,6 +201,26 @@ def check_native_history(apps: Apps, *, labels: Iterable[str]) -> None:
             for operation in migration.operations
         )
         raise RuntimeError(f"native migration history does not match composed models: {operations}")
+
+
+_ASCII_LOWER: Final = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def _name_key(connection: BaseDatabaseWrapper, *, column: bool = False) -> Callable[[str], str]:
+    """How the backend tells two spellings of a table name, or of a column name, apart.
+
+    Where ``quote_name`` folds case, as Oracle's upper-cases every name, a name is the
+    object Django quotes it as. SQLite folds the case of ASCII letters only, and so do
+    names here on SQLite and on MySQL, where it ignores case, though a MySQL server may
+    fold other letters too: table names where Django's ``ignores_table_name_case`` says
+    so, and column names whatever that setting. Elsewhere spellings compare exactly.
+    """
+    quote = connection.ops.quote_name
+    if quote("a") == quote("A"):
+        return quote
+    if connection.vendor in {"sqlite", "mysql"} if column else connection.features.ignores_table_name_case:
+        return lambda name: name.translate(_ASCII_LOWER)
+    return str
 
 
 def _storage_identifier(connection: BaseDatabaseWrapper, identifier: str) -> tuple[str, str]:
@@ -171,8 +245,8 @@ def _storage_identifier(connection: BaseDatabaseWrapper, identifier: str) -> tup
         )
     ):
         raise ImproperlyConfigured(
-            f"cannot resolve storage identifier {identifier!r} on {connection.alias!r}; "
-            "use a reviewed explicit migration for unsupported identifier syntax, length or namespace"
+            f"cannot resolve storage identifier {identifier!r} on {connection.alias!r}: "
+            "unsupported identifier syntax, length or namespace"
         )
     return convert(namespace), convert(name)
 
@@ -203,25 +277,14 @@ def _storage_identity(connection: BaseDatabaseWrapper, table: str, cursor: Any) 
         )
         row = cursor.fetchone()
         return (row[0], row[1]) if row else None
-    convert = connection.introspection.identifier_converter
-    tables = {convert(item) for item in connection.introspection.table_names(cursor)}
-    if name in tables:
-        return namespace, name
-    if connection.features.ignores_table_name_case:
-        raise ImproperlyConfigured(f"cannot prove case-sensitive storage identity for {table!r}")
-    return None
-
-
-def _allows_migrate_model(operation: Operation, alias: str, model: Any, *, offline: bool) -> bool:
-    # Feature properties can connect (e.g. MySQL server metadata). Offline
-    # planning must conservatively retain an alias instead of probing it.
-    if offline and model._meta.required_db_features and not model._meta.required_db_vendor:
-        return router.allow_migrate_model(alias, model)
-    return operation.allow_migrate_model(alias, model)
+    # A name no table matches, even in another case, is absent.
+    convert, key = connection.introspection.identifier_converter, _name_key(connection)
+    tables = {key(convert(item)) for item in connection.introspection.table_names(cursor)}
+    return (namespace, key(name)) if key(name) in tables else None
 
 
 def _model_storage(model: Any, *, removed_field: str | None = None) -> Iterator[Any]:
-    """Tables deleted by native model deletion or implicit M2M field removal."""
+    """Tables a native model deletion or implicit M2M field removal drops, and its creation adds."""
     # Django intentionally creates no implicit through classes for swapped models.
     if model._meta.swapped:
         return
@@ -237,83 +300,371 @@ def _model_storage(model: Any, *, removed_field: str | None = None) -> Iterator[
             yield through
 
 
-def _shared_table_drops(
-    before: ProjectState,
-    after: ProjectState,
-    changes: dict[str, list[Migration]],
-    *,
-    database: bool = False,
-) -> None:
-    owners = tuple(
-        (owner, storage)
-        for owner in after.apps.get_models(include_swapped=True)
-        for storage in _model_storage(owner)
+def _native(operation: Operation) -> bool:
+    """Whether Django's own model or field operation applies ``operation`` to the database.
+
+    A subclass that replaces ``database_forwards`` runs custom database code.
+    """
+    forwards = type(operation).database_forwards
+    return any(
+        vars(owner).get("database_forwards") is forwards
+        and any(
+            getattr(module, owner.__name__, None) is owner for module in (model_operations, field_operations)
+        )
+        for owner in type(operation).__mro__
+        if owner is not Operation
     )
+
+
+def _removal(operation: Operation) -> tuple[str, str | None] | None:
+    """The model and field a native removal drops; a deleted model drops no single field."""
+    if isinstance(operation, RemoveField):
+        return operation.model_name, operation.name
+    if isinstance(operation, DeleteModel):
+        return operation.name, None
+    return None
+
+
+class _Removal(NamedTuple):
+    """A native removal, the model it drops storage from, and its removed field, if any."""
+
+    operation: Operation
+    model: Any
+    field: str | None
+    # Where the migrate walk meets one that can drop a table: the models, by label,
+    # owning that table as it drops it, under their later names.
+    holders: frozenset[str] = frozenset()
+
+
+def _changed_removals(state: ProjectState, changes: Mapping[str, list[Migration]]) -> Iterator[_Removal]:
+    """Each native removal in authored changes, with the model it drops storage from in ``state``."""
     for label, migrations in sorted(changes.items()):
         for migration in migrations:
             for operation in migration.operations:
-                if isinstance(operation, DeleteModel):
-                    model = before.apps.get_model(label, operation.name)
-                    dropped = tuple(_model_storage(model))
-                elif isinstance(operation, RemoveField):
-                    model = before.apps.get_model(label, operation.model_name)
-                    dropped = tuple(_model_storage(model, removed_field=operation.name))
-                else:
+                if (removed := _removal(operation)) is not None:
+                    yield _Removal(operation, state.apps.get_model(label, removed[0]), removed[1])
+
+
+_KEEP_SHARED = "keep a table another model may still own, or first change that owner"
+_RESOLVE = (
+    "give the table a name the guard can resolve and tell apart from every other table on that database"
+)
+
+
+def _refused(drop: str, refusals: Iterable[tuple[str, str, bool]], outcome: str = "") -> CommandError:
+    """One error naming every ``(remedy, refusal, unsafe)``, then each distinct remedy once,
+    in order: under "unsafe ``drop``" those that would destroy stored data or a table another
+    model owns, and under "cannot prove ``drop`` safe" those the guard cannot judge. What
+    was raised names objects without their memory addresses, so the error reads the same
+    on every run."""
+    refusals = tuple(refusals)
+    remedies = dict.fromkeys(remedy for remedy, _, _ in refusals)
+    headings = ((True, f"unsafe {drop}"), (False, f"cannot prove {drop} safe"))
+    parts = [
+        f"{heading}: " + "; ".join(refusal for _, refusal, unsafe in refusals if unsafe is kind)
+        for kind, heading in headings
+        if any(unsafe is kind for _, _, unsafe in refusals)
+    ]
+    return CommandError(_readable(". ".join(parts) + f".{outcome} To proceed, " + "; ".join(remedies) + "."))
+
+
+def _readable(message: str) -> str:
+    """``message`` without the memory addresses that what was raised may quote, so that it
+    reads the same on every run."""
+    return re.sub(r" at 0x[0-9a-f]+", "", message)
+
+
+def _identities(connection: BaseDatabaseWrapper, table: str) -> tuple[tuple[str, str], tuple[str, str]]:
+    """Table name ``table`` as Django's identifiers spell it, its namespace and name, then
+    with its name as the backend tells names apart; see ``_name_key``."""
+    namespace, name = _storage_identifier(connection, table)
+    return (namespace, name), (namespace, _name_key(connection)(name))
+
+
+def _owners(state: ProjectState) -> Iterator[tuple[Any, Any]]:
+    """Each model of ``state``, swapped ones included, with each table it owns: its own
+    and its implicit many-to-many tables."""
+    for owner in state.apps.get_models(include_swapped=True):
+        for storage in _model_storage(owner):
+            yield owner, storage
+
+
+def _holders(
+    state: ProjectState, model: Any, field: str | None, connection: BaseDatabaseWrapper
+) -> frozenset[str]:
+    """The labels of the models of ``state`` that own a table the removal of ``model``,
+    or of its ``field``, drops, besides that storage itself, under a name the backend
+    does not tell apart from it."""
+
+    def name(storage: Any) -> tuple[str, str] | None:
+        try:
+            return _identities(connection, storage._meta.db_table)[1]
+        except ImproperlyConfigured:
+            # The shared-table rule refuses a name it cannot resolve on its own.
+            return None
+
+    dropped = tuple(_model_storage(model, removed_field=field))
+    names = {name(storage) for storage in dropped} - {None}
+    return frozenset(
+        owner._meta.label_lower
+        for owner, storage in _owners(state)
+        if storage not in dropped and name(storage) in names
+    )
+
+
+def _shared_table_drops(
+    removals: Sequence[_Removal],
+    after: ProjectState,
+    aliases: Iterable[str],
+    *,
+    catalog: bool,
+    planned: bool = False,
+    refilled: Callable[[str], bool] | None = None,
+) -> list[tuple[int, str, str, bool]]:
+    """Each removal, by position, that would drop a table a model of ``after`` still owns,
+    and whether it is known to, rather than not proved not to.
+
+    Each comes with its remedy: declaring the drop cannot help a table that is not the
+    removed model's alone, and storage whose identity cannot be resolved needs a name
+    that can be. Without the ``catalog``, names are compared alone, and two that only
+    the catalog could tell apart cannot be resolved. A catalog read before a ``planned``
+    run, whose operations may create a name it lacks, tells two apart only where it
+    holds both. ``refilled`` tells whether a native
+    operation put storage under a dropped table's name after the drop, as Django's
+    ``RemoveField`` and ``AddField`` for a retargeted many-to-many field do: a model
+    owning that name at the end owns the new storage, not the dropped table, unless it
+    is among the removal's holders, the models that owned the table when it was dropped,
+    and so owned the dropped rows. A model under a deleted model's own label is taken
+    for that model created again, unless it is among those holders.
+    """
+    owners = tuple(_owners(after))
+    aliases = tuple(aliases)
+    refusals: list[tuple[int, str, str, bool]] = []
+    for index, (operation, model, field, owners_then) in enumerate(removals):
+        dropped = tuple(_model_storage(model, removed_field=field))
+        if not dropped:
+            continue
+        for alias in aliases:
+            connection = connections[alias]
+            try:
+                if not operation.allow_migrate_model(alias, model):
                     continue
-                if not dropped:
-                    continue
-                for alias in sorted(connections):
-                    connection = connections[alias]
-                    try:
-                        if not _allows_migrate_model(operation, alias, model, offline=not database):
+                for storage in dropped:
+                    table = storage._meta.db_table
+                    identity, keyed = _identities(connection, table)
+                    filled = refilled is not None and refilled(table)
+                    remaining = set()
+                    for owner, active_storage in owners:
+                        # The specification names what taking a model for the deleted one
+                        # created again misses.
+                        if (
+                            field is None
+                            and owner._meta.label_lower == model._meta.label_lower
+                            and owner._meta.label_lower not in owners_then
+                        ) or not operation.allow_migrate_model(alias, owner):
                             continue
-                        for storage in dropped:
-                            table = storage._meta.db_table
-                            identity = _storage_identifier(connection, table)
-                            remaining = set()
-                            for owner, active_storage in owners:
-                                if (
-                                    isinstance(operation, DeleteModel)
-                                    and owner._meta.label_lower == model._meta.label_lower
-                                ) or not _allows_migrate_model(operation, alias, owner, offline=not database):
-                                    continue
-                                active_table = active_storage._meta.db_table
-                                other = _storage_identifier(connection, active_table)
-                                if identity == other:
-                                    remaining.add(active_storage._meta.label_lower)
-                                elif identity[1] == other[1] or (
-                                    connection.vendor in {"sqlite", "mysql"}
-                                    and identity[1].casefold() == other[1].casefold()
-                                ):
-                                    if not database:
-                                        raise ImproperlyConfigured(
-                                            f"cannot resolve shared storage {table!r} and "
-                                            f"{active_table!r} offline; use a reviewed explicit migration"
-                                        )
-                                    with connection.cursor() as cursor:
-                                        physical = _storage_identity(connection, table, cursor)
-                                        if physical is not None and physical == _storage_identity(
-                                            connection, active_table, cursor
-                                        ):
-                                            remaining.add(active_storage._meta.label_lower)
-                            if remaining:
-                                raise CommandError(
-                                    f"unsafe autodetected table deletion: table {table!r} "
-                                    f"is still owned by {', '.join(sorted(remaining))} on {alias!r}"
+                        active_table = active_storage._meta.db_table
+                        other, other_keyed = _identities(connection, active_table)
+                        if filled and owner._meta.label_lower not in owners_then and keyed == other_keyed:
+                            continue
+                        if identity == other:
+                            remaining.add(active_storage._meta.label_lower)
+                        elif keyed[1] == other_keyed[1]:
+                            # Another namespace or case: only the catalog can tell them apart.
+                            physical: set[tuple[str, str] | None] = {None}
+                            if catalog:
+                                with connection.cursor() as cursor:
+                                    physical = {
+                                        _storage_identity(connection, name, cursor)
+                                        for name in (table, active_table)
+                                    }
+                            if not catalog or planned and None in physical:
+                                raise ImproperlyConfigured(
+                                    f"cannot tell {table!r} from {active_table!r} from names alone"
                                 )
-                    except (DatabaseError, ImproperlyConfigured) as error:
-                        raise CommandError(
-                            f"cannot prove shared storage safe on {alias!r}: {error}"
-                        ) from error
+                            if len(physical) == 1 and None not in physical:
+                                remaining.add(active_storage._meta.label_lower)
+                    if remaining:
+                        owners_text = ", ".join(sorted(remaining))
+                        refusals.append(
+                            (
+                                index,
+                                _KEEP_SHARED,
+                                f"table {table!r} is still owned by {owners_text} on {alias!r}",
+                                True,
+                            )
+                        )
+            except (DatabaseError, ImproperlyConfigured) as error:
+                refusal = f"cannot prove shared storage safe on {alias!r}: {error}"
+                refusals.append((index, _RESOLVE, refusal, False))
+    return refusals
+
+
+class _Dropped(NamedTuple):
+    """Storage a native removal drops, and its rows that still hold data on an alias, or
+    ``None`` where it holds no data of its own."""
+
+    table: str
+    column: str | None
+    rows: Callable[[str], QuerySet[Any] | None]
+
+
+def _policies() -> tuple[MigrationPolicy, ...]:
+    """The configured row-retirement policies, instantiated once per drop-guard run."""
+    return tuple(
+        integration
+        for integration in resolve_integrations(getattr(settings, "COMPOSE_INTEGRATIONS", ()))
+        if isinstance(integration, MigrationPolicy)
+    )
+
+
+def _empty(field: Any) -> Any:
+    """What reads as empty in a concrete field's column: NULL, as ``None``, where the field
+    is nullable, otherwise its native default. A ``DatabaseDefault`` stands for a database
+    default, which cannot prove emptiness."""
+    return None if field.null else field.get_default()
+
+
+def _rows(model: Any, field: Any, empty: Any) -> QuerySet[Any]:
+    """The rows of ``model`` holding data in ``field``'s column, where ``empty`` reads as empty."""
+    query: QuerySet[Any] = QuerySet(model)
+    if empty is None:
+        return query.exclude(**{f"{field.attname}__isnull": True})
+    if isinstance(empty, DatabaseDefault):
+        return query
+    return query.exclude(**{field.attname: empty})
+
+
+def _dropped(model: Any, field: str | None, policies: tuple[MigrationPolicy, ...]) -> _Dropped | None:
+    """Apply the shared emptiness rules to a deleted model or one removed field.
+
+    A column is empty where it holds what reads as empty in it; see ``_empty``. Explicit
+    through models and generated columns own no independently dropped storage.
+    ``policies`` may explicitly retire rows of a deleted table; other rows remain
+    protected. Rows are read through a plain ``QuerySet``, not the model's base manager:
+    a historical model keeps ``Meta.base_manager_name`` but only the managers marked
+    ``use_in_migrations``, and a manager may filter rows out.
+    """
+    if field is None:
+
+        def remaining_rows(alias: str) -> Any:
+            retired = {pk for policy in policies for pk in policy.retired_primary_keys(model, alias)}
+            return QuerySet(model).exclude(pk__in=retired)
+
+        return _Dropped(model._meta.db_table, None, remaining_rows)
+    removed = model._meta.get_field(field)
+    if removed.many_to_many:
+        through = next(_model_storage(model, removed_field=field), None)
+        if through is None:
+            return None
+        return _Dropped(through._meta.db_table, None, lambda alias: QuerySet(through))
+    if not removed.concrete or removed.generated:
+        return None
+    return _Dropped(
+        model._meta.db_table, removed.column, lambda alias: _rows(model, removed, _empty(removed))
+    )
+
+
+_ABSENT = "it is absent before the plan, and no native operation of the plan creates it"
+_UNFILLED = "an earlier operation of the plan vacated its name, and no native operation fills it again"
+
+
+class _Undefined(Exception):
+    """The state before the plan gives stored rows no one definition to judge them by;
+    ``remedy`` is what to do instead of declaring the drop, where that differs."""
+
+    def __init__(self, reason: str, remedy: str | None = None) -> None:
+        super().__init__(reason)
+        self.remedy = remedy
+
+
+def _unproved(model: Any, table: str, column: str | None, alias: str, reason: object) -> str:
+    """The refusal for storage of ``model``, its table or a column of it, that cannot be
+    proved empty on ``alias``."""
+    return f"{model._meta.label_lower}: cannot prove {table}.{column or '*'} empty on {alias!r} ({reason})"
+
+
+def _proofs(
+    operation: Operation,
+    routed: type[Any],
+    dropped: _Dropped,
+    aliases: Iterable[str],
+    *,
+    added: bool,
+    absent: str = _ABSENT,
+) -> Iterator[tuple[str | None, str, bool]]:
+    """Yield a refusal for each alias the operation drops ``dropped`` on where it may hold
+    data, after the remedy it has of its own, if any, and before whether it is known to.
+
+    Routing is decided here, once per alias: Django routes the operation with
+    ``routed``, the model it removes, while ``dropped`` names the storage as the
+    database holds it now and reads its rows. Absent storage holds nothing where a
+    native creation ``added`` it; otherwise nothing accounts for its absence, so it
+    cannot be proved empty, for the reason ``absent`` gives. One EXISTS query proves
+    present storage empty; only storage holding data is counted.
+
+    This is where a proof is built and read, so whatever Django, a database or the
+    history's code raises here, such as a default a lookup rejects, leaves the storage
+    unproved on that alias rather than stopping ``migrate``.
+    """
+    table, column, rows = dropped
+
+    for alias in aliases:
+        connection = connections[alias]
+        try:
+            if not operation.allow_migrate_model(alias, routed):
+                continue
+            with connection.cursor() as cursor:
+                present = _storage_identity(connection, table, cursor) is not None
+                if present and column is not None:
+                    namespace, name = _storage_identifier(connection, column)
+                    if namespace:
+                        raise ImproperlyConfigured(f"column {column!r} cannot have a namespace")
+                    if connection.vendor == "sqlite":
+                        cursor.execute(
+                            "SELECT name FROM pragma_table_xinfo(%s) WHERE name = %s COLLATE NOCASE",
+                            [split_identifier(table)[1], name],
+                        )
+                        present = cursor.fetchone() is not None
+                    else:
+                        if connection.vendor == "postgresql":
+                            # Native PostgreSQL introspection only describes
+                            # visible unqualified tables; the cursor owns the
+                            # actual columns of this fully quoted relation.
+                            cursor.execute(f"SELECT * FROM {connection.ops.quote_name(table)} LIMIT 0")
+                            names = [field[0] for field in cursor.description]
+                        else:
+                            description = connection.introspection.get_table_description(
+                                cursor, split_identifier(table)[1]
+                            )
+                            names = [field.name for field in description]
+                        # A name no column matches, even in another case, is absent.
+                        convert = connection.introspection.identifier_converter
+                        key = _name_key(connection, column=True)
+                        present = key(name) in {key(convert(item)) for item in names}
+            data = rows(alias) if present else None
+            count = data.using(alias).count() if data is not None and data.using(alias).exists() else 0
+        except _Undefined as error:
+            yield error.remedy, _unproved(routed, table, column, alias, error), False
+            continue
+        except Exception as error:
+            yield None, _unproved(routed, table, column, alias, f"{type(error).__name__}: {error}"), False
+            continue
+        if not present and not added:
+            yield None, _unproved(routed, table, column, alias, absent), False
+        elif count:
+            storage = f"{table}.{column or '*'}"
+            yield None, f"{routed._meta.label_lower}: {storage} holds data in {count} rows on {alias!r}", True
+
+
+_AUTHOR = "declare a reviewed cutover migration before native makemigrations"
 
 
 class DropGuardAutodetector(MigrationAutodetector):
-    """Require every routed database to prove autodetected dropped storage empty.
+    """Drop guard for authoring: every routed database proves autodetected drops empty.
 
-    Null columns are empty at NULL; non-null columns use their native default.
-    A database default cannot prove emptiness. Explicit through models and
-    generated columns own no independently dropped storage. Integrations may
-    explicitly retire rows of a deleted table; other rows remain protected.
+    The shared emptiness rules apply; see ``_dropped``. ``migrate`` applies the
+    same rules to the plan it is about to run; see ``check_plan_drops``.
     """
 
     def __init__(self, from_state: ProjectState, to_state: ProjectState, questioner: Any = None) -> None:
@@ -328,129 +679,1083 @@ class DropGuardAutodetector(MigrationAutodetector):
         migration_name: str | None = None,
     ) -> dict[str, list[Migration]]:
         changes = super().changes(graph, trim_to_apps, convert_apps, migration_name)
-        _shared_table_drops(self.from_state, self.to_state, changes, database=True)
-        refusals: list[str] = []
-        rows: Callable[[str], Any]
-        for label, migrations in sorted(changes.items()):
-            for migration in migrations:
-                for operation in migration.operations:
-                    if isinstance(operation, RemoveField):
-                        model = self.from_state.apps.get_model(label, operation.model_name)
-                        field = model._meta.get_field(operation.name)
-                        if field.many_to_many:
-                            through = next(_model_storage(model, removed_field=operation.name), None)
-                            if through is None:
-                                continue
-                            table, column = through._meta.db_table, None
-
-                            def through_rows(alias: str, through: Any = through) -> Any:
-                                return through._base_manager.all()
-
-                            rows = through_rows
-                        elif field.concrete and not field.generated:
-                            table, column = model._meta.db_table, field.column
-                            empty = None if field.null else field.get_default()
-                            query = model._base_manager.all()
-                            if empty is None:
-                                query = query.exclude(**{f"{field.attname}__isnull": True})
-                            elif not isinstance(empty, DatabaseDefault):
-                                query = query.exclude(**{field.attname: empty})
-
-                            def column_rows(alias: str, query: Any = query) -> Any:
-                                return query
-
-                            rows = column_rows
-                        else:
-                            continue
-                        refusals.extend(self._holding(operation, model, rows, table, column))
-                    elif isinstance(operation, DeleteModel):
-                        model = self.from_state.apps.get_model(label, operation.name)
-                        integrations = tuple(
-                            integration
-                            for integration in resolve_integrations(
-                                getattr(settings, "COMPOSE_INTEGRATIONS", ())
-                            )
-                            if isinstance(integration, MigrationPolicy)
-                        )
-
-                        def remaining_rows(
-                            alias: str,
-                            model: Any = model,
-                            integrations: tuple[MigrationPolicy, ...] = integrations,
-                        ) -> Any:
-                            retired = {
-                                pk
-                                for integration in integrations
-                                for pk in integration.retired_primary_keys(model, alias)
-                            }
-                            return model._base_manager.exclude(pk__in=retired)
-
-                        refusals.extend(
-                            self._holding(operation, model, remaining_rows, model._meta.db_table, None)
-                        )
-        if refusals:
-            raise CommandError(
-                "unsafe autodetected drop: "
-                + "; ".join(refusals)
-                + ". Declare a reviewed cutover migration before native makemigrations."
+        removals = tuple(_changed_removals(self.from_state, changes))
+        aliases = sorted(connections)
+        policies = _policies()
+        refusals = [
+            (_AUTHOR, refusal, unsafe)
+            for operation, model, field, _ in removals
+            if (dropped := _dropped(model, field, policies)) is not None
+            # A database that lags the history holds nothing in storage it lacks.
+            for _, refusal, unsafe in _proofs(operation, model, dropped, aliases, added=True)
+        ]
+        refusals.extend(
+            (remedy, refusal, unsafe)
+            for _, remedy, refusal, unsafe in _shared_table_drops(
+                removals, self.to_state, aliases, catalog=True
             )
+        )
+        if refusals:
+            raise _refused("autodetected drop", refusals)
         return changes
 
-    @staticmethod
-    def _holding(
+
+_INTENDED = (IntendedRemoveField, IntendedDeleteModel)
+# retire_history --purge names its migration with this suffix. The guard reads the
+# suffix only to choose the remedy text; it judges a purge like any other migration.
+_PURGE = "compose_purge"
+_DECLARE = (
+    "keep the storage, or move its data and declare the drop in that migration of the "
+    "project's history with django_compose.operations.IntendedRemoveField or IntendedDeleteModel"
+)
+
+
+_RENDER = (
+    "order the history so that each removal named here comes in a migration after the one where the "
+    "migration state renders again, each relation's target defined, for example by making the "
+    "removal's migration depend on the one that defines that target again or removes the relation"
+)
+_RENDER_END = (
+    "order the history so that the migration state renders at the end of the plan, each relation's "
+    "target defined"
+)
+
+
+def _initial(migration: Migration) -> bool:
+    """Whether ``--fake-initial`` adopts the tables ``migration`` creates: an initial
+    migration, as ``MigrationExecutor.detect_soft_applied`` tells one."""
+    if migration.initial is None:
+        return not any(app == migration.app_label for app, _ in migration.dependencies)
+    return bool(migration.initial)
+
+
+def _migrate(alias: str, *arguments: str) -> str:
+    """The ``migrate`` command a remedy names, with ``arguments``, on ``alias``."""
+    database = () if alias == DEFAULT_DB_ALIAS else ("--database", alias)
+    return " ".join(("migrate", *arguments, *database))
+
+
+def _adopt(creating: Migration | None, alias: str) -> str:
+    """The remedy for stored rows that the state before the plan defines no field for:
+    migrate first to ``creating``, the migration whose native creation of the plan names
+    that storage, with ``--fake-initial`` where it adopts existing tables, on ``alias``.
+    ``creating`` is ``None`` where none does, or native ``migrate`` could not start after it."""
+    then = _migrate(alias)
+    if creating is None or not _initial(creating):
+        return f"{then} first to the migration that gives that storage its model, then {then}"
+    return f"{_migrate(alias, creating.app_label, creating.name, '--fake-initial')} first, then {then}"
+
+
+class _End(Exception):
+    """Where the walk lost its migration state, at ``migration`` or, where it is ``None``, at
+    the end of the plan, and why: ``error`` was raised while it was ``doing`` something to
+    that state: ``follow`` where copying an operation, as ``copied`` tells, or moving the
+    state with one raised, so the walk ends; ``render`` or ``read`` where rendering or
+    reading it raised, so the walk goes blind, its state still moving."""
+
+    def __init__(
+        self, migration: Migration | None, error: Exception, doing: str, *, copied: bool = False
+    ) -> None:
+        where = "the end of the plan" if migration is None else f"{migration.app_label}.{migration.name}"
+        super().__init__(f"cannot {doing} the migration state at {where} ({type(error).__name__}: {error})")
+        self.migration = migration
+        self.error = error
+        self.copied = copied
+
+
+def _render(state: ProjectState) -> Apps:
+    """Render ``state``, afresh where it holds no rendering, as native ``migrate`` renders the
+    state it starts from."""
+    return state.apps
+
+
+def _unfollowed(end: _End) -> str:
+    """The remedy for what the walk refuses since it ended at ``end``, where migrating past
+    the migration that stopped it first does not help."""
+    migration = cast(Migration, end.migration)
+    where = f"{migration.app_label}.{migration.name}"
+    change = "copy.deepcopy copies" if end.copied else "Django's migration state applies"
+    return (
+        f"make the operations of {where} ones that {change}, or order the history so that each "
+        f"removal named here comes before {where}"
+    )
+
+
+class _Refused(NamedTuple):
+    """A refused removal: its migration and operation, the remedy where the refusal has one
+    of its own (see ``_refusal``), the refusal, and whether the removal is known to destroy
+    stored data or a table another model owns, rather than not proved not to."""
+
+    migration: Migration
+    operation: Operation
+    remedy: str | None
+    refusal: str
+    unsafe: bool = False
+    # Where the remedy is to migrate to this migration first, if native migrate can start
+    # after it; see _Walk._remedied.
+    restart: Migration | None = None
+
+
+class _Vacated(Enum):
+    """A name whose storage the plan moved away or dropped, and has not filled since."""
+
+    NAME = "vacated"
+
+
+_VACATED: Final = _Vacated.NAME
+# The storage under a name, as named before the plan: None where the plan created it.
+type _Before = str | None | Literal[_Vacated.NAME]
+
+
+class _Origin(NamedTuple):
+    """The names storage a removal drops had before the plan."""
+
+    table: str
+    column: str | None
+    # Whether a native creation of the plan adds that storage, should it be absent before
+    # it, and the migration of that creation.
+    added: bool
+    creating: Migration | None = None
+
+
+class _Storage:
+    """Table and column names the plan's database operations change, create or drop, on one alias.
+
+    Each name maps back to the storage under it before the plan: that storage's name
+    then; ``None`` where a native creation of the plan added it; or ``_VACATED`` where a
+    followed rename moved its storage away or a native removal dropped it, and no native
+    creation or followed rename has filled it since. Custom code is not followed, so
+    storage it moves under a vacated name cannot be proved. Storage absent before the
+    plan is the plan's own only under a name a native creation adds. Names are kept as
+    the backend tells them apart; see ``_name_key``.
+    """
+
+    def __init__(self, connection: BaseDatabaseWrapper) -> None:
+        self._tables: dict[str, _Before] = {}
+        self._columns: dict[tuple[str, str | None], _Before] = {}
+        # The names before the plan of storage a native creation adds, and its migration.
+        self._added: dict[tuple[str, str | None], Migration] = {}
+        # Native creations the walk passed, whose storage it names at its next render.
+        self._unnamed: list[tuple[Migration, Operation, str, str | None]] = []
+        self._alias = connection.alias
+        self._table_key = _name_key(connection)
+        self._column_key = _name_key(connection, column=True)
+
+    def key(self, table: str, column: str | None) -> tuple[str, str | None]:
+        """A table name, or one of its column names, as the backend tells it apart."""
+        return self._table_key(table), None if column is None else self._column_key(column)
+
+    def _table(self, name: str) -> _Before:
+        """The storage under table ``name``."""
+        return self._tables.get(self._table_key(name), name)
+
+    def _column(self, table: str, name: str) -> _Before:
+        """The storage under column ``name`` of ``table``, which shares a created or vacated table's fate."""
+        before = self._table(table)
+        return self._columns.get(self.key(before, name), name) if isinstance(before, str) else before
+
+    def _rename_table(self, old: str, new: str) -> None:
+        if self._table_key(old) != self._table_key(new):
+            self._tables[self._table_key(new)] = self._table(old)
+            self._tables[self._table_key(old)] = _VACATED
+
+    def follow(self, before: Any, after: Any, renamed: Mapping[str, str]) -> None:
+        """Record what a database operation renamed, from the model before and after it.
+
+        The caller follows only an operation that migrates ``after`` on the alias,
+        as Django's ``database_forwards`` does, so a swapped model never arrives here.
+        """
+        self._rename_table(before._meta.db_table, after._meta.db_table)
+        table = self._table(after._meta.db_table)
+        for field in (*before._meta.local_fields, *before._meta.local_many_to_many):
+            now = after._meta.get_field(renamed.get(field.name, field.name))
+            if field.many_to_many and now.many_to_many:
+                old, new = field.remote_field.through, now.remote_field.through
+                if old._meta.auto_created and new._meta.auto_created:
+                    self._rename_table(old._meta.db_table, new._meta.db_table)
+            elif (
+                field.concrete
+                and now.concrete
+                and isinstance(table, str)
+                and self._column_key(field.column) != self._column_key(now.column)
+            ):
+                self._columns[self.key(table, now.column)] = self._column(after._meta.db_table, field.column)
+                self._columns[self.key(table, field.column)] = _VACATED
+
+    def creating(self, migration: Migration, operation: Operation, named: tuple[str, str | None]) -> None:
+        """Note the native creation of the model and field ``named``; see ``name_created``."""
+        self._unnamed.append((migration, operation, *named))
+
+    def name_created(self, state: ProjectState) -> None:
+        """Name the storage each creation noted since added, from ``state`` rendered since.
+
+        Nothing is rendered while no creation is unnamed. Django creates storage only where
+        the operation migrates the model. The walk renders before any removal and before
+        any operation it does not follow, so a created model or field is still there.
+        """
+        if not self._unnamed:
+            return
+        for migration, operation, name, field in self._unnamed:
+            model = state.apps.get_model(migration.app_label, name)
+            if operation.allow_migrate_model(self._alias, model):
+                self._create(migration, model, field)
+        self._unnamed.clear()
+
+    def _create(self, migration: Migration, model: Any, field: str | None) -> None:
+        """Record the storage a native creation of ``migration`` adds: a model's tables, or a
+        field's table or column.
+
+        A vacated name it fills holds the plan's own storage from then on.
+        """
+        added: list[tuple[str, str | None]] = [
+            (storage._meta.db_table, None) for storage in _model_storage(model, removed_field=field)
+        ]
+        if field is not None and (definition := model._meta.get_field(field)).concrete:
+            added.append((model._meta.db_table, definition.column))
+        for table, column in added:
+            origin = self._table(table)
+            if column is None:
+                if origin is _VACATED:
+                    self._tables[self._table_key(table)] = None
+                elif origin is not None:
+                    self._added.setdefault(self.key(origin, None), migration)
+            elif isinstance(origin, str):
+                before = self._column(table, column)
+                if before is _VACATED:
+                    self._columns[self.key(origin, column)] = None
+                elif before is not None:
+                    self._added.setdefault(self.key(origin, before), migration)
+
+    def end(self, model: Any, field: str | None) -> None:
+        """Record what a native removal drops: a deleted model's tables, its implicit
+        many-to-many tables among them, or a removed field's column or many-to-many table."""
+        if field is not None and not (definition := model._meta.get_field(field)).many_to_many:
+            if definition.concrete and isinstance(origin := self._table(model._meta.db_table), str):
+                self._columns[self.key(origin, definition.column)] = _VACATED
+            return
+        for storage in _model_storage(model, removed_field=field):
+            self._tables[self._table_key(storage._meta.db_table)] = _VACATED
+
+    def refilled(self, table: str) -> bool:
+        """Whether a native creation or followed rename put storage under table name
+        ``table``, which a native removal of the plan dropped, since it last did."""
+        return self._tables.get(self._table_key(table), _VACATED) is not _VACATED
+
+    def stored(self, table: str, column: str | None) -> _Origin | None | Literal[_Vacated.NAME]:
+        """The names the storage now under ``table``, or its ``column``, had before the plan.
+
+        ``None`` means the plan itself created that storage, and ``_VACATED`` that its
+        name was vacated.
+        """
+        before = self._table(table) if column is None else self._column(table, column)
+        if not isinstance(before, str):
+            return before
+        names = (cast(str, self._table(table)), None if column is None else before)
+        creating = self._added.get(self.key(*names)) or self._added.get(self.key(names[0], None))
+        return _Origin(*names, creating is not None, creating)
+
+
+def _as_stored(state: ProjectState, label: str, removed: tuple[str, str | None], table: str) -> Any:
+    """The removed model, re-rendered from ``state`` with the table its removal drops, its
+    own or a many-to-many field's, named ``table`` as it was before the plan."""
+    name, field = removed
+    renamed = state.clone()
+    model_state = renamed.models[label, name.lower()]
+    if field is None:
+        model_state.options["db_table"] = table
+    else:
+        definition = model_state.fields[field].clone()
+        definition.db_table = table
+        model_state.fields[field] = definition
+    renamed.reload_model(label, name.lower(), delay=True)
+    return renamed.apps.get_model(label, name)
+
+
+def _relinks(operation: Operation, state: ProjectState, label: str) -> bool:
+    """Whether Django re-renders, recursively, every model related to the one ``operation`` changes.
+
+    ``ProjectState`` delays re-rendering relations except where an operation creates a
+    model with a relational field, adds or removes one, alters a field into one or alters
+    a field that another field references, or renames a referenced field. Where models
+    share a hub, that re-renders nearly the whole state. This is the ``delay`` that
+    ``add_model``, ``add_field``, ``remove_field``, ``alter_field`` and ``rename_field``
+    pass to ``reload_model``, asked of the state before the operation through Django's
+    own ``get_references``.
+    """
+    if isinstance(operation, CreateModel):
+        return any(field.is_relation for _, field in operation.fields)
+    if isinstance(operation, AddField):
+        return bool(operation.field.is_relation)
+    if not isinstance(operation, RemoveField | AlterField | RenameField):
+        return False
+    key = (label, operation.model_name_lower)
+    model = state.models.get(key)
+    if isinstance(operation, RenameField):
+        field = None if model is None else model.fields.get(operation.old_name)
+        return field is not None and field_is_referenced(state, key, (operation.old_name, field))
+    if isinstance(operation, RemoveField):
+        field = None if model is None else model.fields.get(operation.name)
+        return field is not None and bool(field.is_relation)
+    # Django asks after the change; before it, only the altered field itself differs.
+    return bool(operation.field.is_relation) or any(
+        not (owner is model and name == operation.name)
+        for owner, name, _, _ in get_references(state, key, (operation.name, operation.field))
+    )
+
+
+def _named(field: Any) -> tuple[Any, ...]:
+    """What names the storage of an unrendered ``field`` as Django's schema editor reads it:
+    its column, and where Django creates the field's through itself, that table's name.
+
+    A many-to-many field without a through gets an auto-created one, named by its
+    ``db_table``; Django's schema editor creates, alters or drops none other, so only a
+    ``ManyToManyField`` gets that far. ``alter_field`` renames only such a table, refuses
+    to alter a field to or from one, and leaves a relation through an explicit model
+    alone, whatever the field's class, as for django-taggit's managers.
+    """
+    if field.many_to_many and field.remote_field.through is None:
+        return field.column, field.db_table
+    return (field.column,)
+
+
+def _renamed(operation: Operation, state: ProjectState, label: str) -> tuple[str, str, dict[str, str]] | None:
+    """The model whose storage a native operation may rename: before, after, renamed fields.
+
+    An ``AlterField`` keeps its model's table, and its field's column or many-to-many
+    table unless what names it changes, which ``state`` shows without rendering; see
+    ``_named``.
+    """
+    if isinstance(operation, RenameModel):
+        return operation.old_name, operation.new_name, {}
+    if isinstance(operation, AlterModelTable):
+        return operation.name, operation.name, {}
+    if isinstance(operation, RenameField):
+        return operation.model_name, operation.model_name, {operation.old_name: operation.new_name}
+    if isinstance(operation, AlterField):
+        model = state.models.get((label, operation.model_name_lower))
+        if model is not None and operation.name in model.fields:
+            names = []
+            for definition in (model.fields[operation.name], operation.field):
+                field: Any = definition.clone()
+                field.set_attributes_from_name(operation.name)
+                names.append(_named(field))
+            if names[0] == names[1]:
+                return None
+        return operation.model_name, operation.model_name, {}
+    return None
+
+
+def _creation(operation: Operation) -> tuple[str, str | None] | None:
+    """The model and field whose storage a native operation creates; a new model adds its tables."""
+    if isinstance(operation, CreateModel):
+        return operation.name, None
+    if isinstance(operation, AddField):
+        return operation.model_name, operation.name
+    return None
+
+
+def _leaves_state(operation: Operation) -> bool:
+    """Whether a special operation leaves migration state as it is: ``RunPython``, or ``RunSQL``
+    without state operations."""
+    forwards = type(operation).state_forwards
+    return forwards is RunPython.state_forwards or (
+        forwards is RunSQL.state_forwards and not cast(RunSQL, operation).state_operations
+    )
+
+
+def _drops_table(state: ProjectState, label: str, removed: tuple[str, str | None]) -> bool:
+    """Whether a removal can drop a table: a deleted model's, or a removed many-to-many field's."""
+    name, field = removed
+    return field is None or bool(state.models[label, name.lower()].fields[field].many_to_many)
+
+
+def _database_removals(operations: Iterable[Operation]) -> list[Operation]:
+    """Native removals that reach the database, including nested database operations."""
+    removals: list[Operation] = []
+    for operation in operations:
+        if isinstance(operation, SeparateDatabaseAndState):
+            removals.extend(_database_removals(operation.database_operations))
+        elif _removal(operation) is not None:
+            removals.append(operation)
+    return removals
+
+
+def _guarded(labels: Iterable[str]) -> frozenset[str]:
+    """Those of ``labels`` whose history the drop guard judges when ``migrate`` runs.
+
+    The composition owns its build record's history labels. A project-source app
+    owns its own history: the retained-import audit's resolver attributes no
+    installed distribution to its migration package. Django's and other installed
+    apps' history belongs to their owners. One owning distribution settles an
+    installed app cheaply; only a project-source app needs every RECORD read.
+    """
+    receipt = _build_record()
+    composed = frozenset(receipt.HISTORY_LABELS) if receipt else frozenset()
+    resolver = SourceResolver(global_apps.get_app_configs())
+    guarded = set()
+    for label in labels:
+        module = MigrationLoader.migrations_module(label)[0]
+        if label in composed or (module is not None and not resolver.installed(module)):
+            guarded.add(label)
+    return frozenset(guarded)
+
+
+def _stores_nothing(connection: BaseDatabaseWrapper) -> bool:
+    """Whether the alias holds no table but Django's migration and provision recorders.
+
+    Such an alias stores nothing a plan could destroy. Only a complete inventory can
+    show that: PostgreSQL's catalog across every schema, and SQLite's main database
+    without attachments. Other backends never qualify. On PostgreSQL a relation an
+    extension owns, such as PostGIS's ``spatial_ref_sys``, holds the extension's data
+    and does not count.
+    """
+    recorders = [MigrationRecorder.Migration._meta.db_table, ProvisionRecorder.Record._meta.db_table]
+    with connection.cursor() as cursor:
+        if connection.vendor == "postgresql":
+            # Schema-qualified storage is invisible to native table introspection.
+            cursor.execute(
+                "SELECT NOT EXISTS (SELECT FROM pg_catalog.pg_class c "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE c.relkind IN ('r', 'p', 'f', 'm') AND n.nspname !~ '^pg_' "
+                "AND n.nspname <> 'information_schema' AND c.relname <> ALL(%s) "
+                "AND NOT EXISTS (SELECT FROM pg_catalog.pg_depend d "
+                "WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid "
+                "AND d.deptype = 'e'))",
+                [recorders],
+            )
+            return bool(cursor.fetchone()[0])
+        if connection.vendor == "sqlite":
+            cursor.execute("PRAGMA database_list")
+            if any(row[1] not in {"main", "temp"} for row in cursor.fetchall()):
+                return False
+            return not set(connection.introspection.table_names(cursor)) - set(recorders)
+    return False
+
+
+def _refusal(
+    migration: Migration, operation: Operation, refusal: str, remedy: str | None = None
+) -> tuple[str, str]:
+    """The ``(remedy, refusal)`` naming ``operation`` of ``migration``; a purge's remedy is its own."""
+    label = migration.app_label
+    if remedy is None and migration.name.endswith(f"_{_PURGE}"):
+        remedy = f"apply the {label!r} purge on this deployment with retire_history {label} --purge"
+    return remedy or _DECLARE, f"{label}.{migration.name} ({operation.describe()}): {refusal}"
+
+
+def _restartable(executor: MigrationExecutor, planned: Sequence[Migration], restart: Migration) -> bool:
+    """Whether native ``migrate`` can start where migrating to ``restart`` leaves the
+    database: the state before ``planned``, moved by copies of the planned migrations
+    ``restart`` needs, renders afresh, as native ``migrate`` renders the state it starts
+    from before it plans. Native ``migrate`` copies no operation, so one that cannot be
+    copied moves this throwaway state itself, whose fields are then made its own again."""
+    needed = set(executor.loader.graph.forwards_plan((restart.app_label, restart.name)))
+    try:
+        state = _own_fields(executor._create_project_state(with_applied_migrations=True))  # type: ignore[attr-defined]
+        for migration in planned:
+            if (migration.app_label, migration.name) in needed:
+                for operation in migration.operations:
+                    try:
+                        owned = _own(operation)
+                    except Exception:
+                        operation.state_forwards(migration.app_label, state)
+                        _own_fields(state)
+                        continue
+                    owned.state_forwards(migration.app_label, state)
+        _render(state)
+    except Exception:
+        return False
+    return True
+
+
+class _Walk:
+    """One walk of a forward plan as ``migrate`` applies it, on the alias it migrates.
+
+    The walk owns what it progresses and learns: the storage names it follows, the
+    table-dropping removals it meets, and what it refuses. Where data is stored, it
+    proves each judged removal; where it follows, it follows the names the plan's native
+    operations change, create and drop. A column that existed before the plan is judged
+    by the definition the state before the plan gives it, reached through the names it
+    follows. Whatever is raised while it proves one removal leaves only that removal
+    unproved; see ``_proofs``.
+
+    What happens where something else is raised depends on whether the state can still
+    move. Where copying an operation or moving the state with one raises, the state is
+    lost and the walk ends, see ``_moving``: every judged removal from there on, and every
+    judged table drop it met, is refused. Where rendering or reading the state raises,
+    the state still moves, as Django moves it, and the walk goes blind, see ``_blinded``: it
+    refuses each judged removal it would have to read, and at each later migration it
+    tries to render its state afresh, as native ``migrate`` renders the state it starts
+    from; where that succeeds, it reads its state again, see ``_resight``. Names moved
+    unfollowed meanwhile, so from the first time it goes blind it follows no name and
+    proves nothing: it refuses each judged undeclared removal where data is stored, and
+    tells the owners of a table it drops from names alone. A remedy that names a
+    migration to migrate to first names only one after which native ``migrate`` can
+    start; see ``_restartable``.
+
+    It renders its own state in place where it needs a model: at every removal it
+    follows, and otherwise at a judged removal it proves or that can drop a table; at a
+    rename that can change a storage name; before an operation it does not follow while
+    a creation it passed is unnamed; and at the end, after a removal that can drop a
+    table. Django's incremental reload then keeps the rendering current while it is
+    cheap, and the walk drops it before an operation where Django would re-render every
+    related model recursively, see ``_relinks``, unless it follows that operation's
+    rename and so reads the model right after it. An ``AlterField`` that changes no
+    column or many-to-many table name is read from the state without rendering it.
+    Storage a native creation adds is named where the walk next renders, or before an
+    operation the walk does not follow. Where data is stored, the walk keeps a copy of
+    the state before the plan, taken where its first operation changes it, with the
+    rendering the walk had by then, and otherwise renders it where a proof first reads
+    it. The walk progresses copies of the planned operations, and its states own their
+    fields, so neither native ``migrate``'s operations nor its state before the plan, nor
+    the walk's copy of that state, change as the walk progresses; see ``_own``. The
+    pre-plan state is the one native ``migrate`` builds, through the private
+    ``MigrationExecutor._create_project_state``, on the graph native ``migrate`` planned
+    with. Re-check on each Django upgrade: that private call, that graph, ``_relinks``
+    against ``ProjectState``'s reload rule, the cached ``apps`` property the walk tests
+    and deletes to drop its rendering, and ``_initial`` against
+    ``MigrationExecutor.detect_soft_applied``.
+    """
+
+    def __init__(
+        self,
+        executor: MigrationExecutor,
+        forwards: Mapping[tuple[str, str], Migration],
+        judged: frozenset[str],
+        *,
+        probe: bool,
+        follow: bool,
+        policies: tuple[MigrationPolicy, ...],
+    ) -> None:
+        self.executor = executor
+        self.connection = executor.connection
+        self.forwards = forwards
+        self.judged = judged
+        self.probe = probe
+        self.following = follow
+        self.policies = policies
+        self.storage = _Storage(self.connection)
+        # The planned migrations, in the order native migrate applies them.
+        self.planned: list[Migration] = []
+        # The judged removals met that can drop a table, and the removals refused.
+        self.drops: list[tuple[Migration, _Removal]] = []
+        self.refused: list[_Refused] = []
+        # How many of the plan's database removals, in its order, the walk has passed.
+        self.passed = 0
+        # Why the walk cannot read its state now, if it cannot; see _blinded and _resight.
+        self.blind: _End | None = None
+        # Why it first could not: it follows no name and proves nothing from there on.
+        self.lost: _End | None = None
+        # The latest migration after which its state rendered afresh again, once blind.
+        self.restart: Migration | None = None
+        # The first exception the walk caught: the cause its refusal names.
+        self.cause: Exception | None = None
+        # Where the walk ended, if it did.
+        self.ended: _End | None = None
+        self._starts: dict[Migration, bool] = {}
+        # The state before the plan, kept where data is stored, and the fields it stores
+        # in each column; see _written.
+        self.before: ProjectState
+        self._written_by: dict[tuple[str, str | None], list[tuple[Any, Any]]] | None = None
+
+    @property
+    def follows(self) -> bool:
+        """Whether the walk follows the plan's names: until it first goes blind."""
+        return self.following and self.lost is None
+
+    @contextmanager
+    def _moving(self, migration: Migration, *, copying: bool = False) -> Iterator[None]:
+        """Where the walk copies an operation of ``migration``, where ``copying``, or moves its
+        state with one: whatever Django or the history's code raises there loses the state
+        and ends the walk."""
+        try:
+            yield
+        except Exception as error:
+            raise _End(migration, error, "follow", copied=copying) from error
+
+    def _blinded(self, migration: Migration | None, error: Exception, doing: str = "read") -> None:
+        """Whatever rendering or reading the state at ``migration`` raised leaves the walk
+        blind, if it is not already: it reads no model until ``_resight``."""
+        self.blind = self.blind or _End(migration, error, doing)
+        self.lost = self.lost or self.blind
+        self.cause = self.cause or error
+
+    def _resight(self, migration: Migration, state: ProjectState) -> None:
+        """Where the state of a blind walk renders afresh after ``migration``, the walk reads
+        it again from there on, still following no name."""
+        state.__dict__.pop("apps", None)
+        try:
+            _render(state)
+        except Exception:
+            state.__dict__.pop("apps", None)
+            return
+        self.blind = None
+        self.restart = migration
+
+    def run(self) -> list[_Refused]:
+        """Walk the plan; return each removal it refuses, whose remedy ``finished`` settles."""
+        # Native migrate applies its plan in the order of the full clean plan.
+        planned = [
+            self.forwards[key]
+            for migration, _ in self.executor.migration_plan(
+                self.executor.loader.graph.leaf_nodes(), clean_start=True
+            )
+            if (key := (migration.app_label, migration.name)) in self.forwards
+        ]
+        if unwalked := sorted(self.forwards.keys() - {(m.app_label, m.name) for m in planned}):
+            raise CommandError(
+                "the drop guard cannot follow migrate's plan through "
+                + ", ".join(f"{label}.{name}" for label, name in unwalked)
+                + "; nothing was migrated"
+            )
+        self.planned = planned
+        state = _own_fields(self.executor._create_project_state(with_applied_migrations=True))  # type: ignore[attr-defined]
+        # The walk's own state until its first operation changes it.
+        self.before = state
+        try:
+            for migration in planned:
+                with self._moving(migration, copying=True):
+                    # Native migrate applies the planned operations after the walk.
+                    operations = [_own(operation) for operation in migration.operations]
+                self._judge(migration, operations, state)
+                if self.blind:
+                    self._resight(migration, state)
+            refused = [*self.refused, *self._shared(state)]
+        except _End as end:
+            self.cause = self.cause or end.error
+            self.ended = end
+            refused = [*self.refused, *self._ended(end)]
+        return refused
+
+    def finished(self, refused: Sequence[_Refused]) -> list[_Refused]:
+        """``refused``, the refusals to report, each with its remedy settled; see ``_remedied``."""
+        blocking = {(refusal.migration.app_label, refusal.migration.name) for refusal in refused}
+        return [self._remedied(refusal, blocking) for refusal in refused]
+
+    def _shared(self, state: ProjectState) -> list[_Refused]:
+        """The judged table drops the shared-table rule refuses at the end of the plan.
+
+        A walk that went blind tells their owners from names alone, as one that follows no
+        name does; where the state at the end of the plan does not render, it cannot tell
+        them.
+        """
+        if not self.drops:
+            return []
+        try:
+            _render(state)
+        except Exception as error:
+            self.cause = self.cause or error
+            return self._unjudged(_End(None, error, "render"))
+        try:
+            if self.follows:
+                # Name what the plan's last creations added before asking what fills a name.
+                self.storage.name_created(state)
+            shared = _shared_table_drops(
+                [removal for _, removal in self.drops],
+                state,
+                (self.connection.alias,),
+                catalog=self.probe,
+                planned=True,
+                refilled=self.storage.refilled if self.follows else None,
+            )
+        except Exception as error:
+            self.cause = self.cause or error
+            return self._unjudged(_End(None, error, "read"))
+        return [
+            _Refused(self.drops[index][0], self.drops[index][1].operation, remedy, refusal, unsafe)
+            for index, remedy, refusal, unsafe in shared
+        ]
+
+    def _unjudged(self, stop: _End, remedy: str = _RENDER_END) -> list[_Refused]:
+        """Each judged table drop the walk met, whose owners at the end of the plan it cannot
+        tell, as ``stop`` says."""
+        unowned = f"cannot tell who owns its table at the end of the plan: the walk {stop}"
+        return [_Refused(migration, removal.operation, remedy, unowned) for migration, removal in self.drops]
+
+    def _ended(self, end: _End) -> list[_Refused]:
+        """Each judged removal the walk cannot read since it ended at ``end``, and each
+        judged table drop it met, whose owners at the end of the plan it cannot tell.
+
+        Native ``migrate`` copies no operation, so where the walk ended at one it cannot
+        copy, migrating past that migration first lets it read the rest; see ``_remedied``.
+        """
+        removals = [
+            (migration, operation)
+            for migration in self.planned
+            for operation in _database_removals(migration.operations)
+        ]
+        remedy = _unfollowed(end)
+        restart = end.migration if end.copied else None
+        return [
+            *self._unjudged(end, remedy),
+            *(
+                _Refused(migration, operation, remedy, str(end), restart=restart)
+                for migration, operation in removals[self.passed :]
+                if migration.app_label in self.judged
+            ),
+        ]
+
+    def _remedied(self, refusal: _Refused, blocking: set[tuple[str, str]]) -> _Refused:
+        """``refusal``, whose remedy, where it names a migration to migrate to first, names
+        one native ``migrate`` can start after, or else is the one it holds. Where the
+        migrations named as ``blocking``, those whose removals are refused, include one
+        that migrating there first applies, the remedy says to resolve those first."""
+        restart = refusal.restart
+        if restart is None:
+            return refusal
+        if not self._can_restart(restart):
+            return refusal._replace(restart=None)
+        alias = self.connection.alias
+        past = (
+            "past the operation the drop guard cannot copy"
+            if self.ended is not None and self.ended.copied and restart is self.ended.migration
+            else "after which the migration state renders again"
+        )
+        remedy = f"{_migrate(alias, restart.app_label, restart.name)} first, {past}, then {_migrate(alias)}"
+        needed = self.executor.loader.graph.forwards_plan((restart.app_label, restart.name))
+        if blockers := sorted(blocking.intersection(needed)):
+            named = ", ".join(f"{label}.{name}" for label, name in blockers)
+            remedy = f"once the removals refused in {named} are resolved, {remedy}"
+        return refusal._replace(remedy=remedy, restart=None)
+
+    def _can_restart(self, restart: Migration) -> bool:
+        """Whether native ``migrate`` can start after ``restart``, checked once; see
+        ``_restartable``."""
+        if restart not in self._starts:
+            self._starts[restart] = _restartable(self.executor, self.planned, restart)
+        return self._starts[restart]
+
+    def _rendered(self, migration: Migration, state: ProjectState, name: str = "") -> Any:
+        """Name what noted creations added, from ``state`` rendered in place where the walk
+        reads it, and return the model ``name`` of the migration's app, if any.
+
+        A blind walk reads no model, and ``None`` is returned; where rendering the state,
+        which Django may do afresh, raises, the walk goes blind; see ``_blinded``. The
+        unrendered state still tells which removal can drop a table; see ``_read``.
+        """
+        if self.blind:
+            return None
+        try:
+            if self.follows:
+                self.storage.name_created(state)
+            return state.apps.get_model(migration.app_label, name) if name else None
+        except Exception as error:
+            self._blinded(migration, error, "render")
+            return None
+
+    def _prove(
+        self,
+        migration: Migration,
         operation: Operation,
-        model: type[Any],
-        rows: Callable[[str], Any],
-        table: str,
-        column: str | None,
-    ) -> Iterator[str]:
-        for alias in sorted(connections):
-            connection = connections[alias]
-            try:
-                if not operation.allow_migrate_model(alias, model):
-                    continue
-                with connection.cursor() as cursor:
-                    present = _storage_identity(connection, table, cursor) is not None
-                    if present and column is not None:
-                        namespace, name = _storage_identifier(connection, column)
-                        if namespace:
-                            raise ImproperlyConfigured(f"column {column!r} cannot have a namespace")
-                        if connection.vendor == "sqlite":
-                            cursor.execute(
-                                "SELECT name FROM pragma_table_xinfo(%s) WHERE name = %s COLLATE NOCASE",
-                                [split_identifier(table)[1], name],
-                            )
-                            present = cursor.fetchone() is not None
-                        else:
-                            convert = connection.introspection.identifier_converter
-                            if connection.vendor == "postgresql":
-                                # Native PostgreSQL introspection only describes
-                                # visible unqualified tables; the cursor owns the
-                                # actual columns of this fully quoted relation.
-                                cursor.execute(f"SELECT * FROM {connection.ops.quote_name(table)} LIMIT 0")
-                                columns = {convert(field[0]) for field in cursor.description}
-                            else:
-                                columns = {
-                                    convert(field.name)
-                                    for field in connection.introspection.get_table_description(
-                                        cursor, split_identifier(table)[1]
-                                    )
-                                }
-                            present = name in columns
-                            if not present and connection.vendor == "mysql":
-                                raise ImproperlyConfigured(f"cannot prove column identity for {column!r}")
-                count = rows(alias).using(alias).count() if present else 0
-            except (DatabaseError, ImproperlyConfigured) as error:
-                yield (
-                    f"{model._meta.label_lower}: cannot prove {table}.{column or '*'} "
-                    f"empty on {alias!r} ({error})"
+        state: ProjectState,
+        routed: Any,
+        removed: tuple[str, str | None],
+    ) -> None:
+        """Refuse a judged removal unless what it drops on the alias is proved empty or declared.
+
+        The plan's state tells only what Django drops: the removed model's tables, a
+        many-to-many field's table, or a field's column, which a field without a database
+        type does not have. Reading that is following the state, as are the names before
+        the plan it maps to. Whether that storage holds data, the state before the plan
+        tells; see ``_written``. The proof is built and read in ``_proofs``.
+        """
+        using = self.connection.alias
+        if isinstance(operation, _INTENDED) or not operation.allow_migrate_model(using, routed):
+            return
+        field = removed[1]
+        definition = None if field is None else routed._meta.get_field(field)
+        if definition is not None and not definition.many_to_many:
+            if definition.db_parameters(connection=self.connection)["type"] is None:
+                return
+            table, column, dropped = routed._meta.db_table, definition.column, None
+        elif (dropped := _dropped(routed, field, self.policies)) is None:
+            return
+        else:
+            table, column = dropped.table, None
+        origin = self.storage.stored(table, column)
+        if origin is _VACATED:
+            self.refused.append(
+                _Refused(migration, operation, None, _unproved(routed, table, column, using, _UNFILLED))
+            )
+            return
+        if origin is None:
+            return
+        proof: _Dropped | None = dropped
+        if origin.column is not None:
+            # Its rows were written under the definition its column had before the plan,
+            # read only where the column is present.
+            before, creating = (origin.table, origin.column), origin.creating
+            proof = _Dropped(*before, lambda alias: self._written(*before, creating))
+        elif origin.table != table:
+            # Only the table's name changed, never what it holds.
+            model = _as_stored(state, migration.app_label, removed, origin.table)
+            proof = _dropped(model, field, self.policies)
+        if proof is None:
+            return
+        for remedy, refusal, unsafe in _proofs(operation, routed, proof, (using,), added=origin.added):
+            self.refused.append(_Refused(migration, operation, remedy, refusal, unsafe))
+
+    def _written(self, table: str, column: str, creating: Migration | None) -> QuerySet[Any] | None:
+        """The rows holding data in column ``column`` of table ``table``, named as before the
+        plan, judged by the definition they were written under: the field that the state
+        before the plan stores in it, on a model that migrates on the alias.
+
+        A generated field owns no storage of its own, so its column holds no data and
+        ``None`` is returned. A field without a database type stores nothing in it. Every
+        field stored in the column must agree on what reads as empty in it. Where none is,
+        or they disagree, the rows cannot be judged, and ``_Undefined`` says why and, where
+        it differs from declaring the drop, what to do instead: where no field defines the
+        column, migrate first to ``creating``, see ``_adopt``. This runs inside the proof
+        that ``_proofs`` reads, which also turns whatever resolving a field or evaluating a
+        default raises into a column that cannot be proved empty.
+        """
+        alias = self.connection.alias
+        definitions = [
+            (model, field)
+            for model, field in self._stored(table, column)
+            if router.allow_migrate_model(alias, model)
+            and field.db_parameters(connection=self.connection)["type"] is not None
+        ]
+        if not definitions:
+            restart = creating if creating is not None and self._can_restart(creating) else None
+            raise _Undefined(
+                "the state before the plan defines no field stored in it", _adopt(restart, alias)
+            )
+        if not QuerySet(definitions[0][0]).using(alias).exists():
+            # A table without rows holds no data in any column, whatever its fields' defaults.
+            return None
+        empty = [(field.generated, None if field.generated else _empty(field)) for _, field in definitions]
+        if any(type(value[1]) is not type(empty[0][1]) or value != empty[0] for value in empty):
+            raise _Undefined(
+                "the state before the plan defines fields stored in it that read as empty differently"
+            )
+        model, field = definitions[0]
+        return None if field.generated else _rows(model, field, empty[0][1])
+
+    def _stored(self, table: str, column: str) -> list[tuple[Any, Any]]:
+        """The models of the state before the plan, auto-created ones included, and their
+        fields stored in column ``column`` of table ``table``, rendering that state once."""
+        if self._written_by is None:
+            written: dict[tuple[str, str | None], list[tuple[Any, Any]]] = {}
+            for model in self.before.apps.get_models(include_auto_created=True):
+                for field in model._meta.local_concrete_fields:
+                    written.setdefault(self.storage.key(model._meta.db_table, field.column), []).append(
+                        (model, field)
+                    )
+            self._written_by = written
+        return self._written_by.get(self.storage.key(table, column), [])
+
+    def _judge(
+        self,
+        migration: Migration,
+        operations: Iterable[Operation],
+        state: ProjectState,
+        *,
+        database: bool = True,
+    ) -> None:
+        for operation in operations:
+            self._step(migration, operation, state, database=database)
+
+    def _step(
+        self, migration: Migration, operation: Operation, state: ProjectState, *, database: bool
+    ) -> None:
+        """Read ``operation`` of ``migration`` where it removes or renames storage, then move
+        ``state`` with it. Whatever reading raises leaves the walk blind; whatever moving
+        raises ends it."""
+        label = migration.app_label
+        using = self.connection.alias
+        if isinstance(operation, SeparateDatabaseAndState):
+            if database and operation.database_operations:
+                # Database operations progress their own state, as Django applies them.
+                with self._moving(migration):
+                    progressed = state.clone()
+                self._judge(migration, operation.database_operations, progressed)
+                self._rendered(migration, progressed)
+            self._judge(migration, operation.state_operations, state, database=False)
+            return
+        if (
+            isinstance(operation, RunSQL)
+            and operation.state_operations
+            and type(operation).state_forwards is RunSQL.state_forwards
+        ):
+            # Its SQL is not followed; RunSQL applies its state operations one by one.
+            self._rendered(migration, state)
+            self._judge(migration, operation.state_operations, state, database=False)
+            return
+        if isinstance(operation, RenameModel):
+            # A model that owned a dropped table keeps that claim under its new name.
+            old, new = (f"{label}.{name.lower()}" for name in (operation.old_name, operation.new_name))
+            self.drops = [
+                (dropping, removal._replace(holders=removal.holders | {new}))
+                if old in removal.holders
+                else (dropping, removal)
+                for dropping, removal in self.drops
+            ]
+        removed = _removal(operation) if database else None
+        if removed is not None:
+            self._read(migration, operation, state, removed)
+            self.passed += 1
+        # Custom database code, such as RunSQL or a subclass replacing Django's
+        # database_forwards, is not followed; the specification's "Drop guard" section
+        # states what that leaves undetected.
+        renamed: tuple[str, str, dict[str, str]] | None = None
+        creation: tuple[str, str | None] | None = None
+        before_model = None
+        try:
+            if self.follows:
+                native = database and _native(operation)
+                renamed = _renamed(operation, state, label) if native else None
+                creation = _creation(operation) if native else None
+                if not native and not _leaves_state(operation):
+                    # Name what earlier creations added before an operation the walk does
+                    # not follow can rename it.
+                    self._rendered(migration, state)
+                before_model = self._rendered(migration, state, renamed[0]) if renamed else None
+            if self.probe and self.lost is None and self.before is state:
+                # The walk's state changes from here on; a clone keeps any rendering it has.
+                self.before = _own_fields(state.clone())
+            if not renamed and "apps" in state.__dict__ and _relinks(operation, state, label):
+                # Render afresh where the walk next needs a model instead; after a followed
+                # rename it needs one at once, and a fresh render would cost every model.
+                del state.apps
+        except Exception as error:
+            self._blinded(migration, error)
+            renamed = creation = None
+        with self._moving(migration):
+            operation.state_forwards(label, state)
+        # Django changes storage only where the operation migrates the model it
+        # produces: never for a swapped model, nor on an alias routed away.
+        try:
+            if renamed:
+                after_model = self._rendered(migration, state, renamed[1])
+                if before_model and after_model and operation.allow_migrate_model(using, after_model):
+                    self.storage.follow(before_model, after_model, renamed[2])
+            if creation and self.follows:
+                # Named at the walk's next render, before anything can rename it.
+                self.storage.creating(migration, operation, creation)
+        except Exception as error:
+            self._blinded(migration, error)
+
+    def _read(
+        self, migration: Migration, operation: Operation, state: ProjectState, removed: tuple[str, str | None]
+    ) -> None:
+        """Read a removal: where the walk follows names, end what it drops, whoever owns
+        it; where data is stored, prove a judged one; and keep a judged one that can drop
+        a table for the shared-table rule. Otherwise the walk does not render here.
+
+        A blind walk refuses each judged removal it would have to read: one that can drop
+        a table, which the unrendered state tells, and where data is stored an undeclared
+        one, and so does a walk that cannot read this removal. A declared column drop needs
+        no proof, and where nothing is stored a column removal can lose nothing. Once the
+        walk reads its state again, a judged table drop is kept for the shared-table rule,
+        but names moved unfollowed since it went blind, so no removal can be proved.
+        """
+        label = migration.app_label
+        judged = label in self.judged
+        undeclared = judged and self.probe and not isinstance(operation, _INTENDED)
+        # Until the state tells, a judged removal may drop a table.
+        drops_table = judged
+        refused = len(self.refused)
+        try:
+            drops_table = judged and _drops_table(state, label, removed)
+            if self.lost is not None and self.blind is None:
+                if undeclared:
+                    self.refused.append(
+                        _Refused(migration, operation, _RENDER, str(self.lost), restart=self.restart)
+                    )
+                    return
+                if not drops_table:
+                    return
+            elif not (self.following or drops_table or self.probe and judged):
+                return
+            routed = self._rendered(migration, state, removed[0])
+            if routed is not None:
+                holders = _holders(state, routed, removed[1], self.connection) if drops_table else frozenset()
+                if self.probe and judged and self.lost is None:
+                    self._prove(migration, operation, state, routed, removed)
+                if self.follows and operation.allow_migrate_model(self.connection.alias, routed):
+                    self.storage.end(routed, removed[1])
+                if drops_table:
+                    self.drops.append((migration, _Removal(operation, routed, removed[1], holders)))
+                return
+        except Exception as error:
+            self._blinded(migration, error)
+        if self.blind and (drops_table or undeclared) and len(self.refused) == refused:
+            self.refused.append(_Refused(migration, operation, _RENDER, str(self.blind)))
+
+
+def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> None:
+    """Drop guard for ``migrate``: refuse a plan whose undeclared drops lose stored data.
+
+    ``migrate`` calls this from ``pre_migrate`` with the plan and alias it is about
+    to apply, before any operation runs. The specification's "Drop guard" section
+    defines the rule; ``_Walk`` walks the plan. Where data is stored, the walk judges
+    only the history the guard judges. An alias that stores nothing holds no data to
+    prove: there the walk judges every app's removals, probes nothing, follows no
+    rename and renders only at a removal that can drop a table and at the end, and only
+    the shared-table rule, which needs no data, applies, from names alone. Only the
+    apps whose removals it refuses are then classified, and only the history the guard
+    judges is refused. Only where that history is refused does the walk run again,
+    following the plan's names to see whether a native operation filled a dropped
+    table's name. Whatever the guard itself raises refuses the plan, naming what was raised;
+    a refusal names as its cause the first exception the walk caught.
+    """
+    try:
+        _check_plan_drops(plan, using)
+    except CommandError:
+        raise
+    except Exception as error:
+        raise CommandError(
+            _readable(
+                f"the drop guard cannot judge migrate's plan on {using!r} ({type(error).__name__}: {error}). "
+                "Nothing was migrated."
+            )
+        ) from error
+
+
+def _check_plan_drops(plan: Sequence[tuple[Migration, bool]], using: str) -> None:
+    forwards = {
+        (migration.app_label, migration.name): migration for migration, backwards in plan if not backwards
+    }
+    labels = {key[0] for key, migration in forwards.items() if _database_removals(migration.operations)}
+    if not labels:
+        return
+    connection = connections[using]
+    probe = not _stores_nothing(connection)
+    judged = _guarded(labels) if probe else frozenset(labels)
+    if not judged:
+        return
+    executor = MigrationExecutor(connection)
+    if not forwards.keys() <= executor.loader.graph.nodes.keys():
+        # Native migrate planned a replaced target on a graph without replacements.
+        executor.loader.replace_migrations = False  # type: ignore[attr-defined]
+        executor.loader.build_graph()
+    policies = _policies() if probe else ()
+    walk = _Walk(executor, forwards, judged, probe=probe, follow=probe, policies=policies)
+    refused = walk.run()
+    if refused and not probe:
+        classified = {migration.app_label for migration, *_ in refused}
+        guarded = _guarded(classified)
+        if any(migration.app_label in guarded for migration, *_ in refused):
+            # Follow the plan's names to see whether a native operation filled the
+            # name of a table that names alone keep owned at the end.
+            walk = _Walk(executor, forwards, judged, probe=probe, follow=True, policies=policies)
+            refused = walk.run()
+            if unclassified := {migration.app_label for migration, *_ in refused} - classified:
+                guarded |= _guarded(unclassified)
+        refused = [refusal for refusal in refused if refusal[0].app_label in guarded]
+    refused = walk.finished(refused)
+    if refused:
+        raise _refused(
+            "migration drop",
+            (
+                (
+                    *_refusal(refusal.migration, refusal.operation, refusal.refusal, refusal.remedy),
+                    refusal.unsafe,
                 )
-                continue
-            if count:
-                yield (
-                    f"{model._meta.label_lower}: {table}.{column or '*'} "
-                    f"holds data in {count} rows on {alias!r}"
-                )
+                for refusal in refused
+            ),
+            " Nothing was migrated.",
+        ) from walk.cause
 
 
 def _forget_history(labels: Iterable[str], *, packages: Mapping[str, Path] | None = None) -> None:
@@ -593,15 +1898,7 @@ def _history_aliases(loader: MigrationLoader, labels: set[str]) -> tuple[str, ..
                     alias for alias in connections if router.allow_migrate(alias, label, **operation.hints)
                 )
             elif (
-                not any(
-                    vars(owner).get("database_forwards") is forwards
-                    and any(
-                        getattr(module, owner.__name__, None) is owner
-                        for module in (model_operations, field_operations)
-                    )
-                    for owner in type(operation).__mro__
-                    if owner is not Operation
-                )
+                not _native(operation)
                 or type(operation).allow_migrate_model is not Operation.allow_migrate_model
             ):
                 aliases.update(connections)
@@ -643,12 +1940,12 @@ def _fully_applied(labels: set[str], aliases: Iterable[str]) -> None:
 def retire_history(label: str, *, purge: bool = False) -> None:
     """Retire a disabled label only after all routed configured databases agree.
 
-    Purge authors a native final migration, applies it on every routed alias, and
-    then runs the same retirement proof. A failed application leaves durable
-    history for retry; it never records retirement prematurely.
+    Purge authors a native final migration, applies only the label's own history on
+    every routed alias, and then runs the same retirement proof. Another app's
+    unapplied migration in that chain belongs to ``migrate`` and its drop guard. A
+    failed application leaves durable history for retry; it never records
+    retirement prematurely.
     """
-    from django_compose.artifacts import receipt_lock, update_receipt
-
     require_serving_mode()
     output = Path(settings.COMPOSE_OUTPUT_DIR)
     with receipt_lock(output):
@@ -668,9 +1965,11 @@ def retire_history(label: str, *, purge: bool = False) -> None:
         if purge:
             before, after = effective_states(loader, global_apps, purge=frozenset({label}))
             changes = MigrationAutodetector(before, after).changes(
-                graph=loader.graph, trim_to_apps={label}, migration_name="compose_purge"
+                graph=loader.graph, trim_to_apps={label}, migration_name=_PURGE
             )
-            _shared_table_drops(before, after, changes, database=True)
+            removals = tuple(_changed_removals(before, changes))
+            if shared := _shared_table_drops(removals, after, sorted(connections), catalog=True):
+                raise _refused("autodetected drop", (refusal[1:] for refusal in shared))
             for migration in changes.get(label, ()):
                 writer = MigrationWriter(migration, include_header=False)
                 path = Path(writer.path)
@@ -681,7 +1980,28 @@ def retire_history(label: str, *, purge: bool = False) -> None:
             for alias in aliases:
                 executor = MigrationExecutor(connections[alias])
                 executor.loader.check_consistent_history(connections[alias])
-                executor.migrate(executor.loader.graph.leaf_nodes(label))
+                targets = executor.loader.graph.leaf_nodes(label)
+                plan = executor.migration_plan(targets)
+                # A full migrate would reach the purge and be refused; name each app's
+                # last pending migration of the chain as a targeted migrate instead.
+                foreign = {node.app_label: node.name for node, _ in plan if node.app_label != label}
+                planned = [node for node, _ in plan]
+                if unready := [
+                    f"{app}.{name}"
+                    for app, name in sorted(foreign.items())
+                    if not _restartable(executor, planned, executor.loader.graph.nodes[app, name])
+                ]:
+                    raise RuntimeError(
+                        f"purge applies only {label!r} history, and native migrate could not start after "
+                        + ", ".join(unready)
+                        + " in the rest of its chain: order the history so that the state renders there"
+                    )
+                if foreign:
+                    raise RuntimeError(
+                        f"purge applies only {label!r} history; first apply the rest of its chain with "
+                        + "; ".join(_migrate(alias, app, name) for app, name in sorted(foreign.items()))
+                    )
+                executor.migrate(targets, plan=plan)
         _fully_applied({label}, aliases)
         loader = MigrationLoader(None, ignore_no_migrations=True)
         _check_dependents(loader, {label})

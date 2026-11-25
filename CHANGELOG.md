@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.1.0.dev14
+
+- Apply the [drop guard](docs/SPEC.md#drop-guard) when `migrate` runs, and so in
+  `provision`, also under `--skip-checks`: a pending removal in the history the project
+  owns is refused before any operation runs where it would destroy stored data or delete
+  a table another model still owns, or where the guard cannot prove that it would not.
+  Previously only autodetected removals were judged, at `makemigrations`, so a removal
+  migration already on disk was applied unchecked. The specification states what the
+  guard judges, on which databases, and what it leaves undetected; see
+  [proposal 0005](docs/proposals/0005-migrate-time-drop-guard.md) for the decisions.
+- Add `django_compose.operations.IntendedRemoveField` and `IntendedDeleteModel` to
+  declare a drop a migration intends; see
+  [intended drops](docs/migrations.md#declare-an-intended-drop).
+- Report another app's `migrate` or `makemigrations` that shadows this package's, and
+  so switches the drop guard off, with system check `django_compose.E002`, tagged
+  `commands`. Before any database work `provision` refuses a shadowing `migrate`, and
+  whatever the `commands` checks report unless it is silenced; see the
+  [drop guard](docs/SPEC.md#drop-guard).
+- `retire_history --purge` applies only the retired label's own migrations.
+- `django_compose.provision.TABLE` and `LEGACY_TABLE` are gone: the provision record's
+  table name is `ProvisionRecorder.Record._meta.db_table`, read from the model that owns
+  it, and the name `provision --upgrade-from` renames is `ProvisionRecorder.legacy_table`.
+- The drop guard proves storage empty with one EXISTS query, or two for a column of a
+  table that holds rows, and counts rows only for a refusal. On a database that stores
+  data it walks and renders the whole pending plan before the first operation, so
+  `migrate` there takes longer on a large plan: a few seconds for two hundred pending
+  migrations of a composed host on an idle machine, several times that on a loaded one.
+  Deleting a table another model still owns is refused in the same words, with the
+  same remedy, at `makemigrations`, `migrate` and `retire_history --purge`.
+- `check_migrations`, and so `provision`, builds native history's state from copies of
+  the migration operations. Django rewrites in place the fields that reference a renamed
+  field, so a history renaming a field that another model's `to_field` names failed to
+  migrate after the check in the same process.
+- `SourceResolver.installed(module)` tells whether an installed distribution owns a
+  module, settled by the first owner found rather than the full index.
+- **Upgrade impact:** a host whose unapplied history removes a column or table that
+  still holds data is now refused at `migrate` and `provision`, which is the point.
+  Review each named removal: keep the storage, or move its data and write the removal as
+  `IntendedRemoveField(model_name=..., name=...)` or `IntendedDeleteModel(name=...)` in
+  that migration. Deleting a table another model still owns is refused even when
+  declared: keep the table, or change that owner first. A pending purge migration is
+  refused the same way; apply it on each deployment with `retire_history <label>
+  --purge`. Where the guard cannot read the migration state, as where a history leaves a
+  relation's target undefined for a while, it refuses under `cannot prove migration drop
+  safe` each table drop it cannot read, each table drop whose owners at the end of the
+  plan it cannot tell, and, on a database that stores data, each undeclared removal from
+  there on; where it cannot copy an operation or move the state, every removal from
+  there on. Where the state renders again after a later migration, or the walk ended at
+  an operation it cannot copy, a refusal names that migration: migrate to it first, then
+  migrate. Otherwise order the history as the refusal says. Any other installed app, the
+  project's or a third party's, that ships a `migrate` or `makemigrations` command now
+  fails system check `django_compose.E002` and makes `provision` refuse: remove that
+  command, or make it subclass this package's. A `makemigrations` that must stay, such
+  as django-linear-migrations', keeps the guard as a command subclassing both, as
+  `class Command(LinearCommand, ComposeCommand)`, with nothing silenced; silencing
+  `django_compose.E002` and `commands.E001` instead provisions, but authors without the
+  guard.
+
 ## 0.1.0.dev13
 
 - Include each selected component's resolved `path` in the snapshot digest. A

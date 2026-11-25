@@ -23,11 +23,11 @@ The launcher exposes these Django management commands:
 | Command | Purpose | Guide |
 | --- | --- | --- |
 | `compose` | Generate output; `--check` verifies output/history without writes; `--if-stale` skips a current build | [Lifecycle](SPEC.md#setup-lifecycle) |
-| `makemigrations`, `migrate` | Author and apply ordinary Django migrations | [Migrations](migrations.md) |
+| `makemigrations`, `migrate` | Author and apply ordinary Django migrations; the [drop guard](SPEC.md#drop-guard) refuses an autodetected drop of stored data, and at `migrate` a drop in the project's own history that would lose stored data or a table another model owns, or that it cannot prove safe | [Migrations](migrations.md) |
 | `runserver` | Compose before Django's development-server reloads | [Development](configuration.md#serve-the-project) |
 | `provision` | Apply migrations and app preparation hooks; `--check` verifies readiness | [Provisioning](provisioning.md) |
 | `check_migrations` | Compare models/history; `--imports` audits retained Python dependencies | [History checks](migrations.md#disable-delete-or-uninstall) |
-| `retire_history`, `reset_migration_history` | Explicit, guarded history maintenance | [Advanced migrations](migrations.md#advanced-destructive-changes-and-history-cutoffs) |
+| `retire_history`, `reset_migration_history` | Explicit, guarded history maintenance | [History cutoffs](migrations.md#history-cutoffs) |
 
 Build before serving; the serving process verifies output rather than rebuilding.
 `DJANGO_COMPOSE_MODE` is `write`, `check`, or absent for serving. Use the launcher
@@ -103,8 +103,8 @@ in [`django_compose.declarations`](../src/django_compose/declarations.py) are:
   `ModelDeclaration(attributes=..., meta_options=...)` using `DeclarationValue` values.
 - `ArtifactHook` declares `external_root`, `phase` and `render(composition, models)`.
   Models-phase hooks receive `ModelsView`; ready-phase hooks receive Django's registry.
-- `MigrationPolicy.retired_primary_keys(model, alias)` supplies explicit exemptions
-  to destructive-change checks.
+- `MigrationPolicy.retired_primary_keys(model, alias)` supplies explicit row
+  exemptions to the [drop guard](SPEC.md#drop-guard).
 
 The supplied [`ModelComposition`](../src/django_compose/model_composition.py) exposes
 ordered models, donors, parents and contributed fields; see [model contracts](SPEC.md#model-declarations).
@@ -138,5 +138,10 @@ project startup normally delegates verification to `configure`.
 - `migrations.check_native_history(apps, *, labels)` compares effective native
   state without database access; `migrations.history_labels()` reads retained
   receipt labels. Projects author schema/data work through Django's native history.
+- `operations.IntendedRemoveField` and `operations.IntendedDeleteModel` declare a
+  drop of stored data that a migration intends, such as after a `RunPython` move;
+  see [intended drops](migrations.md#declare-an-intended-drop).
+  `migrations.check_plan_drops(plan, *, using)` is the [drop guard](SPEC.md#drop-guard)
+  `migrate` runs from `pre_migrate`.
 - The optional `django_compose.typing` mypy plugin analyzes composed models through
   django-stubs. See [installation, configuration and limitations](dependencies.md#advanced-typing).

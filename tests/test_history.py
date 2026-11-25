@@ -18,7 +18,7 @@ settings.COMPOSE_SNAPSHOT = SimpleNamespace(
 receipt = SimpleNamespace(HISTORY_LABELS=("alpha", "beta"), RETIRED_LABELS=())
 stack = ExitStack()
 stack.enter_context(patch("django_compose.migrations.read_receipt", return_value=receipt))
-updated = stack.enter_context(patch("django_compose.artifacts.update_receipt"))
+updated = stack.enter_context(patch("django_compose.migrations.update_receipt"))
 """
 
 
@@ -111,6 +111,80 @@ import os
 os.environ["DJANGO_COMPOSE_MODE"] = "write"
 expect(CommandError, "unset DJANGO_COMPOSE_MODE", lambda: call_command({command!r}{args}, verbosity=0))
 """)
+
+
+def test_migrate_leaves_an_unapplied_purge_to_retirement(host):
+    _, run = host
+    run(
+        DISABLE
+        + """
+from django.db import connections
+connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
+for alias in connections:
+    executor = MigrationExecutor(connections[alias])
+    executor.migrate(executor.loader.graph.leaf_nodes())
+    old = executor.loader.project_state().apps.get_model("alpha", "Record")
+    old._base_manager.using(alias).create(old="purged explicitly")
+native_migrate = MigrationExecutor.migrate
+def fail_secondary(executor, *args, **kwargs):
+    if executor.connection.alias == "other":
+        raise RuntimeError("secondary unavailable")
+    return native_migrate(executor, *args, **kwargs)
+with patch.object(MigrationExecutor, "migrate", fail_secondary):
+    expect(RuntimeError, "secondary unavailable", lambda: retire_history("alpha", purge=True))
+migrate = lambda: call_command("migrate", database="other", interactive=False, verbosity=0)
+expect(CommandError, "compose_purge (Delete model Record): alpha.record: alpha_record.* holds data", migrate)
+expect(CommandError, "apply the 'alpha' purge on this deployment with retire_history alpha --purge.", migrate)
+assert "alpha_record" in connections["other"].introspection.table_names()
+retire_history("alpha", purge=True)
+assert "alpha_record" not in connections["other"].introspection.table_names()
+"""
+    )
+
+
+def test_purge_applies_only_the_retired_label_history(host):
+    root, run = host
+    write(
+        root,
+        "history/beta/0001_pending.py",
+        """
+from django.db import migrations
+class Migration(migrations.Migration):
+    operations = []
+""",
+    )
+    write(
+        root,
+        "history/alpha/0002_after_beta.py",
+        """
+from django.db import migrations
+class Migration(migrations.Migration):
+    dependencies = [("alpha", "0001_origin"), ("beta", "0001_pending")]
+    operations = []
+""",
+    )
+    run(
+        DISABLE
+        + """
+executor = MigrationExecutor(connection)
+executor.migrate([("alpha", "0001_origin")])
+expect(RuntimeError, "purge applies only 'alpha' history; first apply the rest of its chain with "
+       "migrate beta 0001_pending",
+       lambda: retire_history("alpha", purge=True))
+assert not updated.called
+# Where native migrate could not start after a migration of that chain, none is named.
+import django_compose.migrations as guard
+restartable = guard._restartable
+guard._restartable = lambda *args: False
+expect(RuntimeError, "purge applies only 'alpha' history, and native migrate could not start after "
+       "beta.0001_pending in the rest of its chain", lambda: retire_history("alpha", purge=True))
+guard._restartable = restartable
+assert not updated.called
+applied = MigrationExecutor(connection).loader.applied_migrations
+assert ("beta", "0001_pending") not in applied and ("alpha", "0002_after_beta") not in applied
+assert "alpha_record" in connection.introspection.table_names()
+"""
+    )
 
 
 def test_reset_disabled_history_keeps_historical_models_and_tables(host):
@@ -413,7 +487,10 @@ active = apps.get_model("beta", "Adopted")
 active._base_manager.create(old="active data")
 before = files()
 records = set(MigrationRecorder(connection).applied_migrations())
-expect(CommandError, "still owned by beta.adopted", lambda: retire_history("alpha", purge=True))
+purge = lambda: retire_history("alpha", purge=True)
+expect(CommandError, "unsafe autodetected drop: table ", purge)
+expect(CommandError, "is still owned by beta.adopted on 'default'. To proceed, keep a table another model "
+       "may still own, or first change that owner.", purge)
 assert files() == before
 assert records == set(MigrationRecorder(connection).applied_migrations())
 assert list(active._base_manager.values_list("old", flat=True)) == ["active data"]

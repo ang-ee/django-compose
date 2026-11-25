@@ -66,7 +66,7 @@ locates integration module files without importing them.
 | --- | --- | --- |
 | `ModelDeclarationHook` | `model_declaration(composition, source) -> ModelDeclaration` | Before rendering each generated model |
 | `ArtifactHook` | `external_root: str`; `phase: Literal["models", "ready"]`; `render(composition, models) -> Mapping[Path, bytes]` | Models phase after concrete registration; ready phase in the final ready callback |
-| `MigrationPolicy` | `retired_primary_keys(model, alias) -> Iterable[Any]` | Destructive migration checks |
+| `MigrationPolicy` | `retired_primary_keys(model, alias) -> Iterable[Any]` | The drop guard, in `makemigrations` and `migrate` |
 
 A class can implement any combination. Duplicate integration classes, classes
 that implement no protocol, and classes requiring constructor arguments fail.

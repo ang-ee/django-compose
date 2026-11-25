@@ -6,7 +6,7 @@ from django.core.management.base import BaseCommand, CommandParser
 from django.db import DEFAULT_DB_ALIAS
 
 from django_compose.management import require_serving_mode
-from django_compose.provision import LEGACY_TABLE, run
+from django_compose.provision import ProvisionRecorder, run
 
 
 class Command(BaseCommand):
@@ -18,7 +18,9 @@ class Command(BaseCommand):
         parser.add_argument("--wait-db", type=int, default=60, metavar="SECONDS")
         parser.add_argument("--check", action="store_true", help="Read readiness without database mutations.")
         parser.add_argument(
-            "--upgrade-from", choices=[LEGACY_TABLE], help="Rename the legacy provision table."
+            "--upgrade-from",
+            choices=[ProvisionRecorder.legacy_table],
+            help="Rename the legacy provision table.",
         )
 
     def handle(self, *args: Any, **options: Any) -> None:

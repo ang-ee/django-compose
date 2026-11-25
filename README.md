@@ -59,13 +59,17 @@ project:
 ```sh
 python manage.py compose         # Generate models, app configs and declared artifacts
 python manage.py makemigrations  # Author ordinary Django migration files
-python manage.py migrate         # Apply them to the database
+python manage.py migrate         # Apply them, refusing undeclared drops of stored data
 python manage.py runserver       # Run Django's development server
 ```
 
 Django owns the app registry, ORM, managers, querysets and migration history.
 Generated classes import the source apps, so keep their packages installed.
 Rebuild generated code as apps change; preserve and review migration files.
+`makemigrations` refuses to write a migration that would remove a column or table
+still holding data, and `migrate` refuses to apply one in the project's own history
+unless it declares that drop; see the
+[drop guard](https://github.com/ang-ee/django-compose/blob/main/docs/migrations.md#advanced-the-drop-guard-and-history-cutoffs).
 
 ## Get started
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import signal
@@ -11,8 +12,9 @@ import tempfile
 from typing import Any
 
 from django.conf import settings
+from django.core import checks
 from django.core.exceptions import ImproperlyConfigured
-from django.core.management import ManagementUtility
+from django.core.management import ManagementUtility, get_commands, load_command_class
 from django.core.management.base import CommandError, handle_default_options
 from django.utils import autoreload
 
@@ -34,6 +36,36 @@ def require_serving_mode() -> None:
     """Migration commands require a process populated from verified serving apps."""
     if "DJANGO_COMPOSE_MODE" in os.environ:
         raise CommandError("Migration commands require serving mode; unset DJANGO_COMPOSE_MODE")
+
+
+def unguarded_commands() -> dict[str, str]:
+    """Describe, by name, each drop-guarded command that native dispatch resolves elsewhere.
+
+    ComposeConfig must be last in INSTALLED_APPS, so a same-named command of any
+    other app wins native dispatch and its drop guard is silently off. A subclass
+    of this package's command keeps the guard unless it overrides ``execute``.
+    """
+    shadowed: dict[str, str] = {}
+    for name in ("makemigrations", "migrate"):
+        # Imported here: the command modules load migration state and models, while
+        # this module loads before settings, for the launcher.
+        guarded = importlib.import_module(f"django_compose.management.commands.{name}").Command
+        app = get_commands()[name]
+        if not isinstance(load_command_class(app, name), guarded):
+            shadowed[name] = f"{name} resolves to {app}'s command, which bypasses the drop guard"
+    return shadowed
+
+
+def check_guarded_commands(app_configs: Any = None, **kwargs: Any) -> list[checks.CheckMessage]:
+    """System check: native dispatch resolves the drop-guarded migration commands."""
+    return [
+        checks.Error(
+            problem,
+            hint="Remove that command, or subclass django-compose's command of the same name.",
+            id="django_compose.E002",
+        )
+        for problem in unguarded_commands().values()
+    ]
 
 
 def _default_options(arguments: list[str]) -> Any:

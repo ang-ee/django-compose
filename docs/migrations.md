@@ -87,8 +87,8 @@ Python package before migration commands or serving.
 These are separate changes:
 
 - **Delete a model from an enabled app:** Django detects the schema deletion,
-  even when the app now has no models module. Automatic destructive changes must
-  pass the data guards described below.
+  even when the app now has no models module. Its removal must pass the
+  [drop guard](#advanced-the-drop-guard-and-history-cutoffs).
 - **Disable an app:** remove it from the project's selected apps and compose
   again. Its retained migration history is represented by a history-only app
   configuration, without loading its old models or lifecycle hooks. Disabling
@@ -142,8 +142,8 @@ Declare native dependencies so Django applies schema and data work in order.
 A final-shaped schema does not prove that earlier data work ran.
 
 Django owns `--check`, `--dry-run`, `--empty`, `--merge` and `--update`, migration
-serialization and destinations. Authoring uses the shared destructive-change
-guards and can read eligible databases. Native command failure semantics apply;
+serialization and destinations. Authoring uses the drop guard and can read
+eligible databases. Native command failure semantics apply;
 there is no separate multi-phase authoring rollback journal. Authoring and compose
 do not write migration recorder rows. `compose --check` compares native state
 without querying a deployment database.
@@ -173,31 +173,66 @@ An explicit native `makemigrations --update` retains Django's deliberate rewrite
 semantics; the former seal-based ban is gone. Audit retained imports before
 removing providers, using `check_migrations --imports --removing`.
 
-## Advanced: destructive changes and history cutoffs
+## Advanced: the drop guard and history cutoffs
 
-The shared `DropGuardAutodetector` requires relevant rows or columns to be empty
-before automatic field/model removal, on every configured database eligible for
-that native migration operation. Django's model options, including
-`required_db_vendor` and `required_db_features`, and routers determine eligibility.
-Only eligible databases are checked for stored rows; native feature eligibility
-checks may themselves connect. An unavailable eligible database cannot prove
-emptiness. Integration-owned retirement exemptions remain explicit. Implement
-required data cutovers as reviewed migrations.
+The [drop guard](SPEC.md#drop-guard) refuses a migration that would remove a column
+or table still holding data, or delete a table another model still owns.
+`makemigrations` applies it to what it autodetects; `migrate`, and therefore
+`provision`, to the plan it is about to run, before any operation and also under
+`--skip-checks`, judging only the history the project owns. The specification states
+what it judges, on which databases, how it tells storage apart, and what it does not
+judge.
 
-The guards compare storage on each eligible alias. A table still owned by an
-active model cannot be deleted, even when empty or reached through differently
-quoted names. This includes Django's implicit many-to-many tables deleted with
-their owning model or field. Identical table names on disjoint database aliases do not
-establish shared ownership.
+A refusal names each migration, operation and the storage at stake with its remedy,
+and nothing is migrated. Implement required data cutovers as reviewed migrations:
+keep the storage, or move its data and [declare the drop](#declare-an-intended-drop).
+Integrations exempt rows they retire with `MigrationPolicy`. Proving an unindexed
+column empty scans its table.
 
-Ordinary and double-quoted identifiers use Django's backend interpretation.
-PostgreSQL checks account for quoted case, explicit schemas and `search_path`;
-SQLite checks use its native case and temporary-table visibility rules. Attached
-SQLite databases, unsupported quoting or namespaces, excessive identifier lengths
-and otherwise unprovable identity refuse the automatic safety proof. Use reviewed
-explicit migrations for these cases. Other backends retain native introspection
-with conservative refusal of uncertain identity; the real-backend regression
-coverage is SQLite and PostgreSQL.
+On upgrade, a host whose unapplied history removes storage that still holds
+data is refused at `migrate` and `provision` until each named removal is reviewed.
+
+### Declare an intended drop
+
+A migration may first move data elsewhere and then remove the old storage, which
+still holds that data when `migrate` starts. Declare that drop by writing the
+removal with `IntendedRemoveField` or `IntendedDeleteModel` from
+`django_compose.operations` instead of the native operation:
+
+```python
+from django.db import migrations
+from django_compose.operations import IntendedRemoveField
+
+
+def move_prices(apps, schema_editor):
+    Item = apps.get_model("catalog", "Item")
+    Price = apps.get_model("catalog", "Price")
+    alias = schema_editor.connection.alias
+    Price._base_manager.using(alias).bulk_create(
+        Price(item_id=pk, amount=amount)
+        for pk, amount in Item._base_manager.using(alias).values_list("pk", "price")
+    )
+
+
+class Migration(migrations.Migration):
+    dependencies = [("catalog", "0007_price")]
+    operations = [
+        migrations.RunPython(move_prices, migrations.RunPython.noop),
+        IntendedRemoveField(model_name="item", name="price"),
+    ]
+```
+
+A declaration covers only its own operation; other removals in the same migration,
+or the same storage removed by another migration, remain guarded. Operations that
+drop no stored data, such as `RemoveConstraint`, stay native. A `RunPython` that
+copies data may leave the source holding it: the declaration is what allows the drop.
+The import becomes part of retained history; the module imports only Django.
+
+`makemigrations` keeps refusing to autodetect a drop while an eligible database still
+holds the data. Author the cutover migration first, for example from
+`makemigrations --empty`, so the models and history agree.
+
+### History cutoffs
 
 `retire_history <label>` is an explicit cutoff for a history-only app. It requires
 consistent, fully applied history across the configured databases selected by
@@ -213,10 +248,12 @@ Its optional `--purge` authors and applies a final native deletion migration
 across the same database scope before retirement. It refuses deletion of tables
 still owned by active models before authoring or applying changes. A failed
 application retains that migration for retry and does not mark retirement
-complete. Successful retirement updates the build record under the normal writer
-lock; the next compose removes the history-only configuration. Removing the
-retired migration package from version control is a separate coordinated cutoff
-decision.
+complete. The purge is the explicit decision to drop that data, applied on each
+deployment with `retire_history <label> --purge`; the [drop guard](SPEC.md#drop-guard)
+states how `migrate` treats a pending purge migration. Successful
+retirement updates the build record under the normal writer lock; the next
+compose removes the history-only configuration. Removing the retired migration
+package from version control is a separate coordinated cutoff decision.
 
 `reset_migration_history` replaces an explicitly selected, fully applied,
 model-clean history with fresh initial migrations. It refuses unsafe cross-app

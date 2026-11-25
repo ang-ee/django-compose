@@ -112,6 +112,7 @@ def expect(error, text, action):
         action()
     except error as caught:
         assert text in str(caught), str(caught)
+        return caught
     else:
         raise AssertionError("expected " + text)
 """
@@ -140,6 +141,54 @@ def expect(error, text, action):
         return result
 
     return tmp_path, run
+
+
+def test_checking_native_history_leaves_the_operations_migrate_then_applies(host):
+    root, run = host
+    # Django's ProjectState.rename_field rewrites in place the fields that reference a
+    # renamed field, and every loader's migrations share their modules' operations. The
+    # check builds the whole graph's state before provision migrates in the same process.
+    write(
+        root,
+        "history/alpha/0002_items.py",
+        """
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    dependencies = [("alpha", "0001_origin")]
+    operations = [
+        migrations.CreateModel(name="Target", fields=[
+            ("id", models.AutoField(primary_key=True, serialize=False)),
+            ("code", models.CharField(max_length=10, unique=True))]),
+        migrations.CreateModel(name="Item", fields=[
+            ("id", models.AutoField(primary_key=True, serialize=False)),
+            ("target", models.ForeignKey("alpha.Target", models.SET_NULL, to_field="code", null=True))]),
+        migrations.RenameField(model_name="target", old_name="code", new_name="code2"),
+    ]
+""",
+    )
+    write(
+        root,
+        "alpha/models.py",
+        """
+from django.db import models
+class Record(models.Model):
+    id = models.AutoField(primary_key=True)
+    old = models.CharField(max_length=40, default="")
+class Target(models.Model):
+    id = models.AutoField(primary_key=True)
+    code2 = models.CharField(max_length=10, unique=True)
+class Item(models.Model):
+    id = models.AutoField(primary_key=True)
+    target = models.ForeignKey(Target, models.SET_NULL, to_field="code2", null=True)
+""",
+    )
+    run("""
+check_native_history(apps, labels=("alpha",))
+call_command("migrate", interactive=False, verbosity=0)
+with connection.cursor() as cursor:
+    described = connection.introspection.get_table_description(cursor, "alpha_target")
+assert [column.name for column in described] == ["id", "code2"]
+""")
 
 
 @pytest.mark.parametrize("state", ["missing", "dirty", "clean", "disabled"])

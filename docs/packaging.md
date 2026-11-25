@@ -111,6 +111,20 @@ For projects with database preparation hooks or a readiness gate, use
 [`provision`](provisioning.md) instead; it runs native migration application as
 part of the verified sequence and records completion for the selected alias.
 
+Both apply the [drop guard](SPEC.md#drop-guard) to the history the project owns:
+a refusal means a pending migration would drop stored data, or that the guard cannot
+prove it would not, and the release needs that migration reviewed before it proceeds.
+Purging a retired app's data is a separate decision on each deployment. On a deployment
+that should drop that data, apply the reviewed history first, then run:
+
+```sh
+python manage.py retire_history <label> --purge
+```
+
+`migrate` and `provision` refuse a pending purge migration while its tables hold rows,
+as they refuse any undeclared drop of stored data; see the
+[drop guard](SPEC.md#drop-guard).
+
 Use Django's normal database selection and your project's rollout procedure for
 multiple databases. `compose --check` validates build/history agreement; it does
 not replace migration application or verify all database aliases are up to date.

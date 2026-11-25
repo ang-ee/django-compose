@@ -15,6 +15,7 @@ from typing import Any, cast
 
 from django.apps import apps
 from django.apps.registry import Apps
+from django.core import checks
 from django.core.exceptions import ValidationError
 from django.core.management import call_command, get_commands, load_command_class
 from django.core.management.base import BaseCommand, CommandError, OutputWrapper
@@ -26,16 +27,17 @@ from django.db.models.signals import post_migrate
 from django.utils.functional import classproperty
 from django.utils.timezone import now
 
+from django_compose.management import unguarded_commands
 from django_compose.serving import receipt_lease, verified_receipt
 
 PROVISION_LOCK = 0x416E676565507276
-TABLE = "django_compose_provision"
-LEGACY_TABLE = "base_provision"
 
 
 class ProvisionRecorder:
     """Bootstrap infrastructure outside the installed model/migration registry."""
 
+    # The record's table name before its rename; ``provision --upgrade-from`` renames it.
+    legacy_table = "base_provision"
     _record_class: Any = None
 
     @classproperty
@@ -53,11 +55,11 @@ class ProvisionRecorder:
 
                 class Meta:
                     apps = Apps()
-                    app_label = TABLE
-                    db_table = TABLE
+                    db_table = "django_compose_provision"
+                    app_label = db_table
                     managed = False
                     constraints = [
-                        models.CheckConstraint(condition=models.Q(id=1), name=f"{TABLE}_singleton")
+                        models.CheckConstraint(condition=models.Q(id=1), name=f"{db_table}_singleton")
                     ]
 
             cls._record_class = Record
@@ -72,14 +74,14 @@ class ProvisionRecorder:
 
     def validate_tables(self) -> set[str]:
         tables = self.tables()
-        if LEGACY_TABLE in tables:
-            if TABLE in tables:
+        if self.legacy_table in tables:
+            if self.Record._meta.db_table in tables:
                 raise CommandError(
                     "Both provision tables exist; resolve the ambiguous state before provisioning"
                 )
             raise CommandError(
-                "Legacy base_provision exists; stop old provisioners and run provision "
-                "--upgrade-from base_provision"
+                f"Legacy {self.legacy_table} exists; stop old provisioners and run provision "
+                f"--upgrade-from {self.legacy_table}"
             )
         return tables
 
@@ -89,21 +91,21 @@ class ProvisionRecorder:
 
     def ensure_schema(self, upgrade_from: str | None = None) -> None:
         tables = self.tables()
-        if TABLE in tables and LEGACY_TABLE in tables:
+        if self.Record._meta.db_table in tables and self.legacy_table in tables:
             self.validate_tables()
-        if LEGACY_TABLE in tables and upgrade_from == LEGACY_TABLE:
+        if self.legacy_table in tables and upgrade_from == self.legacy_table:
             # Commit invalidation before publishing the new name: readiness readers
             # do not take the advisory lock, even on transactional-DDL backends.
             if self.connection.in_atomic_block or not self.connection.get_autocommit():
                 raise CommandError("Provision upgrade requires an independent autocommit statement")
             with self.connection.cursor() as cursor:
-                columns = self.connection.introspection.get_table_description(cursor, LEGACY_TABLE)
+                columns = self.connection.introspection.get_table_description(cursor, self.legacy_table)
                 expected = {field.column for field in self.Record._meta.local_fields}
                 if {column.name for column in columns} != expected:
                     raise CommandError(
                         "Legacy provision table has an unexpected schema; reconcile it before upgrade"
                     )
-                table = self.connection.ops.quote_name(LEGACY_TABLE)
+                table = self.connection.ops.quote_name(self.legacy_table)
                 cursor.execute(f"SELECT id, state, digest, compiler, updated FROM {table}")
                 rows = cursor.fetchall()
                 if len(rows) > 1 or any(
@@ -134,14 +136,18 @@ class ProvisionRecorder:
                     ("in_progress",),
                 )
             with self.connection.schema_editor() as editor:
-                editor.alter_db_table(self.Record, LEGACY_TABLE, TABLE)
+                editor.alter_db_table(self.Record, self.legacy_table, self.Record._meta.db_table)
             return
-        if TABLE not in self.validate_tables():
+        if self.Record._meta.db_table not in self.validate_tables():
             with self.connection.schema_editor() as editor:
                 editor.create_model(self.Record)
 
     def read(self) -> Any:
-        return self.records.filter(pk=1).first() if TABLE in self.validate_tables() else None
+        return (
+            self.records.filter(pk=1).first()
+            if self.Record._meta.db_table in self.validate_tables()
+            else None
+        )
 
     def write(self, state: str, digest: str, compiler: str) -> None:
         if self.connection.in_atomic_block or not self.connection.get_autocommit():
@@ -262,6 +268,18 @@ def run(command: BaseCommand, options: dict[str, Any]) -> None:
         command.stdout.write(command.style.SUCCESS("provision: ready"))
         return
     verified_receipt()
+    # Before any database work: a shadowing migrate would run unguarded, and the commands'
+    # system checks, unless silenced, would fail the final check only after migrating. The
+    # specification's "Drop guard" section states this.
+    problems = [problem for name, problem in unguarded_commands().items() if name == "migrate"]
+    problems.extend(
+        str(message.msg)
+        for message in checks.run_checks(tags=[checks.Tags.commands])
+        if message.is_serious() and not message.is_silenced()
+    )
+    if problems:
+        # Django's check registry keeps no order, so the problems are listed sorted.
+        raise CommandError("provision: " + "; ".join(sorted(set(problems))))
     connection = connections[using]
     if connection.in_atomic_block or (connection.connection is not None and not connection.get_autocommit()):
         raise CommandError("Provision requires an independent autocommit connection")
@@ -337,8 +355,8 @@ def run_step(command: BaseCommand, step: list[str]) -> None:
     command.stdout.flush()
     try:
         subcommand = load_command_class(get_commands()[step[0]], step[0])
-        checks = {"skip_checks": "--skip-checks" in step} if subcommand.requires_system_checks else {}
-        call_command(subcommand, *step[1:], stdout=command.stdout, stderr=command.stderr, **checks)
+        policy = {"skip_checks": "--skip-checks" in step} if subcommand.requires_system_checks else {}
+        call_command(subcommand, *step[1:], stdout=command.stdout, stderr=command.stderr, **policy)
     except SystemExit as error:
         if error.code not in (None, 0):
             raise CommandError(f"provision: step '{label}' failed (exit {error.code})") from error
