@@ -18,11 +18,11 @@ Current boundaries and remaining verification:
 - `ProvisionRecorder.legacy_table` names `base_provision`, a consumer's legacy table,
   for `provision --upgrade-from`, although this package names no consumer. Retire the
   option, and that name, once the cutover window closes.
-- The drop guard refuses a table drop inside a render window, where Django cannot render
-  afresh the state just before the drop, as the [drop guard](SPEC.md#drop-guard) states.
-  Rendering a copy of that state with its dangling relations set aside would read the
-  dropped model's tables and their owners, and lift that refusal. The generated cases
-  that reach it are fuzz seeds 22113, 22684, 22841, 22964 and 23135 on a database that
-  stores nothing, and the round-9 render-window probes; no real history scanned does.
+- On a database that stores nothing, the drop guard refuses a table drop inside a render
+  window: where Django cannot render afresh the state just before the drop, as between a
+  history's deletion of a model another model still references and its removal of that
+  reference, the guard cannot read the dropped model's tables or who owns them, as the
+  [drop guard](SPEC.md#drop-guard) states. Rendering a copy of that state with its
+  dangling relations set aside would read them, and lift that refusal.
 
 Changes to a public contract use the [proposal process](proposals/README.md).
