@@ -46,35 +46,36 @@ choices behind it.
   removal and addition, and refused Django's own make-nullable-then-remove; letting the
   plan's definition say whether a column holds data lost the rows of one that a
   state-only redefinition made generated.
-- **Refuse what the walk cannot account for.** The walk uses the graph native
-  `migrate` planned with, including for a squash-replaced target; a planned migration
-  it cannot follow is refused. Storage absent before the plan is the plan's own only
-  where a native creation of the plan adds it, and a vacated name only once a native
-  operation fills it again. Treating all absent storage, or every vacated name, as
-  the plan's own was rejected: a `RunSQL` rename then left the renamed, populated
-  storage to a later native drop unprobed. Custom SQL that moves storage under a name
-  the walk accounts for is not detected, since that needs parsing SQL; the
-  specification states that class. Whatever the walk raises where its state can still
-  move, rendering or reading it, leaves it blind: it moves the state on as Django does,
-  follows no name and proves nothing, and refuses every judged removal that would need
-  either, any table drop and, where data is stored, any undeclared removal; at each
-  later migration it tries a fresh render, and where one succeeds it reads its state
-  again, telling the owners of the tables it drops from names alone. A state it cannot
-  copy or move forward ends it, and every judged removal from there on is refused.
-  Deciding blind or ended by which line raised was rejected: the same window ended one
-  walk, which had rendered in place, and left another blind. Naming, as the migration
-  to migrate to first, the one where the walk went blind was rejected: native `migrate`
-  renders afresh the state it starts from, so a window spanning migrations left a
-  database no `migrate` could start from; the remedy names only one native `migrate`
-  can start after. Both outcomes are classified as every other refusal is. Judging on
-  past a render failure by the names
-  before the plan was rejected: a native rename after it moved stored data under a
-  name the walk probed as it was before the plan. Ending the walk at a render failure
-  was rejected too: it refused declared drops, and column removals where nothing is
-  stored, which need neither a rendering nor a proof, on every test database. Refusing
-  the operation where the walk stopped was rejected: it named a migration the project
-  cannot edit, blamed the project's own history for another app's, and refused a plan
-  without guarded drops.
+- **Refuse what the walk cannot account for.** The walk uses the graph native `migrate`
+  planned with, including for a squash-replaced target; a planned migration it cannot
+  follow is refused. Storage absent before the plan is the plan's own only where a
+  native creation of the plan adds it, and a vacated name only once a native operation
+  fills it again. Treating all absent storage, or every vacated name, as the plan's own
+  was rejected: a `RunSQL` rename then left the renamed, populated storage to a later
+  native drop unprobed. Custom SQL that moves storage under a name the walk accounts for
+  is not detected, since that needs parsing SQL; the specification states that class.
+  Whatever the walk raises where its state can still move, rendering or reading it,
+  leaves it blind: it moves the state on as Django does, follows no name and proves
+  nothing, and refuses every judged removal that would need either, any table drop and,
+  where data is stored, any undeclared removal; at each later migration it tries a fresh
+  render, and where one succeeds it reads its state again, telling the owners of the
+  tables it drops from names alone. A state it cannot copy or move forward ends it, and
+  every judged removal from there on is refused; where it could not copy an operation,
+  which native `migrate` never copies, the remedy names that migration to migrate to
+  first, where native `migrate` can start after it. Deciding blind or ended by which
+  line raised was rejected: the same window ended one walk, which had rendered in place,
+  and left another blind. Naming, as the migration to migrate to first, the one where
+  the walk went blind was rejected: native `migrate` renders afresh the state it starts
+  from, so a window spanning migrations left a database no `migrate` could start from;
+  the remedy names only one native `migrate` can start after. Both outcomes are
+  classified as every other refusal is. Judging on past a render failure by the names
+  before the plan was rejected: a native rename after it moved stored data under a name
+  the walk probed as it was before the plan. Ending the walk at a render failure was
+  rejected too: it refused declared drops, and column removals where nothing is stored,
+  which need neither a rendering nor a proof, on every test database. Refusing the
+  operation where the walk stopped was rejected: it named a migration the project cannot
+  edit, blamed the project's own history for another app's, and refused a plan without
+  guarded drops.
 - **Render in place until a relation changes.** The walk keeps its state unrendered
   until it first needs a model, at a guarded removal or a rename that can change a
   storage name, renders it there in place, and lets Django's incremental reload keep
@@ -133,10 +134,9 @@ choices behind it.
   system checks, as the specification states. Checking only the `migrate` it runs was
   rejected: its final system check then failed on a shadowing `makemigrations` after
   migrating. Refusing a shadowing `makemigrations` whatever the settings was rejected
-  too: `provision` never runs it, and a host that ships its own and silences the
-  checks provisions as Django's check framework allows. The receiver wraps `execute`,
-  not `handle`, so a
-  subclass that replaces `handle` keeps the guard.
+  too: `provision` never runs it, and a host that ships its own and silences the checks
+  provisions as Django's check framework allows. The receiver wraps `execute`, not
+  `handle`, so a subclass that replaces `handle` keeps the guard.
 - **Out of scope.** Backwards plans name an explicit target, and the authoring guard
   never covered them. `--fake` runs no operations. `RunSQL` and custom database code
   are not parsed; the specification states what that leaves undetected, and lists the

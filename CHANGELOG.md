@@ -22,8 +22,8 @@
 - `django_compose.provision.TABLE` and `LEGACY_TABLE` are gone: the provision record's
   table name is `ProvisionRecorder.Record._meta.db_table`, read from the model that owns
   it, and the name `provision --upgrade-from` renames is `ProvisionRecorder.legacy_table`.
-- The drop guard proves storage empty with one EXISTS query and counts rows only for a
-  refusal. On a database that stores data it walks and renders the whole pending plan
+- The drop guard proves storage empty with one EXISTS query, or two for a column of a
+  table that holds rows, and counts rows only for a refusal. On a database that stores data it walks and renders the whole pending plan
   before the first operation, so `migrate` there takes longer on a large plan: a few
   seconds for two hundred pending migrations of a composed host on an idle machine,
   several times that on a loaded one.

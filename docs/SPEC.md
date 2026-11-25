@@ -582,8 +582,10 @@ At `migrate`:
   gives it, on a model that migrates on the alias, under which its rows were written,
   whatever the plan redefines in any form or under any name: its class, `null`,
   `default` or `db_default`, from which Django derives its default, or whether it is
-  generated. A table without rows proves every column empty without any default. Where
-  the table holds rows, the guard calls the callable `default` of each such definition
+  generated. A table without rows proves every column such a definition stores in it
+  empty without any default; a column no field of that state is stored in stays unproved,
+  rows or none. Where the table holds rows, the guard calls the callable `default` of
+  each such definition
   once for each column it proves, at `pre_migrate`: that runs the history's code before
   the plan, and what it writes stays written even where the plan is refused. A column
   generated before the plan holds no data of its own, while one the
@@ -644,7 +646,8 @@ At `migrate`:
   the plan is stored in needs the plan to start after the migration that gives it one:
   where a native creation of the plan names that storage, the refusal names its
   migration, as `migrate <app> <migration> --fake-initial` where that is an initial
-  migration, whose tables `--fake-initial` adopts, and otherwise asks for the migration
+  migration, whose tables `--fake-initial` adopts, and native `migrate` can start after
+  it, and otherwise asks for the migration
   that gives the storage its model. A plan that starts between the two halves of
   Django's documented move of a model between apps, after the old app's state-only
   deletion and before the new app's state-only creation, meets such columns too, and
@@ -656,7 +659,10 @@ At `migrate`:
   way, since native `migrate` copies no operation. Either is named only where native
   `migrate` can start after it: copies of the operations that migration needs, the one
   that cannot be copied stepped itself, applied to the state before the plan, render
-  afresh, as native `migrate` renders the state it starts from before it plans. Every
+  afresh, as native `migrate` renders the state it starts from before it plans. Where
+  migrating there first would apply a migration whose removal the same refusal refuses,
+  the remedy says to resolve those removals first. `retire_history --purge` names the
+  rest of a retired label's chain to migrate first under the same check. Every
   other refusal a stopped walk makes needs the history changed: a removal it cannot
   read, ordered to come where the state renders; a table drop whose owners at the end
   of the plan it cannot tell, ordered so that the state renders there; and after the
