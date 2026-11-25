@@ -1831,6 +1831,81 @@ assert not applied()
     )
 
 
+def test_the_two_step_remedy_is_not_offered_where_native_migrate_could_not_start(host):
+    root, run = host
+    # 0003 deletes Tag by state alone while Record.tag points at it; 0004_b closes that window,
+    # but 0004_a, which the plan applies after it, does not depend on it. 0004_a opens and closes
+    # a window of its own, in which the walk goes blind at a declared drop, and its state renders
+    # again after 0004_a. Migrating to 0004_a first would apply 0003 without 0004_b, leaving a
+    # state native migrate cannot start from, so the remedy for 0005's removal of an empty
+    # column asks for the history ordered instead.
+    atag = 'models.ForeignKey("alpha.ATag", models.SET_NULL, null=True, db_constraint=False)'
+    tagged = [created("Tag"), created("ATag"), add_field("tag", TAGGED), add_field("atag", atag)]
+    migration(root, "0002_tag", [*tagged, add_field("spare"), add_field("extra")])
+    migration(root, "0003_open", [state_only('migrations.DeleteModel(name="Tag")')], after="0002_tag")
+    migration(root, "0004_b_close", [state_only(remove_field("tag"))], after="0003_open")
+    window = [
+        state_only('migrations.DeleteModel(name="ATag")'),
+        add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)'),
+        'IntendedRemoveField(model_name="record", name="spare")',
+        state_only(remove_field("atag")),
+    ]
+    migration(root, "0004_a_window", window, after="0003_open")
+    write(
+        root,
+        "history/alpha/0005_drop.py",
+        f"""
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    dependencies = [("alpha", "0004_b_close"), ("alpha", "0004_a_window")]
+    operations = [{remove_field("extra")}]
+""",
+    )
+    run(
+        PRELUDE
+        + """
+seed("0002_tag", old="kept")
+blind = "alpha.0005_drop (Remove field extra from record): cannot render the migration state at "
+caught = expect(CommandError, blind + "alpha.0004_a_window", migrate)
+assert "migrate alpha 0004_a_window first" not in str(caught), str(caught)
+expect(CommandError, "To proceed, order the history so that each removal named here comes where", migrate)
+assert ("alpha", "0003_open") not in applied()
+"""
+    )
+
+
+def test_a_table_drop_after_the_walk_reads_its_state_again_keeps_a_shared_table(host):
+    root, run = host
+    # After alpha's window closes and the walk reads its state again, beta deletes Thing,
+    # whose table Shadow, adopted by state alone, still owns: the shared-table rule refuses
+    # it, from names alone, as it would where the walk never went blind.
+    beta(root, "0001_thing", [created("Thing"), state_only(created("Shadow", db_table="beta_thing"))])
+    migration(root, "0002_tag", [created("Tag"), created("Spare"), add_field("tag", TAGGED)])
+    plan = [
+        'migrations.DeleteModel(name="Tag")',
+        add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)'),
+        'migrations.DeleteModel(name="Spare")',
+        state_only(remove_field("tag")),
+    ]
+    migration(root, "0003_plan", plan, after="0002_tag")
+    beta(
+        root,
+        "0002_drop",
+        ['migrations.DeleteModel(name="Thing")'],
+        [("beta", "0001_thing"), ("alpha", "0003_plan")],
+    )
+    run(
+        PRELUDE
+        + """
+import django_compose.migrations as guard
+guard._guarded = lambda labels: frozenset(labels) - {"alpha"}
+refusal = "beta.0002_drop (Delete model Thing): table 'beta_thing' is still owned by beta.shadow on 'default'"
+expect(CommandError, refusal, migrate)
+assert not applied()
+"""
+    )
+
+
 @pytest.mark.parametrize("database", ["fresh", "populated"])
 @pytest.mark.parametrize("where", ["before", "after"])
 def test_a_table_drop_around_a_render_window_is_judged_where_the_state_renders_again(host, where, database):
@@ -3462,6 +3537,47 @@ else:
     remedy = "To proceed, migrate first to the migration that gives that storage its model, then migrate."
 expect(CommandError, remedy, lambda: migrate(fake_initial=True))
 assert not applied()
+"""
+    )
+
+
+def test_a_walk_that_kept_a_rendering_reads_its_state_again_only_where_it_renders_afresh(host):
+    root, run = host
+    # As above, where the window spans migrations, on a database that stores nothing: the
+    # walk that follows names cannot read which tables every model owns at the deletion of
+    # Spare, with a rendering in hand from following a removal just before. After 0003 that
+    # rendering would still serve, but a fresh render does not until 0005 ends the window,
+    # so the deletion of Other in 0004 is refused for what 0003 raised.
+    link = '("{0}", models.ForeignKey("alpha.{0}", models.CASCADE))'
+    tags = add_field("tags", 'models.ManyToManyField("alpha.Tag", through="alpha.Link")')
+    migration(
+        root,
+        "0002_tags",
+        [
+            created("Tag"),
+            created("Spare"),
+            created("Other"),
+            f'migrations.CreateModel(name="Link", fields=[{KEY}, {link.format("record")}, '
+            f"{link.format('tag')}])",
+            tags,
+            add_field("gone", 'models.CharField(max_length=5, default="")'),
+        ],
+    )
+    window = [
+        remove_field("gone"),
+        state_only('migrations.DeleteModel(name="Link")'),
+        add_field("x", "models.CharField(max_length=5, null=True)"),
+        'migrations.DeleteModel(name="Spare")',
+    ]
+    migration(root, "0003_window", window, after="0002_tags")
+    migration(root, "0004_other", ['migrations.DeleteModel(name="Other")'], after="0003_window")
+    migration(root, "0005_close", [state_only(remove_field("tags"))], after="0004_other")
+    run(
+        PRELUDE
+        + """
+refusal = "alpha.0004_other (Delete model Other): cannot read the migration state at alpha.0003_window ("
+expect(CommandError, refusal, migrate)
+assert ("alpha", "0003_window") not in applied()
 """
     )
 
