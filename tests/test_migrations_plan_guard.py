@@ -1922,6 +1922,45 @@ assert ("beta", "0002_drop") in applied()
     )
 
 
+def test_a_remedy_names_the_database_it_migrates(host):
+    root, run = host
+    # As above, where migrate runs on another alias: the two-step remedy, followed as
+    # written, migrates that alias, and the default one is left as it was.
+    migration(root, "0002_tag", [created("Tag"), created("Spare"), add_field("tag", TAGGED)])
+    plan = [
+        'migrations.DeleteModel(name="Tag")',
+        add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)'),
+        'migrations.DeleteModel(name="Spare")',
+        state_only(remove_field("tag")),
+    ]
+    migration(root, "0003_plan", plan, after="0002_tag")
+    write(root, "history/beta/0001_item.py", ITEM)
+    beta(
+        root,
+        "0002_drop",
+        ['migrations.RemoveField(model_name="item", name="spare")'],
+        [("beta", "0001_item"), ("alpha", "0003_plan")],
+    )
+    run(
+        PRELUDE
+        + """
+import django_compose.migrations as guard
+guard._guarded = lambda labels: frozenset(labels) - {"alpha"}
+connections.settings["other"] = {**settings.DATABASES["default"], "NAME": "other.sqlite3"}
+seed("0002_tag", alias="other")
+MigrationExecutor(connections["other"]).migrate([("beta", "0001_item")])
+remedy = (
+    "To proceed, migrate alpha 0003_plan --database other first, after which the migration state "
+    "renders again, then migrate --database other."
+)
+expect(CommandError, remedy, lambda: migrate(database="other"))
+migrate("alpha", "0003_plan", database="other")
+migrate(database="other")
+assert ("beta", "0002_drop") in applied("other") and not applied()
+"""
+    )
+
+
 @pytest.mark.parametrize("chain", ["removed_renamed_removed", "rotated"])
 def test_a_native_rename_after_the_walk_ends_cannot_move_data_under_a_name_it_probes(host, chain):
     root, run = host

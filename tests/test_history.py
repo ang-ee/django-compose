@@ -169,7 +169,7 @@ class Migration(migrations.Migration):
 executor = MigrationExecutor(connection)
 executor.migrate([("alpha", "0001_origin")])
 expect(RuntimeError, "purge applies only 'alpha' history; first apply the rest of its chain with "
-       "migrate beta 0001_pending --database default",
+       "migrate beta 0001_pending",
        lambda: retire_history("alpha", purge=True))
 assert not updated.called
 applied = MigrationExecutor(connection).loader.applied_migrations

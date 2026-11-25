@@ -721,13 +721,20 @@ def _initial(migration: Migration) -> bool:
     return bool(migration.initial)
 
 
-def _adopt(creating: Migration | None) -> str:
+def _migrate(alias: str, *arguments: str) -> str:
+    """The ``migrate`` command a remedy names, with ``arguments``, on ``alias``."""
+    database = () if alias == DEFAULT_DB_ALIAS else ("--database", alias)
+    return " ".join(("migrate", *arguments, *database))
+
+
+def _adopt(creating: Migration | None, alias: str) -> str:
     """The remedy for stored rows that the state before the plan defines no field for:
     migrate first to ``creating``, the migration whose native creation of the plan names
-    that storage, with ``--fake-initial`` where it adopts existing tables."""
+    that storage, with ``--fake-initial`` where it adopts existing tables, on ``alias``."""
+    then = _migrate(alias)
     if creating is None or not _initial(creating):
-        return "migrate first to the migration that gives that storage its model, then migrate"
-    return f"migrate {creating.app_label} {creating.name} --fake-initial first, then migrate"
+        return f"{then} first to the migration that gives that storage its model, then {then}"
+    return f"{_migrate(alias, creating.app_label, creating.name, '--fake-initial')} first, then {then}"
 
 
 class _End(Exception):
@@ -1351,9 +1358,10 @@ class _Walk:
             self._restartable[restart] = self._restarts(restart)
         if not self._restartable[restart]:
             return refusal._replace(remedy=_RENDER, restart=None)
+        alias = self.connection.alias
         remedy = (
-            f"migrate {restart.app_label} {restart.name} first, after which the migration state "
-            "renders again, then migrate"
+            f"{_migrate(alias, restart.app_label, restart.name)} first, after which the migration "
+            f"state renders again, then {_migrate(alias)}"
         )
         return refusal._replace(remedy=remedy, restart=None)
 
@@ -1467,7 +1475,9 @@ class _Walk:
             and field.db_parameters(connection=self.connection)["type"] is not None
         ]
         if not definitions:
-            raise _Undefined("the state before the plan defines no field stored in it", _adopt(creating))
+            raise _Undefined(
+                "the state before the plan defines no field stored in it", _adopt(creating, alias)
+            )
         empty = [(field.generated, None if field.generated else _empty(field)) for _, field in definitions]
         if any(type(value[1]) is not type(empty[0][1]) or value != empty[0] for value in empty):
             raise _Undefined(
@@ -1940,10 +1950,7 @@ def retire_history(label: str, *, purge: bool = False) -> None:
                 if foreign:
                     raise RuntimeError(
                         f"purge applies only {label!r} history; first apply the rest of its chain with "
-                        + "; ".join(
-                            f"migrate {app} {name} --database {alias}"
-                            for app, name in sorted(foreign.items())
-                        )
+                        + "; ".join(_migrate(alias, app, name) for app, name in sorted(foreign.items()))
                     )
                 executor.migrate(targets, plan=plan)
         _fully_applied({label}, aliases)
