@@ -1792,6 +1792,45 @@ assert not applied()
     )
 
 
+def test_a_blind_walk_tries_to_read_its_state_again_after_each_migration(host):
+    root, run = host
+    # In one migration of the project's own: deleting Tag while Record.tag points at it and
+    # adding a relation leaves the state unrenderable afresh, so the deletion of Spare cannot
+    # be read. The state-only removal of tag lets it render again, but the walk tries only
+    # after the migration, as native migrate starts only there: Thing's deletion later in
+    # the same migration is refused too, while Other's, in the next one, is judged.
+    migration(
+        root,
+        "0002_tag",
+        [created("Tag"), created("Spare"), created("Thing"), created("Other"), add_field("tag", TAGGED)],
+    )
+    plan = [
+        'migrations.DeleteModel(name="Tag")',
+        add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)'),
+        'migrations.DeleteModel(name="Spare")',
+        state_only(remove_field("tag")),
+        'migrations.DeleteModel(name="Thing")',
+    ]
+    migration(root, "0003_plan", plan, after="0002_tag")
+    migration(root, "0004_drop", ['migrations.DeleteModel(name="Other")'], after="0003_plan")
+    run(
+        PRELUDE
+        + """
+try:
+    migrate()
+except CommandError as error:
+    refusal = str(error)
+else:
+    raise AssertionError("expected a refusal")
+blind = ": cannot render the migration state at alpha.0003_plan (ValueError: "
+assert "alpha.0003_plan (Delete model Spare)" + blind in refusal, refusal
+assert "alpha.0003_plan (Delete model Thing)" + blind in refusal, refusal
+assert "Delete model Other" not in refusal and "Delete model Tag" not in refusal, refusal
+assert not applied()
+"""
+    )
+
+
 @pytest.mark.parametrize("database", ["fresh", "populated"])
 @pytest.mark.parametrize("where", ["before", "after"])
 def test_a_table_drop_around_a_render_window_is_judged_where_the_state_renders_again(host, where, database):

@@ -1209,9 +1209,8 @@ class _Walk:
         # The first exception the walk caught: the cause its refusal names.
         self.cause: Exception | None = None
         self._restartable: dict[Migration, bool] = {}
-        # The walk's state, and the state before the plan, kept where data is stored;
-        # and the fields that state stores in each column; see _written.
-        self.state: ProjectState
+        # The state before the plan, kept where data is stored, and the fields it stores
+        # in each column; see _written.
         self.before: ProjectState
         self._written_by: dict[tuple[str, str | None], list[tuple[Any, Any]]] | None = None
 
@@ -1229,21 +1228,17 @@ class _Walk:
         except Exception as error:
             raise _End(migration, error, "follow") from error
 
-    def _blinded(
-        self, migration: Migration | None, state: ProjectState, error: Exception, doing: str = "read"
-    ) -> None:
-        """Whatever rendering or reading ``state`` at ``migration`` raised leaves the walk
-        blind, if it is not already: it drops its rendering, so that Django moves the state
-        on unrendered, and reads no model until ``_resight``."""
+    def _blinded(self, migration: Migration | None, error: Exception, doing: str = "read") -> None:
+        """Whatever rendering or reading the state at ``migration`` raised leaves the walk
+        blind, if it is not already: it reads no model until ``_resight``."""
         self.blind = self.blind or _End(migration, error, doing)
         self.lost = self.lost or self.blind
         self.cause = self.cause or error
-        for moved in (state, self.state):
-            moved.__dict__.pop("apps", None)
 
     def _resight(self, migration: Migration, state: ProjectState) -> None:
         """Where the state of a blind walk renders afresh after ``migration``, the walk reads
         it again from there on, still following no name."""
+        state.__dict__.pop("apps", None)
         try:
             _render(state)
         except Exception:
@@ -1270,8 +1265,8 @@ class _Walk:
             )
         self.planned = planned
         state = _own_fields(self.executor._create_project_state(with_applied_migrations=True))  # type: ignore[attr-defined]
-        # The walk's own state, and the state before the plan until its first operation changes it.
-        self.state = self.before = state
+        # The walk's own state until its first operation changes it.
+        self.before = state
         try:
             for migration in planned:
                 with self._moving(migration):
@@ -1290,12 +1285,11 @@ class _Walk:
         """The judged table drops the shared-table rule refuses at the end of the plan.
 
         A walk that went blind tells their owners from names alone, as one that follows no
-        name does; one still blind at the end cannot tell them.
+        name does; where the state at the end of the plan does not render, it cannot tell
+        them.
         """
         if not self.drops:
             return []
-        if self.blind:
-            return self._unjudged(self.blind)
         try:
             _render(state)
         except Exception as error:
@@ -1394,7 +1388,7 @@ class _Walk:
                 self.storage.name_created(state)
             return state.apps.get_model(migration.app_label, name) if name else None
         except Exception as error:
-            self._blinded(migration, state, error, "render")
+            self._blinded(migration, error, "render")
             return None
 
     def _prove(
@@ -1546,12 +1540,12 @@ class _Walk:
                     for dropping, removal in self.drops
                 ]
             except Exception as error:
-                self._blinded(migration, state, error)
+                self._blinded(migration, error)
         removed: tuple[str, str | None] | None = None
         try:
             removed = _removal(operation) if database else None
         except Exception as error:
-            self._blinded(migration, state, error)
+            self._blinded(migration, error)
             if database and label in self.judged:
                 # What it removes cannot be told, so it is refused as a removal the walk cannot read.
                 self.refused.append(_Refused(migration, operation, _RENDER, str(self.blind)))
@@ -1575,19 +1569,19 @@ class _Walk:
                     self._rendered(migration, state)
                 before_model = self._rendered(migration, state, renamed[0]) if renamed else None
             except Exception as error:
-                self._blinded(migration, state, error)
+                self._blinded(migration, error)
                 renamed = creation = None
         if self.probe and self.lost is None and self.before is state:
             # The walk's state changes from here on; a clone keeps any rendering it has.
             try:
                 self.before = _own_fields(state.clone())
             except Exception as error:
-                self._blinded(migration, state, error)
+                self._blinded(migration, error)
         if not renamed and "apps" in state.__dict__:
             try:
                 relinks = _relinks(operation, state, label)
             except Exception as error:
-                self._blinded(migration, state, error)
+                self._blinded(migration, error)
             else:
                 if relinks:
                     # Render afresh where the walk next needs a model instead; after a
@@ -1607,7 +1601,7 @@ class _Walk:
                 # Named at the walk's next render, before anything can rename it.
                 self.storage.creating(migration, operation, creation)
         except Exception as error:
-            self._blinded(migration, state, error)
+            self._blinded(migration, error)
 
     def _read(
         self, migration: Migration, operation: Operation, state: ProjectState, removed: tuple[str, str | None]
@@ -1629,7 +1623,7 @@ class _Walk:
         try:
             drops_table = judged and _drops_table(state, label, removed)
         except Exception as error:
-            self._blinded(migration, state, error)
+            self._blinded(migration, error)
             drops_table = judged
         if self.lost is not None and self.blind is None:
             if undeclared:
@@ -1654,7 +1648,7 @@ class _Walk:
             if self.follows and operation.allow_migrate_model(self.connection.alias, routed):
                 self.storage.end(routed, removed[1])
         except Exception as error:
-            self._blinded(migration, state, error)
+            self._blinded(migration, error)
             if (drops_table or undeclared) and len(self.refused) == refused:
                 self.refused.append(_Refused(migration, operation, _RENDER, str(self.blind)))
             return
