@@ -573,7 +573,10 @@ At `migrate`:
   gives it, on a model that migrates on the alias, under which its rows were written,
   whatever the plan redefines in any form or under any name: its class, `null`,
   `default` or `db_default`, from which Django derives its default, or whether it is
-  generated. A column generated before the plan holds no data of its own, while one the
+  generated. To derive it, the guard calls the callable `default` of each such definition
+  once for each column it proves, at `pre_migrate`: that runs the history's code before the
+  plan, and what it writes stays written even where the plan is refused. A column
+  generated before the plan holds no data of its own, while one the
   plan redefines as generated still holds the rows written before it. Where no field
   of that state is stored in the column, as for a table `--fake-initial` adopts, or
   where the fields stored in it read as empty differently, the column cannot be proved

@@ -15,5 +15,8 @@ Current boundaries and remaining verification:
   Watchman daemon remains outstanding.
 - CI and publication still need one shared mandatory PostgreSQL check gate and
   exact checked-archive transfer. The migration candidate is not release-ready.
+- `ProvisionRecorder.legacy_table` names `base_provision`, a consumer's legacy table,
+  for `provision --upgrade-from`, although this package names no consumer. Retire the
+  option, and that name, once the cutover window closes.
 
 Changes to a public contract use the [proposal process](proposals/README.md).
