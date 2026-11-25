@@ -2011,6 +2011,8 @@ remedy = (
 )
 caught = expect(CommandError, remedy, migrate)
 assert "migrate alpha 0003_first first" not in str(caught), str(caught)
+# The refusal raises from what the walk caught first: the first window's dangling relation.
+assert "'alpha.tag'" in str(caught.__cause__), repr(caught.__cause__)
 """
     )
 
@@ -2213,6 +2215,28 @@ expect(CommandError, remedy, lambda: migrate(database="other"))
 migrate("alpha", "0003_plan", database="other")
 migrate(database="other")
 assert ("beta", "0002_drop") in applied("other") and not applied()
+"""
+    )
+
+
+def test_what_reading_the_end_of_the_plan_raises_refuses_the_table_drops_met(host):
+    root, run = host
+    # Where telling who owns a dropped table at the end of the plan raises, that drop is
+    # refused for it, as for a state the end of the plan cannot render.
+    migration(root, "0002_spare", [created("Spare")])
+    migration(root, "0003_drop", ['migrations.DeleteModel(name="Spare")'], after="0002_spare")
+    run(
+        PRELUDE
+        + """
+import django_compose.migrations as guard
+seed("0002_spare")
+def broken(*args, **kwargs):
+    raise RuntimeError("owners unreadable")
+guard._shared_table_drops = broken
+unowned = "alpha.0003_drop (Delete model Spare): cannot tell who owns its table at the end of the plan: "
+ended = "the walk cannot read the migration state at the end of the plan (RuntimeError: owners unreadable)"
+caught = expect(CommandError, unowned + ended, migrate)
+assert type(caught.__cause__) is RuntimeError, repr(caught.__cause__)
 """
     )
 
