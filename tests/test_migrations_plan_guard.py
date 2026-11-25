@@ -1741,6 +1741,57 @@ else:
     )
 
 
+def test_a_table_drop_after_the_walk_goes_blind_is_refused_where_nothing_is_stored(host):
+    root, run = host
+    # As above, on a database that stores nothing: who owns Thing's table at the end of the
+    # plan cannot be told once the walk is blind, so its deletion is refused. The walk that
+    # then follows names to tell whether the plan refilled that name refuses no column
+    # removal, which can lose nothing there.
+    migration(root, "0002_tag", [created("Tag"), created("Spare"), add_field("tag", TAGGED)])
+    plan = [
+        'migrations.DeleteModel(name="Tag")',
+        add_field("me", 'models.ForeignKey("alpha.Record", models.SET_NULL, null=True)'),
+        'migrations.DeleteModel(name="Spare")',
+        state_only(remove_field("tag")),
+    ]
+    migration(root, "0003_plan", plan, after="0002_tag")
+    write(root, "history/beta/0001_item.py", ITEM)
+    removals = [created("Thing"), 'migrations.RemoveField(model_name="item", name="spare")']
+    removals.append('migrations.DeleteModel(name="Thing")')
+    write(
+        root,
+        "history/beta/0002_drop.py",
+        f"""
+from django.db import migrations, models
+class Migration(migrations.Migration):
+    dependencies = [("beta", "0001_item"), ("alpha", "0003_plan")]
+    operations = [{", ".join(removals)}]
+""",
+    )
+    run(
+        PRELUDE
+        + """
+import django_compose.migrations as guard
+guard._guarded = lambda labels: frozenset(labels) - {"alpha"}
+try:
+    migrate()
+except CommandError as error:
+    refusal = str(error)
+else:
+    raise AssertionError("expected a refusal")
+blind = "cannot render the migration state at alpha.0003_plan (ValueError: "
+heading = "cannot prove migration drop safe: beta.0002_drop (Delete model Thing): "
+assert refusal.startswith(heading + blind), refusal
+assert "Remove field spare" not in refusal, refusal
+assert "To proceed, migrate alpha 0003_plan first" in refusal, refusal
+assert not applied()
+migrate("alpha", "0003_plan")
+migrate()
+assert ("beta", "0002_drop") in applied()
+"""
+    )
+
+
 @pytest.mark.parametrize("chain", ["removed_renamed_removed", "rotated"])
 def test_a_native_rename_after_the_walk_ends_cannot_move_data_under_a_name_it_probes(host, chain):
     root, run = host
@@ -3162,6 +3213,38 @@ migrate()
 with connection.cursor() as cursor:
     described = connection.introspection.get_table_description(cursor, "legacy")
 assert [column.name for column in described] == ["id"]
+"""
+    )
+
+
+def test_storage_a_later_migration_creates_over_is_not_adopted_by_fake_initial(host):
+    root, run = host
+    # As above, but the creation over the table is not an initial migration, so
+    # --fake-initial would not adopt it: the remedy names no flag.
+    note = '("note", models.CharField(max_length=10, default=""))'
+    legacy = (
+        f'migrations.CreateModel(name="Legacy", fields=[{KEY}, {note}], options={{"db_table": "legacy"}})'
+    )
+    beta(root, "0001_initial", [created("Other")])
+    beta(root, "0002_adopt", [legacy], [("beta", "0001_initial")])
+    beta(
+        root,
+        "0003_drop",
+        ['migrations.RemoveField(model_name="legacy", name="note")'],
+        [("beta", "0002_adopt")],
+    )
+    run(
+        PRELUDE
+        + """
+with connection.cursor() as cursor:
+    cursor.execute("CREATE TABLE legacy (id integer PRIMARY KEY AUTOINCREMENT, note varchar(10) NOT NULL)")
+    cursor.execute("INSERT INTO legacy (note) VALUES ('')")
+refusal = (
+    "the state before the plan defines no field stored in it). Nothing was migrated. To proceed, "
+    "migrate first to the migration that gives that storage its model, then migrate."
+)
+expect(CommandError, refusal, lambda: migrate(fake_initial=True))
+assert not applied()
 """
     )
 
