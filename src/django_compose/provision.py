@@ -355,8 +355,8 @@ def run_step(command: BaseCommand, step: list[str]) -> None:
     command.stdout.flush()
     try:
         subcommand = load_command_class(get_commands()[step[0]], step[0])
-        checks = {"skip_checks": "--skip-checks" in step} if subcommand.requires_system_checks else {}
-        call_command(subcommand, *step[1:], stdout=command.stdout, stderr=command.stderr, **checks)
+        policy = {"skip_checks": "--skip-checks" in step} if subcommand.requires_system_checks else {}
+        call_command(subcommand, *step[1:], stdout=command.stdout, stderr=command.stderr, **policy)
     except SystemExit as error:
         if error.code not in (None, 0):
             raise CommandError(f"provision: step '{label}' failed (exit {error.code})") from error

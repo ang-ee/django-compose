@@ -1643,7 +1643,9 @@ def test_a_state_the_walk_cannot_render_leaves_it_blind_and_refuses_what_it_judg
         + """
 seed("0002_tag")
 blind = "cannot render the migration state at alpha.0005_drop (ValueError: The field"
-expect(CommandError, "alpha.0005_drop (Remove field old from record): " + blind, migrate)
+caught = expect(CommandError, "alpha.0005_drop (Remove field old from record): " + blind, migrate)
+# The refusal is raised from what Django raised, so a traceback shows where.
+assert type(caught.__cause__) is ValueError, repr(caught.__cause__)
 # The state never renders again, so no table drop can be told from a kept table at the
 # end of the plan, and no migration to migrate to first can be named.
 unowned = "alpha.0003_untag (Delete model Tag): cannot tell who owns its table at the end of the plan"
@@ -1957,6 +1959,26 @@ expect(CommandError, remedy, lambda: migrate(database="other"))
 migrate("alpha", "0003_plan", database="other")
 migrate(database="other")
 assert ("beta", "0002_drop") in applied("other") and not applied()
+"""
+    )
+
+
+def test_whatever_the_guard_raises_refuses_the_plan(host):
+    root, run = host
+    # Outside a walk's own boundaries too: what the guard raises refuses the plan, naming it
+    # as the cause, and nothing is migrated.
+    migration(root, "0002_drop", [REMOVE_OLD])
+    run(
+        PRELUDE
+        + """
+import django_compose.migrations as guard
+seed(old="")
+def broken(connection):
+    raise RuntimeError("inventory failed")
+guard._stores_nothing = broken
+refusal = "the drop guard cannot judge migrate's plan on 'default' (RuntimeError: inventory failed)"
+caught = expect(CommandError, refusal, migrate)
+assert type(caught.__cause__) is RuntimeError and ("alpha", "0002_drop") not in applied()
 """
     )
 
@@ -3286,7 +3308,8 @@ else:
 def test_a_default_a_lookup_rejects_cannot_prove_a_column_empty(host, rows):
     root, run = host
     # Record.price is added with the default 0, then given the default "" by an AlterField,
-    # which runs no DDL. Judged by that definition, the query rejects its own default.
+    # which runs no DDL. Judged by that definition, the query rejects its own default; an
+    # empty table holds no data in any column, so there no default is evaluated.
     price = "models.DecimalField(max_digits=5, decimal_places=0, default={})"
     alter = f'migrations.AlterField(model_name="record", name="price", field={price.format(repr(""))})'
     migration(root, "0002_price", [add_field("price", price.format(0)), alter])
@@ -3298,13 +3321,16 @@ seed("0002_price")
 if {rows}:
     with connection.cursor() as cursor:
         cursor.execute("INSERT INTO alpha_record (old, price) VALUES ('', 5)")
-# Even an empty table is not proved empty: the proof itself cannot be built.
-refusal = (
-    "alpha.0003_drop (Remove field price from record): alpha.record: cannot prove alpha_record.price "
-    "empty on 'default' (ValidationError: "
-)
-expect(CommandError, refusal, migrate)
-assert columns() == ["id", "old", "price"]
+if {rows}:
+    refusal = (
+        "alpha.0003_drop (Remove field price from record): alpha.record: cannot prove alpha_record.price "
+        "empty on 'default' (ValidationError: "
+    )
+    expect(CommandError, refusal, migrate)
+    assert columns() == ["id", "old", "price"]
+else:
+    migrate()
+    assert columns() == ["id", "old"]
 """
     )
 
@@ -3357,6 +3383,46 @@ assert "alpha.0003_window (Delete model Spare): cannot " in refusal, refusal
 assert "AttributeError: " in refusal or "ValueError: " in refusal, refusal
 assert "0004_drop" not in refusal, refusal
 assert ("alpha", "0003_window") not in applied()
+"""
+    )
+
+
+@pytest.mark.parametrize("initial", ["True", "False"])
+def test_an_explicit_initial_flag_decides_whether_fake_initial_adopts(host, initial):
+    root, run = host
+    # As below, where beta's migrations say whether they are initial, as Django's
+    # --fake-initial reads it: only one that is adopts the table.
+    note = '("note", models.CharField(max_length=10, default=""))'
+    legacy = (
+        f'migrations.CreateModel(name="Legacy", fields=[{KEY}, {note}], options={{"db_table": "legacy"}})'
+    )
+    beta(root, "0001_initial", [created("Other")])
+    beta(root, "0002_adopt", [legacy], [("beta", "0001_initial")])
+    beta(
+        root,
+        "0003_drop",
+        ['migrations.RemoveField(model_name="legacy", name="note")'],
+        [("beta", "0002_adopt")],
+    )
+    path = root / "history/beta/0002_adopt.py"
+    path.write_text(
+        path.read_text().replace(
+            "class Migration(migrations.Migration):",
+            f"class Migration(migrations.Migration):\n    initial = {initial}",
+        )
+    )
+    run(
+        PRELUDE
+        + f"""
+with connection.cursor() as cursor:
+    cursor.execute("CREATE TABLE legacy (id integer PRIMARY KEY AUTOINCREMENT, note varchar(10) NOT NULL)")
+    cursor.execute("INSERT INTO legacy (note) VALUES ('')")
+if {initial}:
+    remedy = "To proceed, migrate beta 0002_adopt --fake-initial first, then migrate."
+else:
+    remedy = "To proceed, migrate first to the migration that gives that storage its model, then migrate."
+expect(CommandError, remedy, lambda: migrate(fake_initial=True))
+assert not applied()
 """
     )
 

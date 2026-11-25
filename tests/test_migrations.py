@@ -112,6 +112,7 @@ def expect(error, text, action):
         action()
     except error as caught:
         assert text in str(caught), str(caught)
+        return caught
     else:
         raise AssertionError("expected " + text)
 """

@@ -17,7 +17,7 @@ from typing import Any, Final, Literal, NamedTuple, cast
 from django.apps import apps as global_apps
 from django.apps.registry import Apps
 from django.conf import settings
-from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
+from django.core.exceptions import ImproperlyConfigured
 from django.core.management.base import CommandError
 from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, router, transaction
 from django.db.backends.base.base import BaseDatabaseWrapper
@@ -37,7 +37,7 @@ from django.db.migrations.recorder import MigrationRecorder
 from django.db.migrations.state import ProjectState
 from django.db.migrations.utils import field_is_referenced, get_references
 from django.db.migrations.writer import MigrationWriter
-from django.db.models import ManyToManyField, QuerySet
+from django.db.models import QuerySet
 from django.db.models.expressions import DatabaseDefault
 from django.utils.module_loading import module_dir
 
@@ -145,17 +145,17 @@ def history_labels() -> tuple[str, ...]:
     return tuple(receipt.HISTORY_LABELS)
 
 
-def _own(operation: Operation, memo: dict[int, Any]) -> Operation:
+def _own(operation: Operation) -> Operation:
     """A copy of ``operation`` for a state this package progresses itself, or ``operation``
     itself where it leaves the state as it is; see ``_leaves_state``.
 
     Django's ``ProjectState.rename_field`` rewrites in place the fields that reference a
     renamed field, and every loader's migrations share their modules' operations, which
     native ``migrate`` may apply later in the same process. An operation that changes no
-    state puts nothing into one. ``memo`` keeps what one migration's operations share
-    shared in their copies. Copying runs the history's own code, which may raise anything.
+    state puts nothing into one. Copying runs the history's own code, which may raise
+    anything.
     """
-    return operation if _leaves_state(operation) else copy.deepcopy(operation, memo)
+    return operation if _leaves_state(operation) else copy.deepcopy(operation)
 
 
 def _own_fields(state: ProjectState) -> ProjectState:
@@ -178,11 +178,10 @@ def check_native_history(apps: Apps, *, labels: Iterable[str]) -> None:
         return
     loader = MigrationLoader(None, ignore_no_migrations=True)
     for migration in loader.graph.nodes.values():
-        memo: dict[int, Any] = {}
         owned = []
         for operation in migration.operations:
             try:
-                owned.append(_own(operation, memo))
+                owned.append(_own(operation))
             except Exception:
                 # An operation that cannot be copied stays shared, as Django shares it.
                 owned.append(operation)
@@ -853,10 +852,7 @@ class _Storage:
         self._rename_table(before._meta.db_table, after._meta.db_table)
         table = self._table(after._meta.db_table)
         for field in (*before._meta.local_fields, *before._meta.local_many_to_many):
-            try:
-                now = after._meta.get_field(renamed.get(field.name, field.name))
-            except FieldDoesNotExist:
-                continue
+            now = after._meta.get_field(renamed.get(field.name, field.name))
             if field.many_to_many and now.many_to_many:
                 old, new = field.remote_field.through, now.remote_field.through
                 if old._meta.auto_created and new._meta.auto_created:
@@ -877,19 +873,16 @@ class _Storage:
     def name_created(self, state: ProjectState) -> None:
         """Name the storage each creation noted since added, from ``state`` rendered since.
 
-        Nothing is rendered while no creation is unnamed. Django creates storage only where the
-        operation migrates the model. A model or field removed in between is left
-        unnamed, so its absent storage stays refused.
+        Nothing is rendered while no creation is unnamed. Django creates storage only where
+        the operation migrates the model. The walk renders before any removal and before
+        any operation it does not follow, so a created model or field is still there.
         """
         if not self._unnamed:
             return
         for migration, operation, name, field in self._unnamed:
-            try:
-                model = state.apps.get_model(migration.app_label, name)
-                if operation.allow_migrate_model(self._alias, model):
-                    self._create(migration, model, field)
-            except LookupError, FieldDoesNotExist:
-                continue
+            model = state.apps.get_model(migration.app_label, name)
+            if operation.allow_migrate_model(self._alias, model):
+                self._create(migration, model, field)
         self._unnamed.clear()
 
     def _create(self, migration: Migration, model: Any, field: str | None) -> None:
@@ -996,18 +989,17 @@ def _relinks(operation: Operation, state: ProjectState, label: str) -> bool:
 
 def _named(field: Any) -> tuple[Any, ...]:
     """What names the storage of an unrendered ``field`` as Django's schema editor reads it:
-    its column, and for a many-to-many field its through model and, where Django creates
-    that through itself, its table name.
+    its column, and where Django creates the field's through itself, that table's name.
 
-    Only a ``ManyToManyField`` without a through gets an auto-created one, named by its
-    ``db_table``; ``alter_field`` renames only such a table and leaves a relation through an
-    explicit model alone, whatever the field's class, as for django-taggit's managers.
+    A many-to-many field without a through gets an auto-created one, named by its
+    ``db_table``; Django's schema editor creates, alters or drops none other, so only a
+    ``ManyToManyField`` gets that far. ``alter_field`` renames only such a table, refuses
+    to alter a field to or from one, and leaves a relation through an explicit model
+    alone, whatever the field's class, as for django-taggit's managers.
     """
-    if not field.many_to_many:
-        return (field.column,)
-    through = field.remote_field.through
-    created = through is None and isinstance(field, ManyToManyField)
-    return field.column, through, field.db_table if created else None
+    if field.many_to_many and field.remote_field.through is None:
+        return field.column, field.db_table
+    return (field.column,)
 
 
 def _renamed(operation: Operation, state: ProjectState, label: str) -> tuple[str, str, dict[str, str]] | None:
@@ -1214,6 +1206,8 @@ class _Walk:
         self.lost: _End | None = None
         # The latest migration after which its state rendered afresh again, once blind.
         self.restart: Migration | None = None
+        # The first exception the walk caught: the cause its refusal names.
+        self.cause: Exception | None = None
         self._restartable: dict[Migration, bool] = {}
         # The walk's state, and the state before the plan, kept where data is stored;
         # and the fields that state stores in each column; see _written.
@@ -1243,6 +1237,7 @@ class _Walk:
         on unrendered, and reads no model until ``_resight``."""
         self.blind = self.blind or _End(migration, error, doing)
         self.lost = self.lost or self.blind
+        self.cause = self.cause or error
         for moved in (state, self.state):
             moved.__dict__.pop("apps", None)
 
@@ -1281,13 +1276,13 @@ class _Walk:
             for migration in planned:
                 with self._moving(migration):
                     # Native migrate applies the planned operations after the walk.
-                    memo: dict[int, Any] = {}
-                    operations = [_own(operation, memo) for operation in migration.operations]
+                    operations = [_own(operation) for operation in migration.operations]
                 self._judge(migration, operations, state)
                 if self.blind:
                     self._resight(migration, state)
             refused = [*self.refused, *self._shared(state)]
         except _End as end:
+            self.cause = self.cause or end.error
             refused = [*self.refused, *self._ended(end)]
         return [self._remedied(refusal) for refusal in refused]
 
@@ -1304,6 +1299,7 @@ class _Walk:
         try:
             _render(state)
         except Exception as error:
+            self.cause = self.cause or error
             return self._unjudged(_End(None, error, "render"))
         try:
             if self.follows:
@@ -1318,6 +1314,7 @@ class _Walk:
                 refilled=self.storage.refilled if self.follows else None,
             )
         except Exception as error:
+            self.cause = self.cause or error
             return self._unjudged(_End(None, error, "read"))
         return [
             _Refused(self.drops[index][0], self.drops[index][1].operation, remedy, refusal, unsafe)
@@ -1375,9 +1372,8 @@ class _Walk:
             state = _own_fields(self.executor._create_project_state(with_applied_migrations=True))  # type: ignore[attr-defined]
             for migration in self.planned:
                 if (migration.app_label, migration.name) in needed:
-                    memo: dict[int, Any] = {}
                     for operation in migration.operations:
-                        _own(operation, memo).state_forwards(migration.app_label, state)
+                        _own(operation).state_forwards(migration.app_label, state)
             _render(state)
         except Exception:
             return False
@@ -1478,6 +1474,9 @@ class _Walk:
             raise _Undefined(
                 "the state before the plan defines no field stored in it", _adopt(creating, alias)
             )
+        if not QuerySet(definitions[0][0]).using(alias).exists():
+            # A table without rows holds no data in any column, whatever its fields' defaults.
+            return None
         empty = [(field.generated, None if field.generated else _empty(field)) for _, field in definitions]
         if any(type(value[1]) is not type(empty[0][1]) or value != empty[0] for value in empty):
             raise _Undefined(
@@ -1676,8 +1675,21 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
     apps whose removals it refuses are then classified, and only the history the guard
     judges is refused. Only where that history is refused does the walk run again,
     following the plan's names to see whether a native operation filled a dropped
-    table's name.
+    table's name. Whatever the guard itself raises refuses the plan, naming what was raised;
+    a refusal names as its cause the first exception the walk caught.
     """
+    try:
+        _check_plan_drops(plan, using)
+    except CommandError:
+        raise
+    except Exception as error:
+        raise CommandError(
+            f"the drop guard cannot judge migrate's plan on {using!r} ({type(error).__name__}: {error}). "
+            "Nothing was migrated."
+        ) from error
+
+
+def _check_plan_drops(plan: Sequence[tuple[Migration, bool]], using: str) -> None:
     forwards = {
         (migration.app_label, migration.name): migration for migration, backwards in plan if not backwards
     }
@@ -1695,14 +1707,16 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
         executor.loader.replace_migrations = False  # type: ignore[attr-defined]
         executor.loader.build_graph()
     policies = _policies() if probe else ()
-    refused = _Walk(executor, forwards, judged, probe=probe, follow=probe, policies=policies).run()
+    walk = _Walk(executor, forwards, judged, probe=probe, follow=probe, policies=policies)
+    refused = walk.run()
     if refused and not probe:
         classified = {migration.app_label for migration, *_ in refused}
         guarded = _guarded(classified)
         if any(migration.app_label in guarded for migration, *_ in refused):
             # Follow the plan's names to see whether a native operation filled the
             # name of a table that names alone keep owned at the end.
-            refused = _Walk(executor, forwards, judged, probe=probe, follow=True, policies=policies).run()
+            walk = _Walk(executor, forwards, judged, probe=probe, follow=True, policies=policies)
+            refused = walk.run()
             if unclassified := {migration.app_label for migration, *_ in refused} - classified:
                 guarded |= _guarded(unclassified)
         refused = [refusal for refusal in refused if refusal[0].app_label in guarded]
@@ -1717,7 +1731,7 @@ def check_plan_drops(plan: Sequence[tuple[Migration, bool]], *, using: str) -> N
                 for refusal in refused
             ),
             " Nothing was migrated.",
-        )
+        ) from walk.cause
 
 
 def _forget_history(labels: Iterable[str], *, packages: Mapping[str, Path] | None = None) -> None:
