@@ -1,14 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.1.0.dev14
 
 - Apply the [drop guard](docs/SPEC.md#drop-guard) when `migrate` runs, and so in
   `provision`, also under `--skip-checks`: a pending removal in the history the project
-  owns is refused before any operation runs where it would destroy stored data or
-  delete a table another model still owns. Previously only autodetected removals were
-  judged, at `makemigrations`, so a removal migration already on disk was applied
-  unchecked. The specification states what the guard judges, on which databases, and
-  what it leaves undetected; see
+  owns is refused before any operation runs where it would destroy stored data or delete
+  a table another model still owns, or where the guard cannot prove that it would not.
+  Previously only autodetected removals were judged, at `makemigrations`, so a removal
+  migration already on disk was applied unchecked. The specification states what the
+  guard judges, on which databases, and what it leaves undetected; see
   [proposal 0005](docs/proposals/0005-migrate-time-drop-guard.md) for the decisions.
 - Add `django_compose.operations.IntendedRemoveField` and `IntendedDeleteModel` to
   declare a drop a migration intends; see
@@ -24,8 +24,9 @@
   it, and the name `provision --upgrade-from` renames is `ProvisionRecorder.legacy_table`.
 - The drop guard proves storage empty with one EXISTS query and counts rows only for a
   refusal. On a database that stores data it walks and renders the whole pending plan
-  before the first operation, so `migrate` there takes seconds longer on a large plan:
-  about four and a half for two hundred pending migrations of a composed host.
+  before the first operation, so `migrate` there takes longer on a large plan: a few
+  seconds for two hundred pending migrations of a composed host on an idle machine,
+  several times that on a loaded one.
   Deleting a table another model still owns is refused in the same words, with the
   same remedy, at `makemigrations`, `migrate` and `retire_history --purge`.
 - `check_migrations`, and so `provision`, builds native history's state from copies of
@@ -41,7 +42,12 @@
   `IntendedDeleteModel(name=...)` in that migration. Deleting a table another model
   still owns is refused even when declared: keep the table, or change that owner
   first. A pending purge migration is refused the same way; apply it on each
-  deployment with `retire_history <label> --purge`. Any other installed app, the
+  deployment with `retire_history <label> --purge`. Where the guard cannot read the
+  migration state, as where a history leaves a relation's target undefined for a
+  while or holds an operation it cannot copy, it refuses, under `cannot prove
+  migration drop safe`, each later table drop and, on a database that stores data,
+  each later undeclared removal of the history it judges: migrate first to the
+  migration the refusal names, then migrate. Any other installed app, the
   project's or a third party's, that ships a `migrate` or `makemigrations` command now
   fails system check `django_compose.E002` and makes `provision` refuse: remove that
   command, or make it subclass this package's. A `makemigrations` that must stay, such

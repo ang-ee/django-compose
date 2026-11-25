@@ -121,7 +121,8 @@ reviewed history first, then run:
 python manage.py retire_history <label> --purge
 ```
 
-A purge authored elsewhere never runs as an ordinary migration; see the
+`migrate` and `provision` refuse a pending purge migration while its tables hold rows,
+as they refuse any undeclared drop of stored data; see the
 [drop guard](SPEC.md#drop-guard).
 
 Use Django's normal database selection and your project's rollout procedure for

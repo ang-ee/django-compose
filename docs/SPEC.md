@@ -545,15 +545,18 @@ It runs at two points on these rules:
 At `migrate`:
 
 - **Nothing stored:** an alias whose only tables are Django's migration recorder and
-  `provision`'s record, such as a fresh or test database on PostgreSQL or SQLite,
-  holds no data to lose, so the guard probes nothing and follows no rename there. Only
-  a complete inventory shows that: PostgreSQL's catalog across every schema, in which
-  a relation an extension owns, such as PostGIS's `spatial_ref_sys`, does not count,
-  or SQLite's main database with nothing attached; on other backends the guard always
-  probes. `--fake-initial` adoption finds tables, so it is probed. The shared-table
-  rule needs no data and still applies, from names alone: names only a catalog could
-  tell apart are refused. Elsewhere the catalog tells them apart only where it holds
-  both before the plan, since the plan may create a name it lacks.
+  `provision`'s record, such as a fresh or test database on PostgreSQL or SQLite, holds
+  no data to lose, so the guard probes nothing there. It follows the plan's renames
+  there only where the shared-table rule would otherwise refuse a removal in the history
+  it judges, to tell whether the plan put storage of its own under the dropped table's
+  name. Only a complete inventory shows that the alias stores nothing: PostgreSQL's
+  catalog across every schema, in which a relation an extension owns, such as PostGIS's
+  `spatial_ref_sys`, does not count, or SQLite's main database with nothing attached; on
+  other backends the guard always probes. `--fake-initial` adoption finds tables, so it
+  is probed. The shared-table rule needs no data and still applies, from names alone:
+  names only a catalog could tell apart are refused. Elsewhere the catalog tells them
+  apart only where it holds both before the plan, since the plan may create a name it
+  lacks.
 - **Scope:** the history the project owns: the build record's `HISTORY_LABELS` and
   every project-source app, one whose migration package no installed distribution
   owns, as the retained-import audit's resolver classifies it. Django's and installed
